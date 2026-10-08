@@ -30,7 +30,6 @@ from textual.widgets import (
     TextArea,
 )
 from textual.widgets import Markdown as TextualMarkdown
-from textual.widgets.markdown import MarkdownStream
 
 from conftest import isolate_home
 from tau_agent import (
@@ -171,6 +170,7 @@ from tau_coding.tui.widgets import (
     SystemPromptSourcesWidget,
     TauMarkdownBlock,
     ThemedMarkdownWidget,
+    TranscriptMarkdownStream,
     TranscriptMessageWidget,
     TranscriptView,
     TranscriptWindowBoundary,
@@ -2803,6 +2803,55 @@ async def test_tui_message_start_does_not_mount_empty_assistant_message() -> Non
 
 
 @pytest.mark.anyio
+async def test_transcript_markdown_stream_coalesces_fragments_between_flushes() -> None:
+    class RecordingMarkdown:
+        def __init__(self) -> None:
+            self.appends: list[str] = []
+
+        async def append(self, markdown: str) -> None:
+            self.appends.append(markdown)
+
+    markdown = RecordingMarkdown()
+    stream = TranscriptMarkdownStream(markdown, interval=60)  # type: ignore[arg-type]
+
+    await stream.write("first ")
+    await asyncio.sleep(0)
+    for word in ("a ", "burst ", "of ", "tokens"):
+        await stream.write(word)
+    await asyncio.sleep(0)
+    # The first fragment shows at once; the rest wait out the interval.
+    assert markdown.appends == ["first "]
+
+    await stream.stop()
+    assert markdown.appends == ["first ", "a burst of tokens"]
+
+
+@pytest.mark.anyio
+async def test_transcript_markdown_stream_stop_lets_an_append_in_flight_finish() -> None:
+    release = asyncio.Event()
+    events: list[tuple[str, str]] = []
+
+    class SlowMarkdown:
+        async def append(self, markdown: str) -> None:
+            events.append(("start", markdown))
+            await release.wait()
+            events.append(("end", markdown))
+
+    stream = TranscriptMarkdownStream(SlowMarkdown(), interval=60)  # type: ignore[arg-type]
+    await stream.write("one ")
+    for _ in range(3):
+        await asyncio.sleep(0)
+    await stream.write("two")
+    stopping = asyncio.create_task(stream.stop())
+    for _ in range(3):
+        await asyncio.sleep(0)
+    release.set()
+    await stopping
+
+    assert events == [("start", "one "), ("end", "one "), ("start", "two"), ("end", "two")]
+
+
+@pytest.mark.anyio
 async def test_tui_streaming_deltas_update_active_message_without_full_refresh() -> None:
     partial = AssistantMessage()
     session = FakeSession(
@@ -2831,7 +2880,7 @@ async def test_tui_streaming_deltas_update_active_message_without_full_refresh()
     full_stream_updates: list[str] = []
     original_replace_text = StreamingTranscriptMessageWidget.replace_text
     original_stream_update = StreamingTranscriptMessageWidget.update
-    original_stream_write = MarkdownStream.write
+    original_stream_write = TranscriptMarkdownStream.write
 
     def tracking_stream_update(
         self: StreamingTranscriptMessageWidget,
@@ -2841,7 +2890,7 @@ async def test_tui_streaming_deltas_update_active_message_without_full_refresh()
             full_stream_updates.append(markdown)
         return original_stream_update(self, markdown)
 
-    async def tracking_stream_write(self: MarkdownStream, fragment: str) -> None:
+    async def tracking_stream_write(self: TranscriptMarkdownStream, fragment: str) -> None:
         stream_writes.append(fragment)
         await original_stream_write(self, fragment)
 
@@ -2854,7 +2903,7 @@ async def test_tui_streaming_deltas_update_active_message_without_full_refresh()
 
     StreamingTranscriptMessageWidget.replace_text = tracking_replace_text  # type: ignore[method-assign]
     StreamingTranscriptMessageWidget.update = tracking_stream_update  # type: ignore[method-assign]
-    MarkdownStream.write = tracking_stream_write  # type: ignore[method-assign]
+    TranscriptMarkdownStream.write = tracking_stream_write  # type: ignore[method-assign]
     full_refreshes = 0
 
     original_refresh = app._refresh
@@ -2877,7 +2926,7 @@ async def test_tui_streaming_deltas_update_active_message_without_full_refresh()
     finally:
         StreamingTranscriptMessageWidget.replace_text = original_replace_text  # type: ignore[method-assign]
         StreamingTranscriptMessageWidget.update = original_stream_update  # type: ignore[method-assign]
-        MarkdownStream.write = original_stream_write  # type: ignore[method-assign]
+        TranscriptMarkdownStream.write = original_stream_write  # type: ignore[method-assign]
 
     assert full_refreshes == 1
     assert stream_writes == ["alpha ", "beta"]
