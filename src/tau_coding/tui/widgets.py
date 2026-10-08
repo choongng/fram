@@ -455,9 +455,11 @@ class ThemedMarkdownWidget(TextualMarkdown):
 # matching how they appear while streaming.
 _BORDERLESS_TRANSCRIPT_ROLES = frozenset({"assistant", "thinking"})
 _HIDDEN_THINKING_PLACEHOLDER = "Thinking… Press Ctrl+T to show thinking tokens."
-TRANSCRIPT_WINDOW_ITEMS = 200
-TRANSCRIPT_WINDOW_PAGE_ITEMS = 80
-TRANSCRIPT_WINDOW_OVERSCAN_ITEMS = 40
+# Mounted transcript items; each streamed append re-lays out all of them.
+# PAGE must stay below WINDOW: paging anchors on an already-mounted item.
+TRANSCRIPT_WINDOW_ITEMS = 80
+TRANSCRIPT_WINDOW_PAGE_ITEMS = 32
+TRANSCRIPT_WINDOW_OVERSCAN_ITEMS = 16
 
 
 class TranscriptWindowBoundary(Static):
