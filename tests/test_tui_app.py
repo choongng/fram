@@ -1,6 +1,8 @@
 import asyncio
+import gc
 import re
 import threading
+import weakref
 from collections.abc import AsyncIterator
 from datetime import datetime
 from io import StringIO
@@ -132,6 +134,7 @@ from tau_coding.tui.app import (
     ToolsReferenceScreen,
     TreePickerScreen,
     _activity_prompt_border_color,
+    _collect_garbage_while_idle,
     _completion_selected_render_line,
     _render_activity_indicator,
     _resource_conflict_alert,
@@ -4678,6 +4681,56 @@ async def test_tui_app_notifies_when_agent_settles_while_unfocused() -> None:
         app.on_app_focus()
         await app._run_prompt("focused again")
         assert writes == ["\x1b]9;Tau turn finished\x07"]
+
+
+def test_collect_garbage_while_idle_frees_cycles_frozen_by_an_earlier_call() -> None:
+    class Node:
+        partner: object = None
+
+    node = Node()
+    node.partner = node
+    ref = weakref.ref(node)
+    try:
+        _collect_garbage_while_idle()
+        assert gc.get_freeze_count() > 0
+        del node
+        _collect_garbage_while_idle()
+        assert ref() is None
+    finally:
+        gc.unfreeze()
+
+
+@pytest.mark.anyio
+async def test_tui_app_collects_garbage_at_startup_and_when_agent_settles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SettledSession(FakeSession):
+        async def prompt(
+            self,
+            text: str,
+            *,
+            streaming_behavior: str | None = None,
+            source: str = "interactive",
+            custom_type: str | None = None,
+            details: dict[str, object] | None = None,
+        ) -> AsyncIterator[CodingSessionEvent]:
+            del streaming_behavior, source, custom_type, details
+            self.prompt_texts.append(text)
+            yield AgentStartEvent()
+            yield AgentEndEvent()
+            yield AgentSettledEvent()
+
+    collections: list[None] = []
+    monkeypatch.setattr(tui_app, "_collect_garbage_while_idle", lambda: collections.append(None))
+    app = TauTuiApp(SettledSession())
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert len(collections) == 1
+
+        await app._run_prompt("hello")
+        await pilot.pause()
+        assert len(collections) == 2
 
 
 @pytest.mark.anyio
