@@ -108,12 +108,18 @@ Runs a shell command in the working directory.
 | Argument | Required | Type | Description |
 | --- | --- | --- | --- |
 | `command` | yes | string | Shell command to run. |
-| `timeout` | no | number | Max runtime in seconds (> 0). No default. |
+| `timeout` | no | number | Max runtime in seconds (> 0). Default `600`. |
 
 Combines stdout and stderr, succeeds on exit code `0`, and returns the **tail**
 of large output (truncated to 2,000 lines / 50 KB; the full output is written to
 a temp `.log` file whose path is included in the result). On POSIX, a timeout
 kills the whole process group.
+
+A call without `timeout` is stopped after 600 seconds, and the result says the
+default was hit so the model can retry with a larger value. Set
+`TAU_BASH_TIMEOUT_SECONDS` to change that default for a session (an empty,
+non-numeric or non-positive value keeps 600). Commands you type yourself with
+`!` have no default timeout.
 
 ## Choosing the right tool
 

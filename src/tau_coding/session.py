@@ -3259,6 +3259,9 @@ class CodingSession:
         bash_tool = create_bash_tool(
             cwd=self.cwd,
             shell_command_prefix=self._config.shell_command_prefix,
+            # The user typed this and can interrupt it; only the model's calls
+            # need a bound to get control back.
+            default_timeout=None,
         )
         result = await bash_tool.execute("terminal-command", {"command": normalized_command})
         exit_code = None
