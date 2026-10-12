@@ -11327,6 +11327,81 @@ async def test_run_tui_app_surfaces_startup_provider_error_in_login_message(
 
 
 @pytest.mark.anyio
+async def test_run_tui_app_alerts_on_a_thinking_level_the_provider_never_sends(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+    record = CodingSessionRecord(
+        id="new-session",
+        path=tmp_path / "new-session.jsonl",
+        cwd=tmp_path,
+        model="qwen",
+        title=None,
+        created_at=1.0,
+        updated_at=1.0,
+        provider_name="local",
+    )
+
+    class FakeProvider:
+        async def aclose(self) -> None:
+            pass
+
+    class FakeManager:
+        def prepare_session(
+            self,
+            *,
+            cwd: Path,
+            model: str,
+            provider_name: str | None = None,
+        ) -> CodingSessionRecord:
+            return record
+
+        def get_session(self, session_id: str) -> CodingSessionRecord | None:
+            return None
+
+    class LoadedSession:
+        resource_diagnostics = ()
+        thinking_config_warning = "local:qwen offers thinking levels, but provider local ..."
+
+    class FakeCodingSession:
+        @classmethod
+        async def load(cls, config: object) -> LoadedSession:
+            return LoadedSession()
+
+    class FakeApp:
+        def __init__(self, session: LoadedSession, **kwargs: object) -> None:
+            captured["startup_alerts"] = kwargs["startup_alerts"]
+
+        async def run_async(self) -> None:
+            pass
+
+    settings = ProviderSettings(
+        default_provider="local",
+        providers=(
+            OpenAICompatibleProviderConfig(
+                name="local",
+                base_url="http://localhost:11434/v1",
+                api_key_env="LOCAL_API_KEY",
+                credential_name=None,
+                models=("qwen",),
+                default_model="qwen",
+            ),
+        ),
+    )
+    monkeypatch.setattr(tui_app, "load_provider_settings", lambda: settings)
+    monkeypatch.setattr(tui_app, "load_tui_settings", lambda: TuiSettings())
+    monkeypatch.setattr(tui_app, "create_model_provider", lambda *args, **kwargs: FakeProvider())
+    monkeypatch.setattr(tui_app, "CodingSession", FakeCodingSession)
+    monkeypatch.setattr(tui_app, "TauTuiApp", FakeApp)
+
+    await tui_app.run_tui_app(cwd=tmp_path, model=None, session_manager=FakeManager())
+
+    assert captured["startup_alerts"] == (
+        "local:qwen offers thinking levels, but provider local ...",
+    )
+
+
+@pytest.mark.anyio
 async def test_run_tui_app_ignores_latest_directory_provider_model_for_new_session(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
