@@ -46,12 +46,12 @@ def test_update_is_refused_with_reinstall_advice(capsys: pytest.CaptureFixture[s
     with pytest.raises(SystemExit) as exit_info:
         main(["update"])
     assert exit_info.value.code == 1
-    assert "uv tool upgrade fram" in capsys.readouterr().err
+    assert "uv tool upgrade fram-agent" in capsys.readouterr().err
 
 
 def _local_index(root: Path) -> Path:
     """Build the fram wheel into a minimal file:// simple index at ``root``."""
-    project = root / "fram"
+    project = root / "fram-agent"
     subprocess.run(
         ["uv", "build", "--wheel", "--project", str(PACKAGING), "--out-dir", str(project)],
         check=True,
@@ -59,13 +59,15 @@ def _local_index(root: Path) -> Path:
     )
     links = "".join(f'<a href="{wheel.name}">{wheel.name}</a>' for wheel in project.glob("*.whl"))
     (project / "index.html").write_text(f"<html><body>{links}</body></html>\n")
-    (root / "index.html").write_text('<html><body><a href="fram/">fram</a></body></html>\n')
+    (root / "index.html").write_text(
+        '<html><body><a href="fram-agent/">fram-agent</a></body></html>\n'
+    )
     return root
 
 
 def test_wheel_installs_a_working_fram_from_a_local_index(tmp_path: Path) -> None:
-    # A real index, not --find-links: PyPI has an unrelated 'fram' 1.0.0, and only
-    # an --index is searched before PyPI (uv's first-index strategy).
+    # A real index, as users will name it: uv takes fram-agent from an --index before
+    # looking on PyPI (uv's first-index strategy).
     index = _local_index(tmp_path / "simple")
     env = {
         **os.environ,
@@ -74,7 +76,7 @@ def test_wheel_installs_a_working_fram_from_a_local_index(tmp_path: Path) -> Non
         "TAU_HOME": str(tmp_path / "tau-home"),
     }
     subprocess.run(
-        ["uv", "tool", "install", "fram", "--index", index.as_uri()],
+        ["uv", "tool", "install", "fram-agent", "--index", index.as_uri()],
         check=True,
         capture_output=True,
         env=env,
@@ -86,7 +88,7 @@ def test_wheel_installs_a_working_fram_from_a_local_index(tmp_path: Path) -> Non
     help_text = subprocess.run([fram, "--help"], capture_output=True, text=True, env=env)
     assert help_text.returncode == 0, help_text.stderr
 
-    python = tmp_path / "tools" / "fram" / "bin" / "python"
+    python = tmp_path / "tools" / "fram-agent" / "bin" / "python"
     probe = (
         "import importlib.metadata as m, fram.cli, tau_coding.version as v;"
         "fram.cli.adopt_fram_identity();"

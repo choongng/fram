@@ -1,4 +1,4 @@
-"""The ``fram`` command: Tau's CLI, run from the ``fram`` distribution.
+"""The ``fram`` command: Tau's CLI, run from the ``fram-agent`` distribution.
 
 Tau's sources are bundled unchanged, so the few places where Tau assumes it was
 installed as ``tau-ai`` are adjusted here, before Tau's CLI is imported:
@@ -7,7 +7,7 @@ installed as ``tau-ai`` are adjusted here, before Tau's CLI is imported:
 - ``update`` is refused: Tau's updater would install ``tau-ai`` from PyPI.
 - The startup update check is off by default, since it compares against
   ``tau-ai`` on PyPI.
-- Tau's version lookup reads the ``fram`` distribution, so the TUI and the
+- Tau's version lookup reads the ``fram-agent`` distribution, so the TUI and the
   release-notes state see Fram's version instead of ``0+unknown``.
 """
 
@@ -20,7 +20,7 @@ from fram import __version__, tau_base_version
 
 _REINSTALL_ADVICE = (
     "fram update is not supported: Tau's updater installs tau-ai from PyPI.\n"
-    "Upgrade with: uv tool upgrade fram  (or reinstall from your Fram index)"
+    "Upgrade with: uv tool upgrade fram-agent  (or reinstall from your Fram index)"
 )
 
 
@@ -46,5 +46,5 @@ def adopt_fram_identity() -> None:
     import tau_coding
     import tau_coding.version
 
-    tau_coding.version._DISTRIBUTION_NAME = "fram"
+    tau_coding.version._DISTRIBUTION_NAME = "fram-agent"
     tau_coding.__version__ = tau_coding.version.current_version()

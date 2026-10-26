@@ -1,4 +1,4 @@
-"""Fram: the Fram fork of Tau, packaged as the ``fram`` distribution.
+"""Fram: the Fram fork of Tau, packaged as the ``fram-agent`` distribution.
 
 The version's first three parts are the upstream Tau release Fram is based on;
 the fourth counts Fram releases on top of it.

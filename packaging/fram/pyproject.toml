@@ -1,6 +1,7 @@
-# The 'fram' distribution: Tau's sources from ../../src plus the small 'fram'
-# entry package. Upstream's pyproject.toml (tau-ai) is left unchanged so that
-# merging Tau releases never conflicts here. See dev-notes/fram-packaging.md.
+# The 'fram-agent' distribution, which installs the 'fram' command: Tau's
+# sources from ../../src plus the small 'fram' entry package. Upstream's
+# pyproject.toml (tau-ai) is left unchanged so that merging Tau releases never
+# conflicts here. See dev-notes/fram-packaging.md.
 #
 # Build wheels only (`uv build --wheel`): the sources are outside this folder,
 # so a wheel rebuilt from an sdist would not find them.
@@ -10,7 +11,7 @@ requires = ["hatchling>=1.26"]
 build-backend = "hatchling.build"
 
 [project]
-name = "fram"
+name = "fram-agent"
 dynamic = ["version"]
 description = "Fram: a fork of the Tau coding-agent harness."
 readme = "README.md"
