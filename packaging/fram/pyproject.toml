@@ -1,0 +1,47 @@
+# The 'fram' distribution: Tau's sources from ../../src plus the small 'fram'
+# entry package. Upstream's pyproject.toml (tau-ai) is left unchanged so that
+# merging Tau releases never conflicts here. See dev-notes/fram-packaging.md.
+#
+# Build wheels only (`uv build --wheel`): the sources are outside this folder,
+# so a wheel rebuilt from an sdist would not find them.
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fram"
+dynamic = ["version"]
+description = "Fram: a fork of the Tau coding-agent harness."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+# Keep in step with ../../pyproject.toml's dependencies.
+dependencies = [
+    "anyio>=4.0",
+    "httpx[socks]>=0.27",
+    "packaging>=24.0",
+    "pillow>=11.0",
+    "pydantic>=2.11",
+    "pygments>=2.18",
+    "rich>=13.0",
+    "textual>=8.2.8",
+    "typer>=0.12",
+]
+
+[project.scripts]
+fram = "fram.cli:main"
+
+[tool.hatch.version]
+path = "src/fram/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fram"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# license-files cannot reach outside this folder, so Tau's LICENSE ships inside
+# the fram package instead.
+"../../LICENSE" = "fram/LICENSE"
+"../../src/tau_ai" = "tau_ai"
+"../../src/tau_agent" = "tau_agent"
+"../../src/tau_coding" = "tau_coding"
