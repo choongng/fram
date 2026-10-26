@@ -4,9 +4,9 @@ One entry per deliberate, lasting difference between Fram and upstream Tau.
 These are not candidates to send upstream. Each entry says what differs,
 where it lives, and what an upstream merge must check.
 
-## 1. The `fram` distribution
+## 1. The `fram-agent` distribution
 
-- **What:** Fram installs as the `fram` distribution and `fram` command,
+- **What:** Fram installs as the `fram-agent` distribution and `fram` command,
   alongside upstream's unchanged `tau-ai` packaging.
 - **Where:** `packaging/fram/` only. No upstream file changes.
 - **Touches Tau at:** `tau_coding.version._DISTRIBUTION_NAME` and

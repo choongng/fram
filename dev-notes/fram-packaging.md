@@ -1,4 +1,4 @@
-# Fram packaging: the `fram` wheel
+# Fram packaging: the `fram-agent` wheel
 
 Fram is packaged as an installable `fram` command from `packaging/fram/`, which
 upstream does not touch, so merging a Tau release does not conflict with it.
@@ -7,7 +7,7 @@ upstream does not touch, so merging a Tau release does not conflict with it.
 
 Everything lives under `packaging/fram/`:
 
-- `pyproject.toml` defines the `fram` distribution. It builds Tau's
+- `pyproject.toml` defines the `fram-agent` distribution. It builds Tau's
   `src/tau_ai`, `src/tau_agent` and `src/tau_coding` from `../../src` with
   hatchling's `force-include`, plus a small `fram` package, and installs a
   `fram` console script.
@@ -33,8 +33,8 @@ problems:
    `fram update --models` still refreshes model catalogs.
 3. The startup update check compares against `tau-ai` on PyPI. `fram` sets
    `TAU_NO_UPDATE_CHECK=1` unless the environment already sets it.
-4. Tau's version lookup (`tau_coding.version._DISTRIBUTION_NAME`) is pointed
-   at `fram`, so the TUI header and the release-notes state show Fram's
+4. Tau's version lookup (`tau_coding.version._DISTRIBUTION_NAME`) is pointed at
+   `fram-agent`, so the TUI header and the release-notes state show Fram's
    version. Because `0.4.8.1` sorts just after `0.4.8`, a Tau install sharing
    the same `~/.tau` sees no spurious release notes.
 
@@ -43,19 +43,22 @@ unchanged. If an upstream merge renames it, the end-to-end test fails.
 
 ## Using the same import names
 
-The wheel ships `tau_ai`, `tau_agent` and `tau_coding` under their usual
-names, so Tau extensions keep working. As a result, `fram` and `tau-ai`
-cannot share one Python environment. Install `fram` as a tool:
+The wheel ships `tau_ai`, `tau_agent` and `tau_coding` under their usual names,
+so Tau extensions keep working. As a result, `fram` and `tau-ai` cannot share
+one Python environment. Install `fram-agent` as a tool:
 
 ```bash
-uv tool install fram --index <fram-index-url>
+uv tool install fram-agent --index <fram-index-url>
 ```
 
 `fram` shares Tau's configuration and sessions (`~/.tau` or `TAU_HOME`).
 
-**Name clash on PyPI.** Public PyPI has an unrelated `fram` (1.0.0, a
-biology model). Always name the Fram index with `--index`: uv searches it
-before PyPI. With `--find-links`, uv chose the PyPI package instead.
+**Why `fram-agent`, not `fram`.** Public PyPI already has an unrelated
+`fram` (1.0.0, a biology model), and in testing uv picked it over a local
+`--find-links` wheel. The distribution is `fram-agent`; the command and
+import package are still `fram`. Name the
+Fram index with `--index` anyway: uv searches it before PyPI, so a later
+`fram-agent` upload by someone else could not take its place.
 
 ## Wheels only
 
@@ -88,7 +91,7 @@ uv run pytest packaging/fram/tests
 
 The root test suite does not collect these tests, because its `testpaths` is
 `tests/`. The end-to-end test builds the wheel into a small `file://` simple
-index, runs `uv tool install fram --index ...` into a temporary tool
+index, runs `uv tool install fram-agent --index ...` into a temporary tool
 directory, then checks four things:
 
 - `fram --version` and `fram --help` work.
