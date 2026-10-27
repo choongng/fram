@@ -10457,6 +10457,78 @@ async def test_tui_app_hidden_thinking_status_line_does_not_accumulate_across_tu
         assert [line.text for line in transcript.lines] == ["answer one", "answer two"]
 
 
+def _thinking_message_events(thinking: str, calls: tuple[ToolCall, ...] = ()) -> list[AgentEvent]:
+    partial = AssistantMessage()
+    events: list[AgentEvent] = [
+        MessageStartEvent(message=partial),
+        MessageUpdateEvent(
+            message=partial,
+            assistant_message_event=ThinkingDeltaEvent(
+                content_index=0, delta=thinking, partial=partial
+            ),
+        ),
+        MessageEndEvent(
+            message=AssistantMessage(content=[ThinkingContent(thinking=thinking), *calls])
+        ),
+    ]
+    for call in calls:
+        events.append(
+            ToolExecutionStartEvent(tool_call_id=call.id, tool_name=call.name, args=call.arguments)
+        )
+        events.append(
+            ToolExecutionEndEvent(
+                tool_call_id=call.id,
+                tool_name=call.name,
+                result=AgentToolResult(content="ok"),
+                is_error=False,
+            )
+        )
+    return events
+
+
+@pytest.mark.anyio
+async def test_hidden_thinking_line_is_not_stranded_by_a_thinking_only_message() -> None:
+    """A thinking-only message's line, reused by the next message, still goes."""
+    app = TauTuiApp(FakeSession())
+
+    async def stream(event: AgentEvent) -> None:
+        app.adapter.apply(event)
+        await app._apply_streaming_transcript_event(event)
+
+    def hidden_line_positions() -> list[int]:
+        rows = [
+            child
+            for child in app.query_one("#transcript", TranscriptView).children
+            if isinstance(child, TranscriptMessageWidget | StreamingTranscriptMessageWidget)
+        ]
+        return [
+            index
+            for index, row in enumerate(rows)
+            if row.item.text == "Thinking… Press Ctrl+T to show thinking tokens."
+        ]
+
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        await stream(AgentStartEvent())
+        for index in range(3):
+            # A message that ends on its thinking leaves the line at the tail;
+            # the next message's thinking reuses it rather than adding one.
+            for event in _thinking_message_events(f"musing {index}"):
+                await stream(event)
+            call = ToolCall(
+                id=f"call-{index}",
+                name="bash",
+                arguments={"command": "ls", "description": f"Step {index}"},
+            )
+            for event in _thinking_message_events(f"plan {index}", (call,)):
+                await stream(event)
+                await pilot.pause()
+                # At most one line, and only ever as the last row.
+                positions = hidden_line_positions()
+                assert len(positions) <= 1
+            assert hidden_line_positions() == []
+
+
 @pytest.mark.anyio
 async def test_tui_app_restored_thinking_toggles_in_persisted_order() -> None:
     app = TauTuiApp(
