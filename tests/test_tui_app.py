@@ -2583,6 +2583,57 @@ async def test_long_transcript_mounts_bounded_latest_window_and_pages_earlier(
 
 
 @pytest.mark.anyio
+async def test_message_end_while_paged_back_keeps_later_items_reachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A thinking message that finished while the reader had paged back used
+    # to mount under the old window and mark it latest, so the items between
+    # sat behind a later-messages boundary that scrolling could never page in.
+    from tau_coding.tui import widgets as tui_widgets
+
+    monkeypatch.setattr(tui_widgets, "TRANSCRIPT_WINDOW_ITEMS", 6)
+    monkeypatch.setattr(tui_widgets, "TRANSCRIPT_WINDOW_PAGE_ITEMS", 2)
+    app = TauTuiApp(
+        FakeSession(
+            messages=[
+                UserMessage(content=f"message {index}\n" + "line\n" * 4) for index in range(12)
+            ]
+        )
+    )
+
+    async with app.run_test(size=(40, 30)) as pilot:
+        await pilot.pause()
+        transcript = app.query_one("#transcript", TranscriptView)
+        transcript.scroll_to(y=0, animate=False, immediate=True)
+        await pilot.pause()
+        assert transcript._window_end == 10
+
+        canonical = [
+            ChatItem(role="thinking", text="pondering"),
+            ChatItem(role="assistant", text="answer"),
+        ]
+        app.state.items.extend(canonical)
+        await transcript.finish_structured_assistant_message(canonical, show_thinking=False)
+        await pilot.pause()
+        assert transcript._window_end == 10
+
+        for _ in range(60):
+            transcript.post_message(
+                events.MouseScrollDown(transcript, 0, 0, 0, 0, 0, False, False, False)
+            )
+            await pilot.pause()
+            if transcript._window_end == 14 and transcript.is_vertical_scroll_end:
+                break
+        assert transcript._window_end == 14
+        texts = [widget.item.text.split("\n")[0] for widget in app.query(TranscriptMessageWidget)]
+        assert {"message 10", "message 11"} <= set(texts)
+        assert texts[-1] == "answer"
+        assert {boundary.direction for boundary in app.query(TranscriptWindowBoundary)} == {
+            "earlier"
+        }
+
+
+@pytest.mark.anyio
 async def test_long_transcript_incremental_appends_keep_mounted_window_bounded() -> None:
     initial_count = TRANSCRIPT_WINDOW_ITEMS + TRANSCRIPT_WINDOW_OVERSCAN_ITEMS
     app = TauTuiApp(
