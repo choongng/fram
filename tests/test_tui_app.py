@@ -10396,13 +10396,13 @@ async def test_tui_app_hidden_thinking_placeholder_gives_way_to_the_streamed_ans
     session = FakeSession(
         events=[
             AgentStartEvent(),
+            MessageStartEvent(message=partial),
             MessageUpdateEvent(
                 message=partial,
                 assistant_message_event=ThinkingDeltaEvent(
                     content_index=0, delta="private plan", partial=partial
                 ),
             ),
-            MessageStartEvent(message=partial),
             MessageUpdateEvent(
                 message=partial,
                 assistant_message_event=TextDeltaEvent(

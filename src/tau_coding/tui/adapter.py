@@ -66,7 +66,13 @@ class TuiEventAdapter:
             if isinstance(nested, TextDeltaEvent):
                 self.state.assistant_buffer += nested.delta
             elif isinstance(nested, ThinkingDeltaEvent):
-                self.state.add_thinking_delta(nested.delta)
+                if len(self.state.items) == self._assistant_start_item_index:
+                    # A thinking row that ends the transcript here belongs to
+                    # the previous message; this message's thinking starts its
+                    # own row, inside the range MessageEnd replaces.
+                    self.state.add_item("thinking", nested.delta)
+                else:
+                    self.state.add_thinking_delta(nested.delta)
             return
         if isinstance(event, MessageEndEvent):
             message = event.message
