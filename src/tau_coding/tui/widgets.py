@@ -1184,15 +1184,26 @@ class TranscriptView(VerticalScroll):
         ]
         if thinking_children:
             self.remove_children(thinking_children)
+            self._active_message_widgets = [
+                widget for widget in self._active_message_widgets if widget not in thinking_children
+            ]
         for item_id, widget in tuple(self._item_widgets.items()):
             if widget in thinking_children:
                 del self._item_widgets[item_id]
 
+        self._active_thinking_widget = None
         non_thinking_index = 0
-        pending: list[tuple[ChatItem, TranscriptMessageWidget]] = []
+        pending: list[
+            tuple[ChatItem, TranscriptMessageWidget | StreamingTranscriptMessageWidget]
+        ] = []
         # Only thinking that is still the tail of the transcript is worth a
         # status line; see `_drop_hidden_thinking_placeholder`.
         last_item = state.items[-1] if state.items else None
+        # Provisional thinking (from `streaming_from` on) is replaced at
+        # MessageEnd, so shown it must be a streaming widget the stream owns;
+        # the open block takes the next deltas.
+        streaming_from = state.streaming_from
+        window_start = self._window_start
 
         def flush(before: Widget | None) -> None:
             nonlocal pending
@@ -1204,9 +1215,18 @@ class TranscriptView(VerticalScroll):
                 self._item_widgets[id(item)] = widget
             pending = []
 
-        for item in window_items:
+        for offset, item in enumerate(window_items):
             if item.role == "thinking":
-                if state.show_thinking:
+                provisional = streaming_from is not None and window_start + offset >= streaming_from
+                if state.show_thinking and provisional:
+                    live = StreamingTranscriptMessageWidget(
+                        ChatItem(role="thinking", text=item.text), theme=theme
+                    )
+                    pending.append((item, live))
+                    self._active_message_widgets.append(live)
+                    if item is last_item:
+                        self._active_thinking_widget = live
+                elif state.show_thinking:
                     pending.append(
                         (
                             item,
@@ -1232,8 +1252,9 @@ class TranscriptView(VerticalScroll):
             if target is not None:
                 flush(target)
 
-        flush(self._bottom_boundary)
-        self._active_thinking_widget = None
+        # The streaming answer is not an item yet; its thinking goes above it,
+        # where `append_thinking_delta` puts it.
+        flush(self._active_assistant_widget or self._bottom_boundary)
         self.refresh(layout=True)
         if should_follow:
             self._request_follow_scroll()
