@@ -977,6 +977,7 @@ class TranscriptView(VerticalScroll):
         self._active_thinking_widget: StreamingTranscriptMessageWidget | None = None
         self._active_message_widgets: list[Widget] = []
         self._hidden_thinking_placeholder_visible = False
+        self._hidden_thinking_widget: TranscriptMessageWidget | None = None
         self._follow_output = True
         self._follow_scroll_pending = False
         self._window_start = 0
@@ -1101,6 +1102,29 @@ class TranscriptView(VerticalScroll):
         await widget.finalize()
         self._active_thinking_widget = None
 
+    def _drop_hidden_thinking_placeholder(self) -> None:
+        """Take back the hidden-thinking status line once thinking is over.
+
+        The line is the status of thinking happening now, not a record that
+        thinking happened: as soon as an answer, a tool call or a settled turn
+        follows it, it goes, so a turn does not leave another copy of the same
+        sentence in the scrollback. The thinking item itself stays in state,
+        so Ctrl+T still reveals what was suppressed.
+        """
+        widget = self._hidden_thinking_widget
+        self._hidden_thinking_widget = None
+        self._hidden_thinking_placeholder_visible = False
+        if widget is None:
+            return
+        self._active_message_widgets = [
+            candidate for candidate in self._active_message_widgets if candidate is not widget
+        ]
+        for item_id, mapped in tuple(self._item_widgets.items()):
+            if mapped is widget:
+                del self._item_widgets[item_id]
+        if widget.is_mounted:
+            widget.remove()
+
     async def _finalize_active_assistant_message(self) -> None:
         """Stop streaming for a completed assistant block before another block starts."""
         widget = self._active_assistant_widget
@@ -1161,6 +1185,12 @@ class TranscriptView(VerticalScroll):
         non_thinking_index = 0
         pending: list[tuple[ChatItem, TranscriptMessageWidget]] = []
         hidden_run = False
+        # The thinking rows were just removed, so whatever line we were holding
+        # is gone with them.
+        self._hidden_thinking_widget = None
+        # Only thinking that is still the tail of the transcript is worth a
+        # status line; see `_drop_hidden_thinking_placeholder`.
+        last_item = state.items[-1] if state.items else None
 
         def flush(before: Widget | None) -> None:
             nonlocal pending
@@ -1185,16 +1215,20 @@ class TranscriptView(VerticalScroll):
                             ),
                         )
                     )
-                elif not hidden_run:
+                elif hidden_run:
+                    # Another block in a hidden run already mounted: it shares
+                    # the one line rather than adding a second.
+                    self._item_widgets[id(item)] = pending[-1][1]
+                elif item is last_item:
                     placeholder = TranscriptMessageWidget(
                         ChatItem(role="thinking", text=_HIDDEN_THINKING_PLACEHOLDER),
                         theme=theme,
                         show_tool_results=state.show_tool_results,
                     )
                     pending.append((item, placeholder))
+                    self._hidden_thinking_widget = placeholder
                     hidden_run = True
-                else:
-                    self._item_widgets[id(item)] = pending[-1][1]
+                # Hidden thinking with anything after it renders no line.
                 continue
 
             hidden_run = False
@@ -1252,6 +1286,7 @@ class TranscriptView(VerticalScroll):
         self._active_thinking_widget = None
         self._active_message_widgets = []
         self._hidden_thinking_placeholder_visible = False
+        self._hidden_thinking_widget = None
         self._item_widgets.clear()
         self._top_boundary = None
         self._bottom_boundary = None
@@ -1262,8 +1297,13 @@ class TranscriptView(VerticalScroll):
             widgets.append(self._top_boundary)
 
         hidden_thinking_widget: TranscriptMessageWidget | None = None
+        last_item = state.items[-1] if state.items else None
         for item in state.items[self._window_start : self._window_end]:
             if item.role == "thinking" and not state.show_thinking:
+                if item is not last_item:
+                    # Hidden thinking that anything has followed leaves no line;
+                    # the status line belongs to thinking that is still going.
+                    continue
                 if hidden_thinking_widget is None:
                     hidden_thinking_widget = TranscriptMessageWidget(
                         ChatItem(role="thinking", text=_HIDDEN_THINKING_PLACEHOLDER),
@@ -1303,6 +1343,7 @@ class TranscriptView(VerticalScroll):
 
         if widgets:
             self.mount(*widgets)
+        self._hidden_thinking_widget = hidden_thinking_widget
         self._hidden_thinking_placeholder_visible = (
             hidden_thinking_widget is not None and self._window_end == total
         )
@@ -1363,7 +1404,7 @@ class TranscriptView(VerticalScroll):
         self._active_assistant_widget = None
         self._active_thinking_widget = None
         self._active_message_widgets = []
-        self._hidden_thinking_placeholder_visible = False
+        self._drop_hidden_thinking_placeholder()
 
         if (
             state is not None
@@ -1475,6 +1516,10 @@ class TranscriptView(VerticalScroll):
         if not self._window_is_latest:
             return
         should_follow = self._should_follow_output if not scroll_end else True
+        # Text has started, so whatever the model was thinking is over and its
+        # status line is taken back. An already-streaming assistant widget
+        # means the thinking ended with the first delta, so this is a no-op.
+        self._drop_hidden_thinking_placeholder()
         widget = await self.start_assistant_message(
             theme=theme, scroll_end=scroll_end, preserve_thinking=True
         )
@@ -1516,12 +1561,13 @@ class TranscriptView(VerticalScroll):
             await self.mount(widget, before=self._active_assistant_widget or self._bottom_boundary)
             self._active_message_widgets.append(widget)
             self._active_thinking_widget = None
+            self._hidden_thinking_widget = widget
             self._hidden_thinking_placeholder_visible = True
             self.refresh(layout=True)
             if should_follow:
                 self._request_follow_scroll(force=scroll_end)
             return
-        self._hidden_thinking_placeholder_visible = False
+        self._drop_hidden_thinking_placeholder()
         if self._active_thinking_widget is None:
             self._active_thinking_widget = StreamingTranscriptMessageWidget(
                 ChatItem(role="thinking", text=""),
@@ -1568,7 +1614,7 @@ class TranscriptView(VerticalScroll):
         self._active_message_widgets = [
             candidate for candidate in self._active_message_widgets if candidate is not widget
         ]
-        self._hidden_thinking_placeholder_visible = False
+        self._drop_hidden_thinking_placeholder()
 
     async def finish_structured_assistant_message(
         self,
@@ -1593,14 +1639,18 @@ class TranscriptView(VerticalScroll):
         self._active_assistant_widget = None
         self._active_thinking_widget = None
         self._hidden_thinking_placeholder_visible = False
+        self._hidden_thinking_widget = None
         for item_id, widget in tuple(self._item_widgets.items()):
             if widget.parent is None:
                 del self._item_widgets[item_id]
 
         hidden_widget: TranscriptMessageWidget | None = None
         mounted: list[Widget] = []
+        last_item = items[-1] if items else None
         for item in items:
             if item.role == "thinking" and not show_thinking:
+                if item is not last_item:
+                    continue
                 if hidden_widget is None:
                     hidden_widget = TranscriptMessageWidget(
                         ChatItem(role="thinking", text=_HIDDEN_THINKING_PLACEHOLDER),
@@ -1620,6 +1670,7 @@ class TranscriptView(VerticalScroll):
             mounted.append(widget)
         if mounted:
             await self.mount(*mounted, before=self._bottom_boundary)
+        self._hidden_thinking_widget = hidden_widget
         self._hidden_thinking_placeholder_visible = hidden_widget is not None
 
         if (

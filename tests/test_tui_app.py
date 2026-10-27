@@ -10358,12 +10358,11 @@ async def test_tui_app_toggles_thinking_tokens_from_keybinding_while_running() -
     async with app.run_test() as pilot:
         app.state.running = True
         app.state.add_thinking_delta("internal plan")
-        app.state.add_item("assistant", "final answer")
         app._refresh()
         await pilot.pause()
 
+        # While thinking is what is happening, its status line is there.
         assert app.state.show_thinking is False
-        assert "final answer" in transcript_text()
         assert "Thinking… Press Ctrl+T to show thinking tokens." in transcript_text()
         assert "internal plan" not in transcript_text()
 
@@ -10380,11 +10379,19 @@ async def test_tui_app_toggles_thinking_tokens_from_keybinding_while_running() -
         assert "Thinking… Press Ctrl+T to show thinking tokens." in transcript_text()
         assert "internal plan" not in transcript_text()
 
+        # Once something follows the thinking, the line is taken back: it is a
+        # status, not a record that thinking happened.
+        app.state.add_item("assistant", "final answer")
+        app._refresh()
+        await pilot.pause()
+        assert "final answer" in transcript_text()
+        assert "Thinking… Press Ctrl+T to show thinking tokens." not in transcript_text()
+
     assert notifications == []
 
 
 @pytest.mark.anyio
-async def test_tui_app_hidden_thinking_placeholder_stays_before_streamed_answer() -> None:
+async def test_tui_app_hidden_thinking_placeholder_gives_way_to_the_streamed_answer() -> None:
     partial = AssistantMessage()
     session = FakeSession(
         events=[
@@ -10412,11 +10419,42 @@ async def test_tui_app_hidden_thinking_placeholder_stays_before_streamed_answer(
         await app._run_prompt("stream")
         await pilot.pause()
 
+        # The line was there while the model thought; by the time the answer
+        # has streamed and settled it is gone, so a run of turns accumulates
+        # answers rather than one status line per turn.
         transcript = app.query_one("#transcript", TranscriptView)
-        assert [line.text for line in transcript.lines] == [
-            "Thinking… Press Ctrl+T to show thinking tokens.",
-            "public answer",
-        ]
+        assert [line.text for line in transcript.lines] == ["public answer"]
+
+
+@pytest.mark.anyio
+async def test_tui_app_hidden_thinking_status_line_does_not_accumulate_across_turns() -> None:
+    """Successive hidden-thinking runs share one line and take it back."""
+    app = TauTuiApp(FakeSession())
+
+    async with app.run_test() as pilot:
+        app.state.running = True
+        transcript = app.query_one("#transcript", TranscriptView)
+
+        def hidden_lines() -> list[str]:
+            return [
+                line.text
+                for line in transcript.lines
+                if line.text == "Thinking… Press Ctrl+T to show thinking tokens."
+            ]
+
+        for turn in ("one", "two"):
+            app.state.add_thinking_delta(f"plan {turn}")
+            app._refresh()
+            await pilot.pause()
+            # The status shows while thinking is happening, in one place.
+            assert len(hidden_lines()) == 1
+            app.state.add_item("assistant", f"answer {turn}")
+            app._refresh()
+            await pilot.pause()
+            # ...and once the answer is there it is gone again.
+            assert hidden_lines() == []
+
+        assert [line.text for line in transcript.lines] == ["answer one", "answer two"]
 
 
 @pytest.mark.anyio
@@ -10440,11 +10478,12 @@ async def test_tui_app_restored_thinking_toggles_in_persisted_order() -> None:
     async with app.run_test() as pilot:
         await pilot.pause()
         transcript = app.query_one("#transcript", TranscriptView)
+        # Hidden thinking that a later answer followed leaves no line: the
+        # status belongs to thinking that is still going. Ctrl+T below still
+        # reveals the plans, because the items are in state either way.
         assert [line.text for line in transcript.lines] == [
             "prompt",
-            "Thinking… Press Ctrl+T to show thinking tokens.",
             "first answer",
-            "Thinking… Press Ctrl+T to show thinking tokens.",
             "second answer",
         ]
 
@@ -10462,9 +10501,7 @@ async def test_tui_app_restored_thinking_toggles_in_persisted_order() -> None:
         await pilot.pause()
         assert [line.text for line in transcript.lines] == [
             "prompt",
-            "Thinking… Press Ctrl+T to show thinking tokens.",
             "first answer",
-            "Thinking… Press Ctrl+T to show thinking tokens.",
             "second answer",
         ]
 
@@ -10502,10 +10539,8 @@ async def test_tui_app_thinking_toggle_preserves_unrelated_items() -> None:
         await pilot.pause()
         assert [line.text for line in transcript.lines] == [
             "first prompt",
-            "Thinking… Press Ctrl+T to show thinking tokens.",
             "first answer",
             "second prompt",
-            "Thinking… Press Ctrl+T to show thinking tokens.",
             "second answer",
             "late status",
         ]
