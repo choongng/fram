@@ -77,6 +77,10 @@ call that lacks a required key is refused and the tool never runs. A key the
 tool can do without, or that it handles itself when it is missing, should
 therefore not be listed as required.
 
+Bash's `description` was such a key: it only labels the call in the UI, and
+the tool already ran without it. Some models (Gemma 4 among them) leave it out,
+so it is now optional rather than costing those models a refused turn.
+
 ## Why
 
 Before this, Tau passed `parameters` to the provider and never looked at it
