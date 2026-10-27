@@ -1579,6 +1579,13 @@ class TranscriptView(VerticalScroll):
     ) -> None:
         """Replace only the provisional assistant tail with canonical ordered blocks."""
         should_follow = self._should_follow_output
+        # The canonical items are already in state. Claim them for the window
+        # before the first await: a scroll seeing the window end short of the
+        # state would page it forward, redraw these items, and then this method
+        # would mount them a second time.
+        state = self._render_state
+        if state is not None:
+            self._window_end = len(state.items)
         for widget in tuple(self._active_message_widgets):
             if widget.parent is self:
                 await widget.remove()
@@ -1590,9 +1597,6 @@ class TranscriptView(VerticalScroll):
             if widget.parent is None:
                 del self._item_widgets[item_id]
 
-        state = self._render_state
-        if state is not None:
-            self._window_end = len(state.items)
         hidden_widget: TranscriptMessageWidget | None = None
         mounted: list[Widget] = []
         for item in items:
