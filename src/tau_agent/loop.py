@@ -39,6 +39,7 @@ from tau_agent.provider_events import (
     ToolCallEndEvent,
     ToolCallStartEvent,
 )
+from tau_agent.tool_arguments import argument_problems, invalid_arguments_message
 from tau_agent.tool_history import repair_tool_history
 from tau_agent.tools import AgentTool, AgentToolResult
 
@@ -331,6 +332,9 @@ async def _execute_tool_call(
         if tool is None:
             result = _error_result(f"Tool {call.name} not found")
             is_error = True
+        elif problems := _argument_problems(tool, call):
+            result = _error_result(invalid_arguments_message(call.name, problems))
+            is_error = True
         else:
             result, is_error, updates = await _run_tool(tool, call, signal)
             for update in updates:
@@ -360,6 +364,18 @@ async def _execute_tool_call(
     )
     yield MessageStartEvent(message=message)
     yield MessageEndEvent(message=message)
+
+
+def _argument_problems(tool: AgentTool, call: ToolCall) -> list[str]:
+    """What is wrong with `call`'s arguments against `tool`'s schema.
+
+    Arguments that did not parse as JSON arrive as `_raw_arguments` alone; the
+    tool answers those itself, so they are not checked against the schema,
+    where every required argument would look missing.
+    """
+    if set(call.arguments) == {"_raw_arguments"}:
+        return []
+    return argument_problems(tool.parameters, call.arguments)
 
 
 async def _run_tool(

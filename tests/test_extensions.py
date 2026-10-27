@@ -2520,7 +2520,14 @@ async def test_extension_tool_call_block_reaches_model(tmp_path: Path) -> None:
                 assistant_done(
                     message=AssistantMessage(
                         content=assistant_content(
-                            "", [ToolCall(id="call-1", name="bash", arguments={"command": "ls"})]
+                            "",
+                            [
+                                ToolCall(
+                                    id="call-1",
+                                    name="bash",
+                                    arguments={"command": "ls", "description": "list files"},
+                                )
+                            ],
                         )
                     )
                 ),
