@@ -14,6 +14,7 @@ it lives, and what an upstream merge must check.
   `tau_coding.__version__`, both set at startup by `fram.cli`. It also sets
   the `TAU_NO_UPDATE_CHECK` variable, and intercepts the `--version` and
   `update` arguments before Tau's CLI sees them.
-- **On each Tau release merge:** bump `packaging/fram/src/fram/__init__.py`
-  and copy dependency changes. Then run `uv run pytest packaging/fram/tests`.
+- **On each upstream merge:** if Tau's version changed, bump
+  `packaging/fram/src/fram/__init__.py`. Copy dependency changes, then run
+  `uv run pytest packaging/fram/tests`.
 - **Details:** `dev-notes/fram-packaging.md`.

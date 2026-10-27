@@ -1,14 +1,14 @@
 # Fram branch structure
 
 Agreed with the owner on 2026-10-26. Fram is a fork of huggingface/tau. This
-note says which branch holds what, how upstream releases come in, and how
-our own changes go back out.
+note says which branch holds what, how upstream changes come in, and how our
+own changes go back out.
 
 ```text
 upstream/main  (huggingface/tau, read-only)
-  │  merge each release tag, never rebase (main is public)
+  │  merge upstream/main, never rebase (main is public)
   ▼
-main           (published) = latest upstream release + curated Fram commits
+main           (published) = upstream main + curated Fram commits
   │  merge main into the development branch after each upstream merge
   ▼
 development    (private) raw work; topics get rebuilt cleanly onto main
@@ -20,7 +20,7 @@ upstream/<topic>  cut from upstream/main, rebase freely, send as PRs
 
 - **`upstream/main`** is huggingface/tau's `main`, fetched from the
   `upstream` remote. Its push URL is disabled. Nobody commits to it.
-- **`main`** is Fram as a product: the latest upstream release we have taken,
+- **`main`** is Fram as a product: upstream's `main` as of our last merge,
   plus Fram commits curated by hand into clean, topical form. The owner
   publishes it to the GitHub mirror when they choose.
 - **The development branch** holds raw work and unreviewed history. It is
@@ -31,12 +31,21 @@ upstream/<topic>  cut from upstream/main, rebase freely, send as PRs
 
 ## Flows
 
-**Taking an upstream release.** Merge the release tag into `main` with a
-merge commit. Do not rebase, because `main` is published and a rebase would
-rewrite history that mirror users may have pulled. Then merge `main` into
-the development branch. Before `main` had any Fram commits, release v0.4.8
-was merged straight into the development branch. From now on a release
-goes through `main` first.
+**Taking upstream changes.** Fetch `upstream` and merge `upstream/main` into
+`main` with a merge commit. Do not rebase, because `main` is published and a
+rebase would rewrite history that mirror users may have pulled. Then merge
+`main` into the development branch. Merge before curating a topic that
+touches code upstream has changed, so the topic is rebuilt on upstream's
+current code rather than conflicting with it at the next merge. Upstream
+changes always reach the development branch through `main`.
+
+We track `upstream/main` rather than release tags (changed 2026-10-26; the
+first plan merged only tags). Upstream's work lands on `main` well before
+a release, and Fram's TUI fixes overlap it, so waiting for tags meant
+curating against code that was already out of date. The cost is that `main`
+can hold unreleased upstream code. Fram's version still starts with the last
+Tau release (`packaging/fram/src/fram/__init__.py`), so a Fram build between
+releases means "that release plus later upstream commits".
 
 **Curating Fram work.** Rebuild a finished topic from the development branch
 as clean commits on `main`, from the end state rather than by
@@ -45,7 +54,7 @@ branch, so the two branches share history and later merges stay small.
 
 **Sending work upstream.** Cut `upstream/<topic>` from the current
 `upstream/main`. Rebase it freely until it is merged, because it holds only
-that topic's commits. Once upstream accepts it, the next release merge brings
+that topic's commits. Once upstream accepts it, the next upstream merge brings
 the change in, and the Fram-only version can be dropped.
 
 ## Keeping merges cheap
@@ -53,7 +62,7 @@ the change in, and the Fram-only version can be dropped.
 Fram's own additions sit behind seams rather than edits to upstream files
 wherever possible: extensions, and a separate `packaging/fram/pyproject.toml`
 for the wheel instead of changing upstream's `pyproject.toml`. The
-smaller our diff to upstream files, the fewer conflicts each release merge
+smaller our diff to upstream files, the fewer conflicts each upstream merge
 brings.
 
 ## Guards
