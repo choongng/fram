@@ -2923,6 +2923,38 @@ async def test_tui_message_start_does_not_mount_empty_assistant_message() -> Non
         assert list(app.query(StreamingTranscriptMessageWidget)) == []
 
 
+@pytest.mark.parametrize("stop_early", [False, True])
+@pytest.mark.anyio
+async def test_transcript_markdown_stream_appends_nothing_before_ready(stop_early: bool) -> None:
+    ready = asyncio.Event()
+    appended: list[str] = []
+
+    class RecordingMarkdown:
+        async def append(self, markdown: str) -> None:
+            appended.append(markdown)
+
+    stream = TranscriptMarkdownStream(
+        RecordingMarkdown(),  # type: ignore[arg-type]
+        interval=60,
+        ready=ready.wait,
+    )
+    await stream.write("one ")
+    await stream.write("two")
+    stopping = asyncio.create_task(stream.stop()) if stop_early else None
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert appended == []
+
+    ready.set()
+    if stopping is not None:
+        await stopping
+    else:
+        for _ in range(3):
+            await asyncio.sleep(0)
+        await stream.stop()
+    assert "".join(appended) == "one two"
+
+
 @pytest.mark.anyio
 async def test_transcript_markdown_stream_coalesces_fragments_between_flushes() -> None:
     class RecordingMarkdown:

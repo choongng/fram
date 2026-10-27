@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -822,12 +822,22 @@ STREAM_FLUSH_INTERVAL_SECONDS = 0.1
 class TranscriptMarkdownStream:
     """Like Textual's ``MarkdownStream``, but appends at most once per ``interval``.
 
-    The first fragment is appended immediately.
+    The first fragment is appended immediately. Nothing is appended before
+    ``ready`` returns: a widget mounted without awaiting it (Ctrl+T mid-stream)
+    is still drawing its initial text, and ``Markdown.append`` reads its parse
+    position before taking its lock, so appending then would draw it twice.
     """
 
-    def __init__(self, markdown: TextualMarkdown, *, interval: float) -> None:
+    def __init__(
+        self,
+        markdown: TextualMarkdown,
+        *,
+        interval: float,
+        ready: Callable[[], Awaitable[object]] | None = None,
+    ) -> None:
         self._markdown = markdown
         self._interval = interval
+        self._ready = ready
         self._pending: list[str] = []
         self._wake = asyncio.Event()
         self._appending: asyncio.Future[None] | None = None
@@ -849,6 +859,8 @@ class TranscriptMarkdownStream:
         if self._appending is not None:
             await self._appending
         if self._pending:
+            if self._ready is not None and self._appending is None:
+                await self._ready()
             await self._markdown.append(self._take_pending())
 
     def _take_pending(self) -> str:
@@ -857,6 +869,8 @@ class TranscriptMarkdownStream:
         return text
 
     async def _run(self) -> None:
+        if self._ready is not None:
+            await self._ready()
         while True:
             await self._wake.wait()
             self._wake.clear()
@@ -910,7 +924,13 @@ class StreamingTranscriptMessageWidget(ThemedMarkdownWidget):
     @property
     def stream(self) -> TranscriptMarkdownStream:
         if self._stream is None:
-            self._stream = TranscriptMarkdownStream(self, interval=STREAM_FLUSH_INTERVAL_SECONDS)
+            # Textual sets the mounted event once Markdown has drawn the
+            # initial text; AwaitMount waits on it the same way.
+            self._stream = TranscriptMarkdownStream(
+                self,
+                interval=STREAM_FLUSH_INTERVAL_SECONDS,
+                ready=self._mounted_event.wait,
+            )
         return self._stream
 
     async def append_fragment(self, fragment: str) -> None:

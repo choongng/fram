@@ -6,6 +6,7 @@ while the last one is still streaming.
 """
 
 import pytest
+from textual.widgets._markdown import MarkdownBlock
 
 from tau_agent import (
     AgentEndEvent,
@@ -158,6 +159,15 @@ def _visible_thinking(app: TauTuiApp) -> list[str]:
         row.selection_text.strip()
         for row in _rows(app)
         if row.item.role == "thinking" and row.selection_text.strip() != HIDDEN_LINE
+    ]
+
+
+def _rendered_thinking(app: TauTuiApp) -> list[list[str]]:
+    """The Markdown blocks each thinking row draws, which can differ from its text."""
+    return [
+        [str(block.content) for block in row.query_children(MarkdownBlock)]
+        for row in _rows(app)
+        if row.item.role == "thinking"
     ]
 
 
@@ -342,3 +352,37 @@ async def test_thinking_toggle_all_in_a_paged_window(start_shown: bool) -> None:
         for _ in range(2):
             await _toggle(pilot)
             assert _visible_thinking(app) == (window_plans() if app.state.show_thinking else [])
+
+
+@pytest.mark.anyio
+async def test_thinking_toggle_off_and_on_mid_stream_draws_each_paragraph_once() -> None:
+    """The row a toggle mounts mid-stream starts with the text so far. The next
+    delta must not reach Markdown before that text is drawn, or it is drawn
+    twice: Markdown.append reads its parse position before taking its lock."""
+    app = TauTuiApp(FakeSession())
+    stream = _streamer(app)
+
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        await _toggle(pilot)
+        partial = AssistantMessage()
+        for event in [
+            MessageEndEvent(message=UserMessage(content="prompt")),
+            AgentStartEvent(),
+            MessageStartEvent(message=partial),
+            _thinking_delta(partial, "one.\n\n"),
+            _thinking_delta(partial, "two.\n\n"),
+            _thinking_delta(partial, "three"),
+        ]:
+            await stream(event)
+            await pilot.pause()
+
+        # Straight to the actions: a key press would wait for the mount, and
+        # a real delta lands sooner.
+        app.action_toggle_thinking()
+        app.action_toggle_thinking()
+        await stream(_thinking_delta(partial, " more\n\nfour"))
+        for _ in range(3):
+            await pilot.pause()
+
+        assert _rendered_thinking(app) == [["one.", "two.", "three more", "four"]]
