@@ -5,6 +5,8 @@ block's visibility off the mounted rows: after the turns have settled, and
 while the last one is still streaming.
 """
 
+import asyncio
+
 import pytest
 from textual.widgets._markdown import MarkdownBlock
 
@@ -386,3 +388,55 @@ async def test_thinking_toggle_off_and_on_mid_stream_draws_each_paragraph_once()
             await pilot.pause()
 
         assert _rendered_thinking(app) == [["one.", "two.", "three more", "four"]]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("toggles", [1, 2])
+@pytest.mark.parametrize("start_shown", [False, True])
+async def test_thinking_toggle_while_the_first_row_mounts(toggles: int, start_shown: bool) -> None:
+    """A toggle can land while the first delta awaits its row's mount. The
+    toggle rebuilds thinking from state, which already holds that delta, so
+    the delta must neither crash the stream nor reach a second row."""
+    app = TauTuiApp(FakeSession())
+    stream = _streamer(app)
+
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        if start_shown:
+            await _toggle(pilot)
+        partial = AssistantMessage()
+        for event in [
+            MessageEndEvent(message=UserMessage(content="prompt")),
+            AgentStartEvent(),
+            MessageStartEvent(message=partial),
+        ]:
+            await stream(event)
+
+        first = _thinking_delta(partial, "plan ")
+        app.adapter.apply(first)
+        mounting = asyncio.create_task(app._apply_streaming_transcript_event(first))
+        await asyncio.sleep(0)
+        assert not mounting.done()
+        for _ in range(toggles):
+            app.action_toggle_thinking()
+        await mounting
+        await pilot.pause()
+        assert _visible_thinking(app) == (["plan"] if app.state.show_thinking else [])
+        await stream(_thinking_delta(partial, "0"))
+        await pilot.pause()
+        assert _visible_thinking(app) == (["plan 0"] if app.state.show_thinking else [])
+        for event in [
+            MessageEndEvent(
+                message=AssistantMessage(
+                    content=[ThinkingContent(thinking="plan 0"), TextContent(text="answer 0")]
+                )
+            ),
+            AgentEndEvent(),
+        ]:
+            await stream(event)
+            await pilot.pause()
+
+        assert [item.role for item in app.state.items] == ["user", "thinking", "assistant"]
+        assert _visible_thinking(app) == (["plan 0"] if app.state.show_thinking else [])
+        await _toggle(pilot)
+        assert _visible_thinking(app) == (["plan 0"] if app.state.show_thinking else [])

@@ -1561,29 +1561,34 @@ class TranscriptView(VerticalScroll):
                     self._bottom_boundary.update_count(len(state.items) - self._window_end)
                 return
         should_follow = self._should_follow_output if not scroll_end else True
+        # Record each new row before awaiting its mount: a Ctrl+T during the
+        # mount rebuilds thinking from state, and must find the row to replace.
         if not show_thinking:
             if self._hidden_thinking_lines():
                 return
-            widget = _hidden_thinking_line(theme)
-            await self.mount(widget, before=self._active_assistant_widget or self._bottom_boundary)
-            self._active_message_widgets.append(widget)
+            line = _hidden_thinking_line(theme)
+            self._active_message_widgets.append(line)
             self._active_thinking_widget = None
+            await self.mount(line, before=self._active_assistant_widget or self._bottom_boundary)
             self.refresh(layout=True)
             if should_follow:
                 self._request_follow_scroll(force=scroll_end)
             return
         self._drop_hidden_thinking_placeholder()
-        if self._active_thinking_widget is None:
-            self._active_thinking_widget = StreamingTranscriptMessageWidget(
+        widget = self._active_thinking_widget
+        if widget is None:
+            widget = StreamingTranscriptMessageWidget(
                 ChatItem(role="thinking", text=""),
                 theme=theme,
             )
-            await self.mount(
-                self._active_thinking_widget,
-                before=self._active_assistant_widget or self._bottom_boundary,
-            )
-            self._active_message_widgets.append(self._active_thinking_widget)
-        await self._active_thinking_widget.append_fragment(delta)
+            self._active_thinking_widget = widget
+            self._active_message_widgets.append(widget)
+            await self.mount(widget, before=self._active_assistant_widget or self._bottom_boundary)
+            if self._active_thinking_widget is not widget:
+                # A toggle replaced the row while it mounted. Its rebuild came
+                # from state, which already holds this delta.
+                return
+        await widget.append_fragment(delta)
         if should_follow:
             self._request_follow_scroll(force=scroll_end)
 
