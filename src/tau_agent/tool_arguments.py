@@ -1,12 +1,9 @@
 """Check a tool call's arguments against the JSON schema its tool declares.
 
-The loop runs this before a tool executes, so a call that does not fit the
-schema is answered with one error naming every problem rather than reaching
-the tool, which would report at most the first one it trips on. The checker
-covers the subset of JSON Schema tau tools declare: `type`, `required`,
-`properties`, `additionalProperties`, `enum` and `items`. Any other keyword is
-ignored, so a schema that uses one is checked no more strictly than before.
-Arguments are never changed: a call that passes reaches the tool as sent.
+Covers the keywords Tau's tools use: `type`, `required`, `properties`,
+`additionalProperties`, `enum` and `items`. Other keywords are ignored. An
+optional argument sent as null counts as not sent. Arguments are only checked,
+never coerced.
 """
 
 from __future__ import annotations
@@ -60,14 +57,18 @@ def _check_object(
     schema: Mapping[str, object], value: Mapping[str, object], path: str, problems: list[str]
 ) -> None:
     required = schema.get("required")
-    if isinstance(required, list):
-        for key in required:
-            if isinstance(key, str) and key not in value:
-                problems.append(f'missing required "{_join(path, key)}"')
+    required_keys = (
+        [key for key in required if isinstance(key, str)] if isinstance(required, list) else []
+    )
+    for key in required_keys:
+        if key not in value:
+            problems.append(f'missing required "{_join(path, key)}"')
     properties = schema.get("properties")
     declared = properties if isinstance(properties, Mapping) else {}
     extra = schema.get("additionalProperties", True)
     for key, item in value.items():
+        if item is None and key not in required_keys:
+            continue
         if key in declared:
             _check(declared[key], item, _join(path, key), problems)
         elif extra is False:

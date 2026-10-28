@@ -76,6 +76,20 @@ def test_bash_tool_schema_offers_optional_display_description(tmp_path: Path) ->
     assert argument_problems(definition.input_schema, {"command": "ls"}) == []
 
 
+def test_edit_tool_prepares_legacy_arguments_to_fit_its_schema(tmp_path: Path) -> None:
+    definition = create_edit_tool_definition(cwd=tmp_path)
+    prepare = definition.prepare_arguments
+    assert prepare is not None
+
+    for arguments in (
+        {"path": "a.txt", "oldText": "alpha", "newText": "A"},
+        {"path": "a.txt", "edits": '[{"oldText": "alpha", "newText": "A"}]'},
+    ):
+        prepared = prepare(arguments)
+        assert prepared["edits"] == [{"oldText": "alpha", "newText": "A"}]
+        assert argument_problems(definition.input_schema, prepared) == []
+
+
 def test_tool_definitions_expose_pi_style_prompt_metadata(tmp_path: Path) -> None:
     definition = create_edit_tool_definition(cwd=tmp_path)
 
