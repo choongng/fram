@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build the fram wheel and publish it to a private package index.
+# Build the fram wheel and publish it to another package index. PyPI releases
+# go through .github/workflows/fram-publish.yml instead.
 #
 #   FRAM_INDEX_URL=https://... UV_PUBLISH_TOKEN=... packaging/fram/publish.sh
 #
