@@ -803,7 +803,9 @@ def create_bash_tool_definition(
                     ),
                 },
             },
-            "required": ["command", "description"],
+            # Optional: it only labels the call, and the loop refuses a call
+            # missing a required key.
+            "required": ["command"],
         },
         executor=execute,
     )
