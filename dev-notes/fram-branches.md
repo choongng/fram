@@ -68,10 +68,14 @@ brings.
 ## Guards
 
 A local pre-push hook enforces the publishing rules. Pushing `main` to the
-private remote needs `FRAM_MAIN=1`. Pushing to GitHub needs
-`FRAM_PUBLISH=1`, accepts only `refs/heads/main`, and only at the commit
-the private remote's `main` already holds. Agents set neither variable
-unless the owner asks in that conversation.
+private remote needs `FRAM_MAIN=1`. Pushing to GitHub needs `FRAM_PUBLISH=1`
+and accepts two kinds of branch: `main`, only at the commit the private
+remote's `main` already holds, and `upstream/<topic>`, which may be pushed,
+force-pushed or deleted because each one is the head of a PR to
+huggingface/tau. Wherever `main` is pushed, the hook refuses it if its files,
+the lines its new commits add, or their messages name the development branch
+or the private host. Agents set neither variable unless the owner asks in
+that conversation.
 
 ## State on 2026-10-26
 
