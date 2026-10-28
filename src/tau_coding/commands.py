@@ -743,7 +743,11 @@ def _thinking_command(context: CommandContext) -> CommandResult:
 
 def _thinking_status_lines(session: CommandSession) -> list[str]:
     if tuple(session.available_thinking_levels):
-        return [f"Thinking mode: {session.thinking_level}"]
+        lines = [f"Thinking mode: {session.thinking_level}"]
+        warning = getattr(session, "thinking_config_warning", None)
+        if isinstance(warning, str) and warning:
+            lines.append(f"Thinking warning: {warning}")
+        return lines
     lines = ["Thinking mode: unavailable"]
     reason = _thinking_unavailable_reason(session)
     if reason:

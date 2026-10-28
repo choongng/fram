@@ -43,6 +43,7 @@ class FakeSession:
         self.thinking_level = "medium"
         self.available_thinking_levels = ("off", "minimal", "low", "medium", "high", "xhigh")
         self.thinking_unavailable_reason: str | None = None
+        self.thinking_config_warning: str | None = None
         self.tui_theme = "tau-dark"
         self.resource_diagnostics = ()
         self.system_prompt = "You are Tau.\nFollow project instructions."
@@ -323,6 +324,17 @@ def test_session_command_explains_unavailable_thinking_controls(tmp_path: Path) 
     assert "Thinking mode: unavailable" in result.message
     assert "Thinking unavailable: Provider local does not declare thinking_levels" in result.message
     assert "Thinking mode: medium" not in result.message
+
+
+def test_session_command_reports_a_level_the_provider_never_sends(tmp_path: Path) -> None:
+    session = FakeSession(tmp_path)
+    session.thinking_config_warning = "local:qwen offers thinking levels, but ..."
+
+    result = create_default_command_registry().execute(session, "/session")
+
+    assert result.message is not None
+    assert "Thinking mode: medium" in result.message
+    assert "Thinking warning: local:qwen offers thinking levels, but ..." in result.message
 
 
 def test_hotkeys_command_lists_common_tui_shortcuts(tmp_path: Path) -> None:

@@ -1843,6 +1843,50 @@ async def test_session_uses_active_model_thinking_capabilities(
 
 
 @pytest.mark.anyio
+async def test_session_warns_when_the_active_model_level_is_never_sent(tmp_path: Path) -> None:
+    def provider(**thinking: object) -> OpenAICompatibleProviderConfig:
+        return OpenAICompatibleProviderConfig(
+            name="local",
+            models=("qwen", "plain"),
+            default_model="qwen",
+            model_metadata={
+                "qwen": ProviderModelMetadata(
+                    reasoning=True,
+                    compat={"thinkingFormat": "qwen-chat-template"},
+                ),
+                "plain": ProviderModelMetadata(reasoning=False),
+            },
+            **thinking,  # type: ignore[arg-type]
+        )
+
+    async def load(config: OpenAICompatibleProviderConfig, name: str) -> CodingSession:
+        return await CodingSession.load(
+            CodingSessionConfig(
+                provider=FakeProvider([]),
+                model="qwen",
+                system="You are Tau.",
+                storage=JsonlSessionStorage(tmp_path / f"{name}.jsonl"),
+                cwd=tmp_path,
+                provider_name="local",
+                provider_settings=ProviderSettings(providers=(config,)),
+            )
+        )
+
+    session = await load(provider(), "unset")
+
+    assert session.thinking_config_warning is not None
+    assert "enable_thinking: false and the model never thinks" in session.thinking_config_warning
+    session.set_model("plain")
+    assert session.thinking_config_warning is None
+
+    fixed = await load(
+        provider(thinking_levels=("off", "medium"), thinking_parameter="reasoning_effort"),
+        "fixed",
+    )
+    assert fixed.thinking_config_warning is None
+
+
+@pytest.mark.anyio
 async def test_session_reports_dynamic_model_thinking_controls_separately_from_output(
     tmp_path: Path,
 ) -> None:

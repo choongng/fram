@@ -1520,6 +1520,38 @@ def provider_thinking_unavailable_reason(
     return None
 
 
+def provider_thinking_config_warning(
+    provider: ProviderConfig,
+    *,
+    model: str | None = None,
+) -> str | None:
+    """Explain a thinking setup whose selected level never reaches the request.
+
+    Model metadata alone (`reasoning = true`, a `thinking_level_map`) is enough
+    to offer thinking levels, but an OpenAI-compatible request only carries one
+    when the provider names its `thinking_parameter`. Without it every level is
+    silently dropped, and a qwen-chat-template model is sent
+    `enable_thinking: false` at every level, so the model never thinks.
+    """
+    if not isinstance(provider, OpenAICompatibleProviderConfig):
+        return None
+    if provider.thinking_parameter is not None:
+        return None
+    selected_model = model or provider.default_model
+    if not provider_thinking_levels(provider, model=selected_model):
+        return None
+    effect = (
+        "every request is sent enable_thinking: false and the model never thinks"
+        if _thinking_format(provider, selected_model) == "qwen-chat-template"
+        else "the selected level is never sent"
+    )
+    return (
+        f"{provider.name}:{selected_model} offers thinking levels, but provider "
+        f"{provider.name} sets no thinking_parameter, so {effect}. "
+        f'Set thinking_parameter = "reasoning_effort" (and thinking_levels) on the provider.'
+    )
+
+
 def _levels_from_thinking_map(
     thinking_level_map: dict[ThinkingLevel, str | None],
 ) -> tuple[ThinkingLevel, ...]:

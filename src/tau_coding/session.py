@@ -114,6 +114,7 @@ from tau_coding.provider_config import (
     provider_default_thinking_level,
     provider_has_usable_credentials,
     provider_model_supports_images,
+    provider_thinking_config_warning,
     provider_thinking_levels,
     provider_thinking_unavailable_reason,
     resolve_provider_selection,
@@ -1150,6 +1151,16 @@ class CodingSession:
         if provider is None:
             return "Active provider settings are not available"
         return provider_thinking_unavailable_reason(provider, model=self.model)
+
+    @property
+    def thinking_config_warning(self) -> str | None:
+        """Explain a thinking setup that drops the active model's selected level."""
+        if self._active_dynamic_provider is not None:
+            return None
+        provider = self._selected_provider_config()
+        if provider is None:
+            return None
+        return provider_thinking_config_warning(provider, model=self.model)
 
     @property
     def storage(self) -> SessionStorage:
