@@ -22,7 +22,11 @@ from tau_coding import (
     create_write_tool,
 )
 from tau_coding.image_processing import DEFAULT_MAX_SOURCE_IMAGE_BYTES
-from tau_coding.tools import ToolInputError
+from tau_coding.tools import (
+    BASH_TIMEOUT_ENV_VAR,
+    DEFAULT_BASH_TIMEOUT_SECONDS,
+    ToolInputError,
+)
 
 
 def image_bytes(format_name: str = "PNG", *, size: tuple[int, int] = (8, 6)) -> bytes:
@@ -447,6 +451,74 @@ async def test_bash_tool_reports_timeout(tmp_path: Path) -> None:
     assert result.details is not None
     assert result.details["timed_out"] is True
     assert "timed out" in result.text
+
+
+@pytest.mark.anyio
+async def test_bash_tool_applies_default_timeout_when_call_names_none(tmp_path: Path) -> None:
+    tool = create_bash_tool(cwd=tmp_path, default_timeout=0.05)
+
+    start = monotonic()
+    result = await tool.execute("test-call", {"command": "sleep 5"})
+
+    assert monotonic() - start < 1.0
+    assert result.details is not None
+    assert result.details["timed_out"] is True
+    assert result.details["timeout_seconds"] == 0.05
+    assert "pass a larger `timeout`" in result.text
+
+
+@pytest.mark.anyio
+async def test_bash_tool_explicit_timeout_overrides_default(tmp_path: Path) -> None:
+    tool = create_bash_tool(cwd=tmp_path, default_timeout=0.01)
+
+    result = await tool.execute("test-call", {"command": "sleep 0.1; echo done", "timeout": 5})
+
+    assert result.details is not None
+    assert result.details["timed_out"] is False
+    assert "done" in result.text
+
+
+def test_bash_tool_default_timeout_is_bounded_and_advertised(tmp_path: Path) -> None:
+    definition = create_bash_tool_definition(cwd=tmp_path)
+    timeout_schema = definition.input_schema["properties"]["timeout"]
+
+    assert DEFAULT_BASH_TIMEOUT_SECONDS > 0
+    assert f"default {DEFAULT_BASH_TIMEOUT_SECONDS:g}" in timeout_schema["description"]
+    assert "killed after" in definition.description
+
+    unbounded = create_bash_tool_definition(cwd=tmp_path, default_timeout=None)
+    assert "no default timeout" in unbounded.input_schema["properties"]["timeout"]["description"]
+
+
+@pytest.mark.anyio
+async def test_bash_default_timeout_from_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def bash_of(tools: list) -> object:
+        return next(tool for tool in tools if tool.name == "bash")
+
+    monkeypatch.delenv(BASH_TIMEOUT_ENV_VAR, raising=False)
+    unset = bash_of(create_coding_tools(cwd=tmp_path))
+    assert f"default {DEFAULT_BASH_TIMEOUT_SECONDS:g}" in str(unset.parameters)
+
+    for bad in ("", "soon", "0", "-3"):
+        monkeypatch.setenv(BASH_TIMEOUT_ENV_VAR, bad)
+        fallback = bash_of(create_coding_tools(cwd=tmp_path))
+        assert f"default {DEFAULT_BASH_TIMEOUT_SECONDS:g}" in str(fallback.parameters)
+
+    monkeypatch.setenv(BASH_TIMEOUT_ENV_VAR, "0.05")
+    tool = bash_of(create_coding_tools(cwd=tmp_path))
+    start = monotonic()
+    result = await tool.execute("test-call", {"command": "sleep 5"})
+    assert monotonic() - start < 1.0
+    assert result.details is not None
+    assert result.details["timed_out"] is True
+    assert result.details["timeout_seconds"] == 0.05
+
+    explicit = await tool.execute("test-call", {"command": "sleep 0.1; echo done", "timeout": 5})
+    assert explicit.details is not None
+    assert explicit.details["timed_out"] is False
+    assert "done" in explicit.text
 
 
 @pytest.mark.anyio
