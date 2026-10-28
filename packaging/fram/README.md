@@ -10,12 +10,11 @@ their usual import names, so Tau extensions keep working. Because of that,
 in its own tool environment:
 
 ```bash
-uv tool install fram-agent --index <your-fram-index-url>
+uv tool install fram-agent
 ```
 
-Name the Fram index with `--index`, so uv takes `fram-agent` from it before
-looking on PyPI. (The shorter name `fram` is taken on PyPI by an unrelated
-project.)
+The distribution is `fram-agent` because the shorter name `fram` is taken on
+PyPI by an unrelated project. The command is still `fram`.
 
 `fram` shares Tau's configuration and sessions (`~/.tau`, or `TAU_HOME`).
 `fram --version` names the Tau release it is based on. `fram update` is not

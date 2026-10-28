@@ -18,7 +18,10 @@ Everything lives under `packaging/fram/`:
 - `src/fram/cli.py` is the `fram` entry point. It adjusts the few places
   where Tau assumes it was installed as `tau-ai`, then runs Tau's CLI.
 - `publish.sh` builds the wheel and uploads it with `uv publish`, to the
-  index named by `FRAM_INDEX_URL`, using uv's own credential variables.
+  index named by `FRAM_INDEX_URL`, using uv's own credential variables. It is
+  for indexes other than PyPI.
+- `.github/workflows/fram-publish.yml` publishes to PyPI; see
+  [Publishing to PyPI](#publishing-to-pypi).
 - `tests/test_fram_packaging.py` holds the tests described below.
 
 ## Why the entry point adjusts Tau
@@ -50,7 +53,7 @@ names, so Tau extensions keep working. As a result, `fram` and `tau-ai`
 cannot share one Python environment. Install `fram-agent` as a tool:
 
 ```bash
-uv tool install fram-agent --index <fram-index-url>
+uv tool install fram-agent
 ```
 
 `fram` shares Tau's configuration and sessions (`~/.tau` or `TAU_HOME`).
@@ -58,9 +61,7 @@ uv tool install fram-agent --index <fram-index-url>
 **Why `fram-agent`, not `fram`.** Public PyPI already has an unrelated
 `fram` (1.0.0, a biology model), and in testing uv picked it over a local
 `--find-links` wheel. The distribution is `fram-agent`, which was free on
-PyPI on 2026-10-26; the command and import package are still `fram`. Name the
-Fram index with `--index` anyway: uv searches it before PyPI, so a later
-`fram-agent` upload by someone else could not take its place.
+PyPI on 2026-10-26; the command and import package are still `fram`.
 
 ## Wheels only
 
@@ -74,6 +75,32 @@ FRAM_INDEX_URL=https://... UV_PUBLISH_TOKEN=... packaging/fram/publish.sh
 
 Publish only from `main` (see `dev-notes/fram-branches.md`). Wheels built
 from any other branch are for local testing.
+
+## Publishing to PyPI
+
+`fram-agent` is published to PyPI by `.github/workflows/fram-publish.yml`,
+through PyPI's trusted publishing: PyPI accepts the upload because it comes
+from that workflow in Fram's GitHub repository, in the `pypi` environment, so
+no API token is stored anywhere. To release:
+
+1. Merge to `main` and publish `main` to GitHub.
+2. On GitHub, create a release whose tag is `v` plus `__version__`, for
+   example `v0.4.8.1`, on `main`.
+3. Approve the run if the `pypi` environment requires a reviewer.
+
+The workflow's first job refuses a tag that does not match `__version__` or is
+not on `main`, then runs the root and packaging tests. The second builds the
+wheel and runs `uv publish`, which finds the GitHub credentials itself. Only
+the second job may request the token PyPI checks.
+
+PyPI never accepts the same version twice, even after a release is deleted,
+so a failed upload of `0.4.8.1` is retried as `0.4.8.2`.
+
+Upstream's `.github/workflows/publish.yml` also runs on a published release.
+It builds `tau-ai` from the root `pyproject.toml`, so it is disabled in the
+repository's Actions settings rather than edited, which keeps the file
+unchanged for upstream merges. Its PyPI upload would fail anyway, since PyPI
+trusts only `fram-publish.yml` for `fram-agent`.
 
 ## Taking a Tau release
 
@@ -110,5 +137,5 @@ entry over the same `tau_coding` CLI app, the way the `tau` script is.
 ## Still to come
 
 The rest of the packaging plan: a branding seam for visible "Tau" strings,
-extension discovery through entry points, PyPI publishing under a free name,
-and CI that watches upstream releases.
+extension discovery through entry points, and CI that watches upstream
+releases.
