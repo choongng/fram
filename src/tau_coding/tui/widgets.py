@@ -1638,12 +1638,20 @@ class TranscriptView(VerticalScroll):
     ) -> None:
         """Replace only the provisional assistant tail with canonical ordered blocks."""
         should_follow = self._should_follow_output
-        # The canonical items are already in state. Claim them for the window
-        # before the first await: a scroll seeing the window end short of the
-        # state would page it forward, redraw these items, and then this method
-        # would mount them a second time.
         state = self._render_state
-        if state is not None:
+        # Decide before the window end moves: if the reader has paged back,
+        # this message is not next to the mounted window. Mounting it there
+        # would mark the window latest and strand the items in between behind
+        # a boundary that can no longer page them in.
+        first_index = (
+            _identity_index(state.items, items[0]) if state is not None and items else None
+        )
+        paged_back = first_index is not None and self._window_end < first_index
+        # Otherwise the canonical items are already in state. Claim them for the
+        # window before the first await: a scroll seeing the window end short of
+        # the state would page it forward, redraw these items, and then this
+        # method would mount them a second time.
+        if state is not None and not paged_back:
             self._window_end = len(state.items)
         for widget in tuple(self._active_message_widgets):
             if widget.parent is self:
@@ -1658,6 +1666,13 @@ class TranscriptView(VerticalScroll):
             if widget.parent is None:
                 del self._item_widgets[item_id]
 
+        if state is not None and paged_back:
+            if should_follow:
+                self._window_end = 0
+                self._redraw(scroll_end=True)
+            elif self._bottom_boundary is not None:
+                self._bottom_boundary.update_count(len(state.items) - self._window_end)
+            return
         mounted: list[Widget] = []
         last_item = items[-1] if items else None
         for item in items:
