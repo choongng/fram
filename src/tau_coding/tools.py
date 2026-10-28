@@ -752,7 +752,8 @@ def create_bash_tool_definition(
                     "description": "Timeout in seconds (optional, no default timeout)",
                 },
             },
-            "required": ["command", "description"],
+            # `description` only labels the call, so a call without it still runs.
+            "required": ["command"],
         },
         executor=execute,
     )
