@@ -24,6 +24,7 @@ from tau_coding.provider_config import (
     provider_model_max_tokens,
     provider_model_supports_images,
     provider_settings_from_json,
+    provider_thinking_config_warning,
     provider_thinking_levels,
     provider_thinking_unavailable_reason,
     resolve_provider_selection,
@@ -660,6 +661,59 @@ def test_runtime_metadata_rejects_invalid_cost_tier_values() -> None:
                 )
             },
         )
+
+
+def _local_reasoning_provider(**thinking: object) -> OpenAICompatibleProviderConfig:
+    return OpenAICompatibleProviderConfig(
+        name="local",
+        models=("qwen", "plain"),
+        default_model="qwen",
+        model_metadata={
+            "qwen": ProviderModelMetadata(
+                reasoning=True,
+                thinking_level_map={"off": "none", "low": "low", "medium": "medium"},
+                compat={"thinkingFormat": "qwen-chat-template"},
+            ),
+            "plain": ProviderModelMetadata(reasoning=True),
+        },
+        **thinking,  # type: ignore[arg-type]
+    )
+
+
+def test_thinking_config_warning_flags_levels_the_provider_never_sends() -> None:
+    # Metadata alone offers the levels; without thinking_parameter none is sent,
+    # and the qwen chat template is then told enable_thinking=false every time.
+    provider = _local_reasoning_provider()
+
+    assert "medium" in provider_thinking_levels(provider, model="qwen")
+    qwen_warning = provider_thinking_config_warning(provider, model="qwen")
+    assert qwen_warning is not None
+    assert qwen_warning.startswith("local:qwen offers thinking levels, but provider local")
+    assert "enable_thinking: false and the model never thinks" in qwen_warning
+    plain_warning = provider_thinking_config_warning(provider, model="plain")
+    assert plain_warning is not None
+    assert "the selected level is never sent" in plain_warning
+
+
+def test_thinking_config_warning_is_quiet_once_the_parameter_is_set() -> None:
+    provider = _local_reasoning_provider(
+        thinking_levels=("off", "low", "medium"),
+        thinking_parameter="reasoning_effort",
+    )
+
+    assert provider_thinking_config_warning(provider, model="qwen") is None
+    assert provider_thinking_config_warning(provider, model="plain") is None
+
+
+def test_builtin_providers_raise_no_thinking_config_warning() -> None:
+    settings = ProviderSettings()
+
+    assert [
+        f"{provider.name}:{model}"
+        for provider in settings.providers
+        for model in provider.models
+        if provider_thinking_config_warning(provider, model=model) is not None
+    ] == []
 
 
 def test_provider_settings_parses_scoped_models() -> None:

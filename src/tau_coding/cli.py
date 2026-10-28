@@ -1348,6 +1348,8 @@ async def run_print_mode(
     for diagnostic in session.resource_diagnostics:
         if diagnostic.kind == "project-trust":
             typer.echo(diagnostic.format(), err=True)
+    if session.thinking_config_warning is not None:
+        typer.echo(f"warning thinking: {session.thinking_config_warning}", err=True)
     await session.emit_pending_session_start()
     renderer = create_event_renderer(
         output,

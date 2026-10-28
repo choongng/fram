@@ -366,7 +366,13 @@ Provider preferences live in `~/.tau/providers.json`:
 - Custom models declare thinking support in `catalog.toml` with
   `thinking_levels`, `thinking_default`, `thinking_models`, and
   `thinking_parameter` (`"reasoning_effort"`, `"reasoning.effort"`, or
-  `"anthropic.thinking"`).
+  `"anthropic.thinking"`). A model's `model_metadata` (`reasoning = true`, a
+  `thinking_level_map`) is enough to offer thinking levels, but an
+  OpenAI-compatible provider only sends the selected level when it also sets
+  `thinking_parameter` (which needs `thinking_levels`). Without it Tau warns at
+  startup and in `/session`: no level reaches the request, and a model using
+  `thinkingFormat = "qwen-chat-template"` gets `enable_thinking: false` on every
+  request.
 
 Writes after `/login`, `/model`, or scoped-model changes reload the file first,
 apply only the requested change, write atomically, and keep a `.bak` backup.

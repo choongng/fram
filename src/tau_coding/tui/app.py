@@ -9114,7 +9114,12 @@ async def run_tui_app(
         resource_conflict_alert = _resource_conflict_alert(
             getattr(session, "resource_diagnostics", ())
         )
-        startup_alerts = (resource_conflict_alert,) if resource_conflict_alert is not None else ()
+        thinking_warning = getattr(session, "thinking_config_warning", None)
+        startup_alerts = tuple(
+            alert
+            for alert in (resource_conflict_alert, thinking_warning)
+            if isinstance(alert, str) and alert
+        )
         app = TauTuiApp(
             session,
             tui_settings=load_tui_settings(),
