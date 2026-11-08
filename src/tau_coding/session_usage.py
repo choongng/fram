@@ -17,6 +17,7 @@ from tau_agent.session import (
     SessionEntry,
     ThinkingLevelChangeEntry,
 )
+from tau_coding.branding import BRANDING
 from tau_coding.provider_catalog import builtin_provider_entry, model_cost_for_input_tokens
 from tau_coding.session_stats import _response_cost
 from tau_coding.tui.themes import TAU_DARK_THEME, TAU_LIGHT_THEME
@@ -546,7 +547,8 @@ def render_usage_dashboard(usage: SessionUsage) -> str:
 
     return (
         f'<div class="usage-cards">{cards_html}</div>'
-        '<p class="usage-note">Costs use Tau\'s provider catalog rates. OAuth subscription '
+        f'<p class="usage-note">Costs use {BRANDING.product_name}\'s '
+        "provider catalog rates. OAuth subscription "
         "estimates are API-rate equivalents, not actual subscription charges. Hover a request "
         "for exact values, select a legend item to hide a series, and use PNG to save a "
         "chart. Event markers show compactions, model or thinking changes, and branch summaries."

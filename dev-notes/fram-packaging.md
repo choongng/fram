@@ -11,23 +11,24 @@ Everything lives under `packaging/fram/`:
   `src/tau_ai`, `src/tau_agent` and `src/tau_coding` from `../../src` with
   hatchling's `force-include`, plus a small `fram` package, and installs a
   `fram` console script.
-- `src/fram/__init__.py` holds Fram's version, for example `0.4.8.1`. The
-  first three parts are the Tau release Fram bundles; the fourth counts Fram
-  releases on top of it.
-- `src/fram/cli.py` is the `fram` entry point. It adjusts the few places
-  where Tau assumes it was installed as `tau-ai`, then runs Tau's CLI.
-- `publish.sh` builds the wheel and uploads it with `uv publish`, to the
-  index named by `FRAM_INDEX_URL`, using uv's own credential variables. It is
-  for indexes other than PyPI.
-- `.github/workflows/fram-publish.yml` publishes to PyPI; see
-  [Publishing to PyPI](#publishing-to-pypi).
+- `src/fram/__init__.py` holds Fram's version, for example `0.4.8.1`. The first
+  three parts are the Tau release Fram bundles; the fourth counts Fram releases
+  on top of it.
+- `src/fram/cli.py` is the `fram` entry point. It adjusts the few places where
+  Tau assumes it was installed as `tau-ai`, then runs Tau's CLI.
+- `src/fram/branding.py` holds Fram's name, command and marks. The wheel
+  declares it as a `tau_coding.branding` entry point (see "Branding" below).
+- `publish.sh` builds the wheel and uploads it with `uv publish`, to the index
+  named by `FRAM_INDEX_URL`, using uv's own credential variables. It is for
+  indexes other than PyPI.
+- `.github/workflows/fram-publish.yml` publishes to PyPI; see [Publishing to
+  PyPI](#publishing-to-pypi).
 - `tests/test_fram_packaging.py` holds the tests described below.
 
 ## Why the entry point adjusts Tau
 
-Tau's sources are bundled unchanged, but they look themselves up as
-`tau-ai`, which is not installed under `fram`. Left alone, that causes four
-problems:
+Tau's sources are bundled unchanged, but they look themselves up as `tau-ai`,
+which is not installed under `fram`. The entry point makes these adjustments:
 
 1. `--version` would print `tau 0+unknown`. `fram --version` prints
    `fram 0.4.8.1 (tau 0.4.8)` instead.
@@ -39,7 +40,11 @@ problems:
 4. Tau's version lookup (`tau_coding.version._DISTRIBUTION_NAME`) is pointed at
    `fram-agent`, so the TUI header and the release-notes state show Fram's
    version. Because `0.4.8.1` sorts just after `0.4.8`, a Tau install sharing
-   the same `~/.tau` sees no spurious release notes.
+   the same home sees no spurious release notes.
+5. `TAU_HOME` defaults to `~/.fram`, so Fram's providers, credentials, sessions
+   and settings are its own. An explicit `TAU_HOME`, even `~/.tau`, still wins.
+   Commands Fram's shell tool runs inherit it, so a `tau` started from inside
+   Fram uses `~/.fram` too.
 
 Item 4 sets a private module variable, which keeps every upstream file
 unchanged. If an upstream merge renames it, the end-to-end test fails.
@@ -54,12 +59,13 @@ one Python environment. Install `fram-agent` as a tool:
 uv tool install fram-agent
 ```
 
-`fram` shares Tau's configuration and sessions (`~/.tau` or `TAU_HOME`).
+`fram` keeps its configuration and sessions in `~/.fram` (item 5 above). To
+start from an existing Tau setup, copy it: `cp -r ~/.tau ~/.fram`.
 
-**Why `fram-agent`, not `fram`.** Public PyPI already has an unrelated
-`fram` (1.0.0, a biology model), and in testing uv picked it over a local
-`--find-links` wheel. The distribution is `fram-agent`; the command and
-import package are still `fram`.
+**Why `fram-agent`, not `fram`.** Public PyPI already has an unrelated `fram`
+(1.0.0, a biology model), and in testing uv picked it over a local
+`--find-links` wheel. The distribution is `fram-agent`; the command and import
+package are still `fram`.
 
 ## Wheels only
 
@@ -73,41 +79,70 @@ FRAM_INDEX_URL=https://... UV_PUBLISH_TOKEN=... packaging/fram/publish.sh
 
 Publish only from `main`.
 
+## Branding
+
+Tau's display text (CLI help and usage, TUI title and messages, the prompt mark,
+the sidebar logo, the system prompt, export pages) reads its product name,
+command and marks from `tau_coding.branding.BRANDING`. Tau resolves that once,
+on import, from an entry point in the `tau_coding.branding` group. The
+`fram-agent` wheel declares one:
+
+```toml
+[project.entry-points."tau_coding.branding"]
+fram = "fram.branding:BRANDING"
+```
+
+So the installed `fram` says "Fram" and `fram install ...`, shows `✦` as its
+prompt mark and `✦ fram` as its logo, while `tau` from a checkout, which has no
+such entry point, is unchanged. `fram.branding` must not import Tau, because Tau
+loads it while `tau_coding` is still importing.
+
+Branding is display only. Names other tools rely on stay Tau's: the `TAU_HOME`
+variable and the other `TAU_*` variables, `.tau` project folders, `[tool.tau]`,
+OAuth originators and the extension API's `tau` object. So `fram` and `tau`
+still share project `.tau/` folders; only the global home differs (`~/.fram`,
+item 5).
+
+The seam itself is a change to upstream files (unlike the rest of this note);
+`dev-notes/branding.md` describes it.
+
 ## Publishing to PyPI
 
 `fram-agent` is published to PyPI by `.github/workflows/fram-publish.yml`,
-through PyPI's trusted publishing: PyPI accepts the upload because it comes
-from that workflow in Fram's GitHub repository, in the `pypi` environment, so
-no API token is stored anywhere. To release:
+through PyPI's trusted publishing: PyPI accepts the upload because it comes from
+that workflow in Fram's GitHub repository, in the `pypi` environment, so no API
+token is stored anywhere. To release:
 
 1. Merge to `main` and publish `main` to GitHub.
-2. On GitHub, create a release whose tag is `v` plus `__version__`, for
-   example `v0.4.8.1`, on `main`.
+2. On GitHub, create a release whose tag is `v` plus `__version__`, for example
+   `v0.4.8.1`, on `main`.
 3. Approve the run if the `pypi` environment requires a reviewer.
 
 The workflow's first job refuses a tag that does not match `__version__` or is
 not on `main`, then runs the root and packaging tests. The second builds the
-wheel and runs `uv publish`, which finds the GitHub credentials itself. Only
-the second job may request the token PyPI checks.
+wheel and runs `uv publish`, which finds the GitHub credentials itself. Only the
+second job may request the token PyPI checks.
 
-PyPI never accepts the same version twice, even after a release is deleted,
-so a failed upload of `0.4.8.1` is retried as `0.4.8.2`.
+PyPI never accepts the same version twice, even after a release is deleted, so a
+failed upload of `0.4.8.1` is retried as `0.4.8.2`.
 
-Upstream's `.github/workflows/publish.yml` also runs on a published release.
-It builds `tau-ai` from the root `pyproject.toml`, so it is disabled in the
-repository's Actions settings rather than edited, which keeps the file
-unchanged for upstream merges. Its PyPI upload would fail anyway, since PyPI
-trusts only `fram-publish.yml` for `fram-agent`.
+Upstream's `.github/workflows/publish.yml` also runs on a published release. It
+builds `tau-ai` from the root `pyproject.toml`, so it is disabled in the
+repository's Actions settings rather than edited, which keeps the file unchanged
+for upstream merges. Its PyPI upload would fail anyway, since PyPI trusts only
+`fram-publish.yml` for `fram-agent`.
 
 ## Taking a Tau release
 
 After merging a Tau release into `main`:
 
-1. Set `__version__` in `src/fram/__init__.py` to the new Tau version plus
-   `.1`, for example `0.4.9.1`.
+1. Set `__version__` in `src/fram/__init__.py` to the new Tau version plus `.1`,
+   for example `0.4.9.1`.
 2. Copy any dependency changes from the root `pyproject.toml`.
+3. Look for new display text that spells out "Tau" instead of reading
+   `BRANDING`; `dev-notes/branding.md` says how.
 
-Tests fail until both are done: one checks the version against the root
+Tests fail until the first two are done: one checks the version against the root
 `pyproject.toml`, and one checks the dependency lists match.
 
 ## Testing
@@ -119,20 +154,20 @@ uv run pytest packaging/fram/tests
 The root test suite does not collect these tests, because its `testpaths` is
 `tests/`. The end-to-end test builds the wheel into a small `file://` simple
 index, runs `uv tool install fram-agent --index ...` into a temporary tool
-directory, then checks four things:
+directory, then checks:
 
-- `fram --version` and `fram --help` work.
+- `fram --version` and `fram --help` work, and the help says "Fram" and
+  `fram install`, not `tau install`.
+- The TUI's title is "Fram".
 - The installed `fram` reports its own version.
 - `tau-ai` is not installed in the tool environment.
-- `tau` from the repository still works.
+- `tau` from the repository still works and still says "Tau".
 
 ## How this maps to Pi and Tau
 
-This adds nothing to the agent architecture. `fram` is one more frontend
-entry over the same `tau_coding` CLI app, the way the `tau` script is.
+This adds nothing to the agent architecture. `fram` is one more frontend entry
+over the same `tau_coding` CLI app, the way the `tau` script is.
 
 ## Still to come
 
-The rest of the packaging plan: a branding seam for visible "Tau" strings,
-extension discovery through entry points, and CI that watches upstream
-releases.
+Extension discovery through entry points, and CI that watches upstream releases.

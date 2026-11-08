@@ -39,6 +39,7 @@ from textual.widgets._markdown import MarkdownParagraph  # not publicly re-expor
 from textual.widgets.markdown import MarkdownFence
 
 from tau_agent.tools import AgentTool, ToolCall
+from tau_coding.branding import BRANDING
 from tau_coding.context_window import estimate_text_tokens
 from tau_coding.prompt_templates import PromptTemplate
 from tau_coding.session_stats import SessionStats
@@ -60,7 +61,7 @@ from tau_coding.tui.state import (
 )
 from tau_coding.version import current_version
 
-TAU_SIDEBAR_LOGO = "τ = 2π"
+TAU_SIDEBAR_LOGO = BRANDING.logo
 SIDEBAR_BULLET_LIST_LIMIT = 5
 SIDEBAR_COMMA_LIST_MAX_LINES = 3
 

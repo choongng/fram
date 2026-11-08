@@ -11,6 +11,7 @@ from textual.events import Key
 from textual.screen import ModalScreen
 from textual.widgets import Label, ListItem, ListView, Static
 
+from tau_coding.branding import BRANDING
 from tau_coding.project_trust import ProjectTrustRequest, TrustChoice
 from tau_coding.tui.themes import TAU_DARK_THEME, textual_theme_for_tui_theme
 
@@ -174,7 +175,7 @@ class _ProjectTrustApp(App[TrustChoice | None]):
 
     def on_mount(self) -> None:
         self.push_screen(
-            ProjectTrustScreen(self.request, cancel_action="exits Tau"),
+            ProjectTrustScreen(self.request, cancel_action=f"exits {BRANDING.product_name}"),
             self.exit,
         )
 

@@ -5,18 +5,30 @@ installed as ``tau-ai`` are adjusted here, before Tau's CLI is imported:
 
 - ``--version`` names Fram's version and the Tau release it is based on.
 - ``update`` is refused: Tau's updater would install ``tau-ai`` from PyPI.
+  ``update --models`` still works, so that is what ``--help`` lists.
 - The startup update check is off by default, since it compares against
   ``tau-ai`` on PyPI.
+- Fram keeps its own configuration and sessions in ``~/.fram``: ``TAU_HOME``
+  defaults there instead of ``~/.tau``. An explicit ``TAU_HOME`` still wins.
 - Tau's version lookup reads the ``fram-agent`` distribution, so the TUI and the
   release-notes state see Fram's version instead of ``0+unknown``.
+
+Fram's name and marks in Tau's own text come from ``fram.branding``, which Tau
+finds through the wheel's ``tau_coding.branding`` entry point rather than from
+here.
 """
 
 from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 from fram import __version__, tau_base_version
+
+if TYPE_CHECKING:
+    from typer import Typer
 
 _REINSTALL_ADVICE = (
     "fram update is not supported: Tau's updater installs tau-ai from PyPI.\n"
@@ -37,11 +49,25 @@ def main(argv: list[str] | None = None) -> None:
     adopt_fram_identity()
     from tau_coding.cli import app
 
+    list_only_supported_update(app)
     app(args=args, prog_name="fram")
 
 
+def list_only_supported_update(app: Typer) -> None:
+    """Make the help epilog list ``update --models``, the one form Fram supports."""
+    from tau_coding.branding import BRANDING
+
+    command, product = BRANDING.command_name, BRANDING.product_name
+    app.info.epilog = str(app.info.epilog).replace(
+        f"{command} update - Upgrade {product}.",
+        f"{command} update --models - Refresh model catalogs.",
+    )
+
+
 def adopt_fram_identity() -> None:
-    """Point Tau's update check and version lookup at Fram instead of tau-ai."""
+    """Point Tau's home, update check and version lookup at Fram instead of tau-ai."""
+    if not os.environ.get("TAU_HOME"):
+        os.environ["TAU_HOME"] = str(Path.home() / ".fram")
     os.environ.setdefault("TAU_NO_UPDATE_CHECK", "1")
     import tau_coding
     import tau_coding.version

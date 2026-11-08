@@ -16,6 +16,8 @@ from typing import Literal, TypeGuard, cast
 
 import httpx
 
+from tau_coding.branding import BRANDING
+
 LLAMA_CPP_ROUTER_MIN_BUILD = 9688
 LLAMA_CPP_ROUTER_MAX_BUILD = 10595
 
@@ -76,7 +78,8 @@ async def detect_router(
         return RouterCapability(
             "incompatible",
             diagnostic=(
-                "Router build is unknown; management is disabled and Tau is using "
+                "Router build is unknown; management is "
+                f"disabled and {BRANDING.product_name} is using "
                 "standard OpenAI-compatible discovery."
             ),
         )
@@ -86,7 +89,7 @@ async def detect_router(
             "incompatible",
             build,
             (
-                f"Router build b{build} is outside Tau's tested range "
+                f"Router build b{build} is outside {BRANDING.product_name}'s tested range "
                 f"b{LLAMA_CPP_ROUTER_MIN_BUILD}-b{LLAMA_CPP_ROUTER_MAX_BUILD}; "
                 "management is disabled."
             ),
