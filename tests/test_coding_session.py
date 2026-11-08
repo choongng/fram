@@ -7298,3 +7298,106 @@ async def test_session_switch_does_not_inherit_prompt_cache_history(tmp_path: Pa
     events = await _collect_session_events(session.prompt("two"))
 
     assert not any(isinstance(event, PromptCacheMissEvent) for event in events)
+
+
+@pytest.mark.anyio
+async def test_session_notifies_when_its_request_waits_for_a_concurrency_limited_provider(
+    tmp_path: Path,
+) -> None:
+    from dataclasses import replace as dataclass_replace
+
+    from tau_coding.extensions.api import NotifyLevel, StderrUiBridge
+    from tau_coding.request_gate import ConcurrencyLimitedProvider, RequestQueued, _notify
+
+    class RecordingNotifications(StderrUiBridge):
+        def __init__(self) -> None:
+            self.notices: list[str] = []
+
+        def notify(self, message: str, level: NotifyLevel = "info") -> None:
+            self.notices.append(message)
+
+    class HeldProvider:
+        def __init__(self) -> None:
+            self.release = asyncio.Event()
+
+        def stream_response(self, **kwargs: object) -> AsyncIterator[AssistantMessageEvent]:
+            async def iterator() -> AsyncIterator[AssistantMessageEvent]:
+                yield assistant_start()
+                await self.release.wait()
+                yield assistant_done(message=AssistantMessage(content="held"))
+
+            return iterator()
+
+    held = HeldProvider()
+    other_session = ConcurrencyLimitedProvider(held, provider_name="llama", limit=1)
+    gated = ConcurrencyLimitedProvider(
+        FakeProvider([[assistant_start(), assistant_done(message=AssistantMessage(content="ok"))]]),
+        provider_name="llama",
+        limit=1,
+    )
+    session = await CodingSession.load(
+        dataclass_replace(
+            _config(tmp_path, gated, JsonlSessionStorage(tmp_path / "session.jsonl")),
+            session_id="session-1",
+        )
+    )
+    ui = RecordingNotifications()
+    session.extension_runtime.set_ui_bridge(ui)
+
+    # Another session's request holds the only slot, so this session's prompt waits.
+    blocker = other_session.stream_response(
+        model="fake", system="", messages=[], tools=[], session_id="session-2"
+    )
+    await anext(blocker)
+    prompt = asyncio.create_task(_collect_session_events(session.prompt("hello")))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    # Notices about other sessions' requests are not this session's to show.
+    _notify(RequestQueued(provider_name="llama", session_id="session-2", limit=1, ahead=1))
+
+    assert ui.notices == ["Waiting for llama: 1 request ahead (max_concurrent_requests=1)"]
+    assert not prompt.done()
+
+    held.release.set()
+    _ = [event async for event in blocker]
+    await asyncio.wait_for(prompt, timeout=5)
+    await session.aclose()
+    _notify(RequestQueued(provider_name="llama", session_id="session-1", limit=1, ahead=1))
+    assert len(ui.notices) == 1
+
+
+@pytest.mark.anyio
+async def test_session_switch_keeps_a_single_queued_request_notice(tmp_path: Path) -> None:
+    from dataclasses import replace as dataclass_replace
+
+    from tau_coding.extensions.api import NotifyLevel, StderrUiBridge
+    from tau_coding.request_gate import ConcurrencyLimitedProvider, RequestQueued, _notify
+
+    class RecordingNotifications(StderrUiBridge):
+        def __init__(self) -> None:
+            self.notices: list[str] = []
+
+        def notify(self, message: str, level: NotifyLevel = "info") -> None:
+            self.notices.append(message)
+
+    gated = ConcurrencyLimitedProvider(FakeProvider([]), provider_name="llama", limit=1)
+    session = await CodingSession.load(
+        dataclass_replace(
+            _config(tmp_path, gated, JsonlSessionStorage(tmp_path / "session.jsonl")),
+            session_id="session-1",
+        )
+    )
+    replacement = await CodingSession.load(
+        dataclass_replace(
+            _config(tmp_path, gated, JsonlSessionStorage(tmp_path / "other.jsonl")),
+            session_id="session-2",
+        )
+    )
+    await session._adopt_replacement(replacement, reason="branch")  # noqa: SLF001
+    ui = RecordingNotifications()
+    session.extension_runtime.set_ui_bridge(ui)
+
+    _notify(RequestQueued(provider_name="llama", session_id="session-2", limit=1, ahead=1))
+
+    assert ui.notices == ["Waiting for llama: 1 request ahead (max_concurrent_requests=1)"]
+    await session.aclose()

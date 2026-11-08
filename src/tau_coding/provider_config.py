@@ -139,6 +139,8 @@ class OpenAICompatibleProviderConfig:
     """Send llama.cpp's ``cache_prompt: true`` so the server reuses a cached prefix."""
     id_slot_count: int | None = None
     """Pin each session to one of this many llama.cpp slots through ``id_slot``."""
+    max_concurrent_requests: int | None = None
+    """Queue this process's requests to the provider beyond this many in flight."""
 
     def __post_init__(self) -> None:
         _validate_provider_numbers(
@@ -150,6 +152,10 @@ class OpenAICompatibleProviderConfig:
             isinstance(self.id_slot_count, bool) or self.id_slot_count < 1
         ):
             raise ProviderConfigError("Provider id_slot_count must be 1 or greater")
+        if self.max_concurrent_requests is not None and (
+            isinstance(self.max_concurrent_requests, bool) or self.max_concurrent_requests < 1
+        ):
+            raise ProviderConfigError("Provider max_concurrent_requests must be 1 or greater")
         _validate_context_windows(self.context_windows)
         _validate_model_metadata(self.models, self.model_metadata)
         _validate_json_object(self.compat, "Provider compat")
@@ -192,6 +198,7 @@ class OpenAICompatibleProviderConfig:
             "inference_providers": dict(self.inference_providers),
             "cache_prompt": self.cache_prompt,
             "id_slot_count": self.id_slot_count,
+            "max_concurrent_requests": self.max_concurrent_requests,
         }
 
 
@@ -995,6 +1002,7 @@ def _merge_openai_compatible_provider(
         inference_providers=existing.inference_providers,
         cache_prompt=existing.cache_prompt,
         id_slot_count=existing.id_slot_count,
+        max_concurrent_requests=existing.max_concurrent_requests,
     )
 
 
@@ -1118,6 +1126,8 @@ def _provider_preference_to_json(provider: ProviderConfig) -> dict[str, Any]:
             preference["cache_prompt"] = True
         if provider.id_slot_count is not None:
             preference["id_slot_count"] = provider.id_slot_count
+        if provider.max_concurrent_requests is not None:
+            preference["max_concurrent_requests"] = provider.max_concurrent_requests
     return preference
 
 
@@ -1386,6 +1396,14 @@ def _apply_provider_preference(
             if "id_slot_count" in value
             else provider.id_slot_count
         )
+        max_concurrent_requests = (
+            _optional_positive_int(
+                value.get("max_concurrent_requests"),
+                f"provider_preferences.{provider.name}.max_concurrent_requests",
+            )
+            if "max_concurrent_requests" in value
+            else provider.max_concurrent_requests
+        )
         return replace(
             provider,
             default_model=default_model,
@@ -1397,6 +1415,7 @@ def _apply_provider_preference(
             inference_providers=inference_providers,
             cache_prompt=cache_prompt,
             id_slot_count=id_slot_count,
+            max_concurrent_requests=max_concurrent_requests,
         )
     return replace(
         provider,

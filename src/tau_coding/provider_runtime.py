@@ -60,6 +60,7 @@ from tau_coding.provider_config import (
     validate_huggingface_inference_provider,
     validate_provider_model,
 )
+from tau_coding.request_gate import ConcurrencyLimitedProvider
 from tau_coding.thinking import ThinkingLevel, normalize_thinking_level, reasoning_effort_for_level
 
 
@@ -218,7 +219,41 @@ def create_model_provider(
     inference_provider: str | None = None,
     response_headers_observer: Callable[[Mapping[str, str]], None] | None = None,
 ) -> ClosableModelProvider:
-    """Create a runtime model provider from durable provider settings."""
+    """Create a runtime model provider from durable provider settings.
+
+    A provider with ``max_concurrent_requests`` set is wrapped so that every
+    provider object this process creates for it (sessions, subagents,
+    compaction, naming) shares one request queue.
+    """
+    runtime_provider = _create_model_provider(
+        provider,
+        credential_store=credential_store,
+        model=model,
+        thinking_level=thinking_level,
+        inference_provider=inference_provider,
+        response_headers_observer=response_headers_observer,
+    )
+    if (
+        isinstance(provider, OpenAICompatibleProviderConfig)
+        and provider.max_concurrent_requests is not None
+    ):
+        return ConcurrencyLimitedProvider(
+            runtime_provider,
+            provider_name=provider.name,
+            limit=provider.max_concurrent_requests,
+        )
+    return runtime_provider
+
+
+def _create_model_provider(
+    provider: ProviderConfig,
+    *,
+    credential_store: FileCredentialStore | None,
+    model: str | None,
+    thinking_level: ThinkingLevel | None,
+    inference_provider: str | None,
+    response_headers_observer: Callable[[Mapping[str, str]], None] | None,
+) -> ClosableModelProvider:
     if model is not None:
         validate_provider_model(provider, model)
     if inference_provider is not None:

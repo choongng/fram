@@ -299,7 +299,7 @@ docs_url = "http://localhost:8080/v1"
 """.strip()
 
 
-def test_local_server_cache_options_load_reach_runtime_config_and_round_trip(
+def test_local_server_options_load_reach_runtime_config_and_round_trip(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tau_home = tmp_path / ".tau"
@@ -309,7 +309,13 @@ def test_local_server_cache_options_load_reach_runtime_config_and_round_trip(
         json.dumps(
             {
                 "default_provider": "local",
-                "provider_preferences": {"local": {"cache_prompt": True, "id_slot_count": 2}},
+                "provider_preferences": {
+                    "local": {
+                        "cache_prompt": True,
+                        "id_slot_count": 2,
+                        "max_concurrent_requests": 1,
+                    }
+                },
             }
         ),
         encoding="utf-8",
@@ -320,6 +326,7 @@ def test_local_server_cache_options_load_reach_runtime_config_and_round_trip(
     assert isinstance(provider, OpenAICompatibleProviderConfig)
     assert provider.cache_prompt is True
     assert provider.id_slot_count == 2
+    assert provider.max_concurrent_requests == 1
     monkeypatch.setenv("LOCAL_API_KEY", "local-key")
     config = openai_compatible_config_from_provider(provider)
     assert config.cache_prompt is True
@@ -329,9 +336,10 @@ def test_local_server_cache_options_load_reach_runtime_config_and_round_trip(
     saved = json.loads((tau_home / "providers.json").read_text(encoding="utf-8"))
     assert saved["provider_preferences"]["local"]["cache_prompt"] is True
     assert saved["provider_preferences"]["local"]["id_slot_count"] == 2
+    assert saved["provider_preferences"]["local"]["max_concurrent_requests"] == 1
 
 
-def test_local_server_cache_options_default_off_and_stay_out_of_saved_preferences(
+def test_local_server_options_default_off_and_stay_out_of_saved_preferences(
     tmp_path: Path,
 ) -> None:
     tau_home = tmp_path / ".tau"
@@ -350,13 +358,19 @@ def test_local_server_cache_options_default_off_and_stay_out_of_saved_preference
     local = saved["provider_preferences"].get("local", {})
     assert "cache_prompt" not in local
     assert "id_slot_count" not in local
+    assert "max_concurrent_requests" not in local
 
 
 @pytest.mark.parametrize(
     "preference",
-    [{"cache_prompt": "yes"}, {"id_slot_count": 0}, {"id_slot_count": True}],
+    [
+        {"cache_prompt": "yes"},
+        {"id_slot_count": 0},
+        {"id_slot_count": True},
+        {"max_concurrent_requests": 0},
+    ],
 )
-def test_local_server_cache_options_reject_invalid_values(
+def test_local_server_options_reject_invalid_values(
     tmp_path: Path, preference: dict[str, object]
 ) -> None:
     tau_home = tmp_path / ".tau"

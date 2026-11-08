@@ -583,14 +583,15 @@ A llama.cpp server keeps a cached prompt prefix per slot, and with
 `--parallel 1` it has exactly one slot. Tau's hosted-API cache hints
 (`prompt_cache_key`, affinity headers) do nothing there, so custom
 OpenAI-compatible providers that point at `llama-server` can opt in to its own
-fields in `~/.tau/providers.json`. Both options are off unless you set them:
+fields in `~/.tau/providers.json`. Every option is off unless you set it:
 
 ```json
 {
   "provider_preferences": {
     "llama": {
       "cache_prompt": true,
-      "id_slot_count": 1
+      "id_slot_count": 1,
+      "max_concurrent_requests": 1
     }
   }
 }
@@ -605,12 +606,21 @@ fields in `~/.tau/providers.json`. Both options are off unless you set them:
   then asks for the same slot on every turn (and after a resume), so sessions on
   a multi-slot server stop overwriting each other's cached prefix. Requests
   without a session id, such as model discovery, omit it.
+- `max_concurrent_requests` (integer ≥ 1) makes Tau queue its own requests to
+  this provider once that many are in flight. With `1`, a background subagent's
+  request waits for the main session's request to finish, and vice versa,
+  instead of both being sent and evicting each other's cached prefix from the
+  one slot. The waiting session shows a notice such as
+  `Waiting for llama: 1 request ahead (max_concurrent_requests=1)`. The queue is
+  shared by everything in one Tau process (sessions, in-process subagents,
+  compaction, naming); it cannot see other Tau processes or other clients of the
+  same server.
 
-Both fields apply to chat-completions requests only. Servers that reject
-unknown request fields will fail with these set, so enable them only for
-llama.cpp or servers that accept its fields. The built-in `llama.cpp` backend
-configured through `/local` is managed separately and does not read these
-preferences.
+`cache_prompt` and `id_slot` apply to chat-completions requests only. Servers
+that reject unknown request fields will fail with them set, so enable them only
+for llama.cpp or servers that accept its fields. The built-in `llama.cpp`
+backend configured through `/local` is managed separately and does not read
+these preferences.
 
 ## Prompt-cache misses
 

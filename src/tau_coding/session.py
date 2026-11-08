@@ -134,6 +134,7 @@ from tau_coding.provider_runtime import (
     create_model_provider,
 )
 from tau_coding.reload import CodingReloadSummary, ReloadCategorySummary
+from tau_coding.request_gate import RequestQueued, observe_queued_requests
 from tau_coding.resources import (
     ResourceDiagnostic,
     ResourceError,
@@ -510,6 +511,7 @@ class CodingSession:
         self._pending_message_writes: dict[int, _PendingMessageWrite] = {}
         self._prompt_cache_misses = PromptCacheMissDetector()
         self._attach_persistence_listener()
+        self._stop_observing_queued_requests = observe_queued_requests(self._report_queued_request)
 
     @classmethod
     async def load(cls, config: CodingSessionConfig) -> CodingSession:
@@ -3097,6 +3099,8 @@ class CodingSession:
         if replacement._persistence_unsubscribe is not None:
             replacement._persistence_unsubscribe()
             replacement._persistence_unsubscribe = None
+        # This session keeps its own observer, which follows the adopted config.
+        replacement._stop_observing_queued_requests()
         self._attach_persistence_listener()
         self._invalidate_context_usage_cache()
         self._last_parent_id = replacement._last_parent_id
@@ -3178,6 +3182,16 @@ class CodingSession:
         result = await self.compact_detailed(instructions)
         return f"Compacted {result.replaced_entry_count} context entries."
 
+    def _report_queued_request(self, notice: RequestQueued) -> None:
+        """Tell the user this session's model request is waiting for a free slot."""
+        if notice.session_id is None or notice.session_id != self._config.session_id:
+            return
+        ahead = "1 request" if notice.ahead == 1 else f"{notice.ahead} requests"
+        self._extension_runtime.ui.notify(
+            f"Waiting for {notice.provider_name}: {ahead} ahead "
+            f"(max_concurrent_requests={notice.limit})"
+        )
+
     async def aclose(self) -> None:
         """Close every owned extension/provider resource exactly once.
 
@@ -3206,6 +3220,7 @@ class CodingSession:
 
     async def _close_owned_resources(self) -> None:
         """Run the sole close pass, continuing after individual failures."""
+        self._stop_observing_queued_requests()
         error: BaseException | None = None
         try:
             if self._extension_runtime.active:
