@@ -5,6 +5,7 @@ installed as ``tau-ai`` are adjusted here, before Tau's CLI is imported:
 
 - ``--version`` names Fram's version and the Tau release it is based on.
 - ``update`` is refused: Tau's updater would install ``tau-ai`` from PyPI.
+  ``update --models`` still works, so that is what ``--help`` lists.
 - The startup update check is off by default, since it compares against
   ``tau-ai`` on PyPI.
 - Fram keeps its own configuration and sessions in ``~/.fram``: ``TAU_HOME``
@@ -22,8 +23,12 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from fram import __version__, tau_base_version
+
+if TYPE_CHECKING:
+    from typer import Typer
 
 _REINSTALL_ADVICE = (
     "fram update is not supported: Tau's updater installs tau-ai from PyPI.\n"
@@ -44,7 +49,19 @@ def main(argv: list[str] | None = None) -> None:
     adopt_fram_identity()
     from tau_coding.cli import app
 
+    list_only_supported_update(app)
     app(args=args, prog_name="fram")
+
+
+def list_only_supported_update(app: Typer) -> None:
+    """Make the help epilog list ``update --models``, the one form Fram supports."""
+    from tau_coding.branding import BRANDING
+
+    command, product = BRANDING.command_name, BRANDING.product_name
+    app.info.epilog = str(app.info.epilog).replace(
+        f"{command} update - Upgrade {product}.",
+        f"{command} update --models - Refresh model catalogs.",
+    )
 
 
 def adopt_fram_identity() -> None:

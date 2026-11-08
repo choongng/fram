@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from fram import __version__, tau_base_version
 from fram.branding import BRANDING
-from fram.cli import adopt_fram_identity, main
+from fram.cli import adopt_fram_identity, list_only_supported_update, main
 from rich.cells import cell_len
 
 from tau_coding.branding import ENTRY_POINT_GROUP, Branding
@@ -69,6 +69,16 @@ def test_update_is_refused_with_reinstall_advice(capsys: pytest.CaptureFixture[s
     ("tau_home", "expected"),
     [(None, "home/.fram"), ("", "home/.fram"), ("/elsewhere", "/elsewhere")],
 )
+def test_help_lists_only_the_supported_update(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tau_coding.cli import app
+
+    monkeypatch.setattr(app.info, "epilog", app.info.epilog)
+    list_only_supported_update(app)
+
+    assert "update --models - Refresh model catalogs." in str(app.info.epilog)
+    assert "Upgrade" not in str(app.info.epilog)
+
+
 def test_fram_home_defaults_to_dot_fram_unless_tau_home_is_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tau_home: str | None, expected: str
 ) -> None:
