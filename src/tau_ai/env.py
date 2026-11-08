@@ -12,7 +12,11 @@ from tau_agent.types import JSONValue
 DEFAULT_OPENAI_COMPATIBLE_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
 DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_SECONDS = 60.0
-DEFAULT_OPENAI_COMPATIBLE_MAX_RETRIES = 2
+# Five tries: a request that lands on a cold model server (still loading
+# weights after an idle) may neither error nor complete, and only a later try
+# goes through. The transport retries cover the rest, with the stall timer
+# ramping per attempt (tau_ai.stall).
+DEFAULT_OPENAI_COMPATIBLE_MAX_RETRIES = 4
 DEFAULT_OPENAI_COMPATIBLE_MAX_RETRY_DELAY_SECONDS = 1.0
 
 # Prompt-cache retention preferences. "short" uses the provider default TTL
@@ -48,6 +52,7 @@ class OpenAICompatibleConfig:
     timeout_seconds: float = DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_SECONDS
     max_retries: int = DEFAULT_OPENAI_COMPATIBLE_MAX_RETRIES
     max_retry_delay_seconds: float = DEFAULT_OPENAI_COMPATIBLE_MAX_RETRY_DELAY_SECONDS
+    stream_stall: bool = True
     api: str = "openai-completions"
     max_tokens: int | None = None
     supports_images: bool = False

@@ -148,8 +148,8 @@ Tau's setup mode registers an OpenAI-compatible provider. Put these flags before
 | `--model TEXT` | default model | Default model for the provider |
 | `--base-url TEXT` | OpenAI URL | OpenAI-compatible base URL |
 | `--api-key-env TEXT` | `OPENAI_API_KEY` | Env var holding the API key |
-| `--timeout-seconds FLOAT` | `60.0` | HTTP timeout |
-| `--max-retries INT` | `2` | Retry count for transient failures |
+| `--timeout-seconds FLOAT` | `60.0` | HTTP timeout; also the shortest wait before a silent stream counts as stalled |
+| `--max-retries INT` | `4` | Retry count for transient failures |
 | `--max-retry-delay-seconds FLOAT` | `1.0` | Delay between retries |
 | `--set-default / --no-set-default` | set-default | Make this the default provider |
 

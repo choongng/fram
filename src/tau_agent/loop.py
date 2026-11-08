@@ -13,6 +13,7 @@ from tau_agent.events import (
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
+    ProviderRetryEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolExecutionUpdateEvent,
@@ -32,6 +33,7 @@ from tau_agent.provider_events import (
     AssistantDoneEvent,
     AssistantErrorEvent,
     AssistantMessageEvent,
+    AssistantRetryEvent,
     AssistantStartEvent,
     TextDeltaEvent,
     ThinkingDeltaEvent,
@@ -284,6 +286,15 @@ async def _assistant_events(
             if not started:
                 yield MessageStartEvent(message=event.error)
             yield MessageEndEvent(message=event.error)
+        elif isinstance(event, AssistantRetryEvent):
+            # A transient retry between attempts: no assistant content exists,
+            # so it is surfaced as its own status event for frontends to show.
+            yield ProviderRetryEvent(
+                attempt=event.attempt,
+                max_attempts=event.max_attempts,
+                delay_seconds=event.delay_seconds,
+                message=event.message,
+            )
         else:
             yield MessageUpdateEvent(
                 message=event.partial,

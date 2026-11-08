@@ -54,6 +54,7 @@ from tau_agent.events import (
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
+    ProviderRetryEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolExecutionUpdateEvent,
@@ -6522,10 +6523,13 @@ class TauTuiApp(App[None]):
                 )
             self._refresh_chrome()
             return
-        if isinstance(event, (AutoRetryStartEvent, CompactionStartEvent, PromptCacheMissEvent)):
+        if isinstance(
+            event,
+            (AutoRetryStartEvent, CompactionStartEvent, PromptCacheMissEvent, ProviderRetryEvent),
+        ):
             await transcript.finish_assistant_message()
             if self.state.items and (
-                isinstance(event, (AutoRetryStartEvent, PromptCacheMissEvent))
+                isinstance(event, (AutoRetryStartEvent, PromptCacheMissEvent, ProviderRetryEvent))
                 or event.reason == "overflow"
             ):
                 await transcript.append_item(

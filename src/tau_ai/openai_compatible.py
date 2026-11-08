@@ -11,8 +11,8 @@ the original chat-completions path unchanged.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import AsyncIterator, Callable, Mapping
-from contextlib import suppress
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
+from contextlib import aclosing, suppress
 from json import JSONDecodeError, dumps, loads
 from typing import Any, Protocol
 
@@ -59,6 +59,7 @@ from tau_ai.retry import (
     retry_delay_seconds,
     wait_for_retry,
 )
+from tau_ai.stall import StreamStallError, stall_guarded, stream_stall_seconds
 from tau_ai.stream import canonicalize_provider_stream
 from tau_ai.tool_call_ids import portable_tool_call_id
 
@@ -276,12 +277,27 @@ class OpenAICompatibleProvider:
                     headers["Authorization"] = f"Bearer {api_key}"
             _apply_session_affinity_headers(headers, session_id, session_affinity_format)
 
+            # The stall timer (tau_ai.stall) ramps per attempt: the first
+            # request after an idle can land on a cold model server that sends
+            # nothing for as long as its weight load takes, so each retry waits
+            # longer before calling the request stalled. The read timeout waits
+            # at least as long, so a long prefill before the first token is not
+            # taken for a stall.
             attempt = 0
             while True:
                 parser = parser_factory()
+                stall = (
+                    stream_stall_seconds(attempt, floor_seconds=self._config.timeout_seconds)
+                    if self._config.stream_stall
+                    else None
+                )
+                stream_options: dict[str, Any] = {}
+                if stall is not None:
+                    timeout = self._config.timeout_seconds
+                    stream_options["timeout"] = httpx.Timeout(timeout, read=max(timeout, stall))
                 try:
                     async with client.stream(
-                        "POST", request_url, json=payload, headers=headers
+                        "POST", request_url, json=payload, headers=headers, **stream_options
                     ) as response:
                         response_provider = _response_header_value(
                             response,
@@ -330,19 +346,17 @@ class OpenAICompatibleProvider:
                             response_provider=response_provider,
                         )
 
-                        async for line in response.aiter_lines():
-                            if signal is not None and signal.is_cancelled():
-                                return
-
-                            event = _parse_sse_line(line)
-                            if event is None:
-                                continue
-
-                            events, stop = parser.feed(event)
-                            for parser_event in events:
-                                yield parser_event
-                            if stop:
-                                break
+                        async with aclosing(
+                            _sse_events(stall_guarded(_response_lines(response), stall), signal)
+                        ) as sse:
+                            async for event in sse:
+                                events, stop = parser.feed(event)
+                                for parser_event in events:
+                                    yield parser_event
+                                if stop:
+                                    break
+                        if signal is not None and signal.is_cancelled():
+                            return
 
                         if parser.fatal:
                             return
@@ -360,6 +374,12 @@ class OpenAICompatibleProvider:
                             yield parser_event
                         return
                 except RETRYABLE_TRANSPORT_ERRORS as exc:
+                    if (
+                        stall is not None
+                        and isinstance(exc, httpx.ReadTimeout)
+                        and not isinstance(exc, StreamStallError)
+                    ):
+                        exc = StreamStallError(max(self._config.timeout_seconds, stall))
                     if not parser.emitted_content and self._should_retry(attempt):
                         delay = retry_delay_seconds(
                             attempt,
@@ -369,7 +389,9 @@ class OpenAICompatibleProvider:
                             attempt=attempt,
                             max_retries=self._config.max_retries,
                             delay_seconds=delay,
-                            reason="network error",
+                            reason=str(exc)
+                            if isinstance(exc, StreamStallError)
+                            else "network error",
                             data={
                                 "error": str(exc),
                                 "error_type": type(exc).__name__,
@@ -1277,6 +1299,26 @@ def _tool_call_to_openai(tool_call: ToolCall) -> dict[str, JSONValue]:
             "arguments": dumps(tool_call.arguments),
         },
     }
+
+
+async def _response_lines(response: httpx.Response) -> AsyncGenerator[str]:
+    """Every line the server sends, so a keep-alive comment counts as activity."""
+    async for line in response.aiter_lines():
+        yield line
+
+
+async def _sse_events(
+    lines: AsyncGenerator[str], signal: CancellationToken | None
+) -> AsyncGenerator[str]:
+    """The data payloads among `lines`; keep-alive and comment lines are not
+    events. Ends early once `signal` is cancelled."""
+    async with aclosing(lines):
+        async for line in lines:
+            if signal is not None and signal.is_cancelled():
+                return
+            event = _parse_sse_line(line)
+            if event is not None:
+                yield event
 
 
 def _parse_sse_line(line: str) -> str | None:

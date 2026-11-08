@@ -1318,8 +1318,9 @@ async def test_openai_compatible_provider_reports_resolved_response_provider() -
         )
 
     assert attempts == 2
-    assert isinstance(events[0], AssistantStartEvent)
-    assert events[0].partial.response_provider == "provider-after-failover"
+    starts = [event for event in events if isinstance(event, AssistantStartEvent)]
+    assert isinstance(starts[0], AssistantStartEvent)
+    assert starts[0].partial.response_provider == "provider-after-failover"
     assert isinstance(events[-1], AssistantDoneEvent)
     assert events[-1].message.provider == "huggingface"
     assert events[-1].message.response_provider == "provider-after-failover"
@@ -1364,6 +1365,7 @@ async def test_openai_compatible_provider_retries_transient_status() -> None:
 
     assert len(requests) == 2
     assert [event.type for event in events] == [
+        "assistant_retry",
         "start",
         "text_start",
         "text_delta",
@@ -1404,7 +1406,7 @@ async def test_openai_compatible_provider_cancellation_stops_retry_backoff() -> 
         )
 
     assert len(requests) == 1
-    assert [event.type for event in events] == ["start", "error"]
+    assert [event.type for event in events] == ["assistant_retry", "start", "error"]
     assert isinstance(events[-1], AssistantErrorEvent)
     assert events[-1].reason == "error"
 
@@ -1818,6 +1820,7 @@ async def test_openai_codex_provider_retries_transient_stream_error() -> None:
     assert len(requests) == 2
     assert [event.type for event in events] == [
         "start",
+        "assistant_retry",
         "text_start",
         "text_delta",
         "text_end",
@@ -1871,6 +1874,7 @@ async def test_openai_codex_provider_retries_transient_response_failed() -> None
     assert len(requests) == 2
     assert [event.type for event in events] == [
         "start",
+        "assistant_retry",
         "text_start",
         "text_delta",
         "text_end",
@@ -2632,6 +2636,7 @@ async def test_anthropic_provider_retries_transient_status_with_event() -> None:
 
     assert len(requests) == 2
     assert [event.type for event in events] == [
+        "assistant_retry",
         "start",
         "text_start",
         "text_delta",
@@ -2727,6 +2732,7 @@ async def test_anthropic_provider_retries_overloaded_529() -> None:
 
     assert len(requests) == 2
     assert [event.type for event in events] == [
+        "assistant_retry",
         "start",
         "text_start",
         "text_delta",
@@ -2783,6 +2789,7 @@ async def test_anthropic_provider_retries_transient_stream_error() -> None:
     assert len(requests) == 2
     assert [event.type for event in events] == [
         "start",
+        "assistant_retry",
         "text_start",
         "text_delta",
         "text_end",

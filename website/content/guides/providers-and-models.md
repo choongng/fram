@@ -577,6 +577,24 @@ shape, and `thinking_levels` for custom models, see
 > }
 > ```
 
+## Slow and stalled servers
+
+A response is ended by time only when the server stops sending. On
+OpenAI-compatible providers, Tau calls a stream stalled when nothing arrives for
+60 seconds, not even a keep-alive comment, and retries it, doubling the wait on
+each try up to 10 minutes. Tau makes five tries by default, so a request that
+lands on a server still loading its model can succeed once the load finishes. A
+server that accepts requests and never answers uses all five, about 25 minutes,
+before Tau reports an error. A steady stream, however slow, is never stopped. A
+`--timeout-seconds` above a try's wait raises that wait to match.
+
+Set `TAU_STREAM_STALL_SECONDS` to use one fixed wait on every try, or to `0` or
+`off` to turn the timer off. Once text, thinking or a tool call has arrived, a
+stall is reported as an error rather than retried.
+
+Each retry appears as a status line while Tau waits, and print mode writes it to
+stderr, so you can see that Tau is waiting, not hung.
+
 ## Single-slot local servers
 
 A llama.cpp server keeps a cached prompt prefix per slot, and with

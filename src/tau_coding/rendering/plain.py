@@ -2,7 +2,7 @@
 
 import typer
 
-from tau_agent.events import MessageEndEvent
+from tau_agent.events import MessageEndEvent, ProviderRetryEvent
 from tau_agent.messages import AssistantMessage
 from tau_coding.events import AutoRetryEndEvent, CodingSessionEvent
 
@@ -14,6 +14,11 @@ class FinalTextRenderer:
         self._error_messages: list[str] = []
 
     def render(self, event: CodingSessionEvent) -> None:
+        if isinstance(event, ProviderRetryEvent):
+            # The agent is waiting out a transient provider failure; say so on
+            # the console, so the user can see why nothing is arriving.
+            typer.echo(f"… {event.message}", err=True)
+            return
         if isinstance(event, AutoRetryEndEvent) and event.success:
             self._failed = False
             self._error_messages.clear()
