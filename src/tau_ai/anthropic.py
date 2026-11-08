@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import httpx
 
+from tau_agent.cache_hints import conversation_long_lived
 from tau_agent.messages import (
     AgentMessage,
     AssistantMessage,
@@ -18,6 +19,7 @@ from tau_agent.messages import (
     Usage,
     UserMessage,
     assistant_content,
+    current_timestamp_ms,
     message_to_user,
 )
 from tau_agent.tools import AgentTool, ToolCall
@@ -60,6 +62,10 @@ from tau_ai.tool_call_ids import portable_tool_call_id
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MAX_TOKENS = 4096
 CACHE_TTL_LONG = "1h"
+CACHE_TTL_DEFAULT = "5m"
+#: How long a default (5-minute) cache entry lives after the request that last
+#: read or wrote it started. A conversation idle longer than this has lost it.
+SHORT_CACHE_LIFETIME_MS = 5 * 60 * 1000
 
 # Anthropic rejects a request carrying more than four cache breakpoints, so the
 # budget is spent where it buys the most: the tool schemas, the system prompt, and
@@ -87,6 +93,10 @@ class AnthropicProvider:
         self._config = config
         self._client = client
         self._owns_client = client is None
+        # Set once Anthropic rejects a replayed thinking block, so the rest of
+        # that tool loop sends no thinking. Cleared at the next user message,
+        # where pruning already drops every older signature.
+        self._thinking_replay_disabled = False
 
     async def aclose(self) -> None:
         """Close the underlying HTTP client if this provider created it."""
@@ -103,11 +113,25 @@ class AnthropicProvider:
         tools: list[AgentTool],
         signal: CancellationToken | None = None,
         session_id: str | None = None,
+        long_lived: bool | None = None,
     ) -> AsyncIterator[AssistantMessageEvent]:
-        """Stream one response as Pi-compatible assistant message events."""
+        """Stream one response as Pi-compatible assistant message events.
+
+        ``long_lived`` says the conversation is a long-lived one (an interactive
+        main session), so the cache breakpoints ask for the 1-hour TTL instead of
+        the default five minutes. ``None`` reads the agent loop's hint
+        (:func:`tau_agent.cache_hints.conversation_long_lived`).
+        """
         del session_id
+        if long_lived is None:
+            long_lived = conversation_long_lived()
         raw = self._stream_provider_events(
-            model=model, system=system, messages=messages, tools=tools, signal=signal
+            model=model,
+            system=system,
+            messages=messages,
+            tools=tools,
+            signal=signal,
+            long_lived=long_lived,
         )
         return canonicalize_provider_stream(
             raw, api="anthropic-messages", provider="anthropic", model=model
@@ -121,8 +145,20 @@ class AnthropicProvider:
         messages: list[AgentMessage],
         tools: list[AgentTool],
         signal: CancellationToken | None = None,
+        long_lived: bool = False,
     ) -> AsyncIterator[ProviderEvent]:
         """Stream one Anthropic response as provider-neutral events."""
+        cache_ttl = _cache_ttl(
+            self._config.cache_retention,
+            long_lived=long_lived,
+            supports_long=self._config.supports_long_cache_retention,
+            messages=messages,
+            now_ms=current_timestamp_ms(),
+            model=model,
+        )
+
+        if messages and isinstance(messages[-1], UserMessage):
+            self._thinking_replay_disabled = False
 
         async def iterator() -> AsyncIterator[ProviderEvent]:
             client = self._get_client()
@@ -150,6 +186,8 @@ class AnthropicProvider:
                 supports_images=self._config.supports_images,
                 cache_retention=self._config.cache_retention,
                 cache_control_on_tools=self._config.cache_control_on_tools,
+                thinking_disabled=self._thinking_replay_disabled,
+                cache_ttl=cache_ttl,
             )
             headers = {
                 "anthropic-version": ANTHROPIC_VERSION,
@@ -179,6 +217,37 @@ class AnthropicProvider:
                         if response.status_code >= 400:
                             body = await response.aread()
                             body_text = body.decode(errors="replace")
+                            if (
+                                not self._thinking_replay_disabled
+                                and _is_thinking_signature_rejection(
+                                    status_code=response.status_code,
+                                    body_text=body_text,
+                                )
+                            ):
+                                # Anthropic no longer recognises a replayed
+                                # thinking signature (the bound prefix changed:
+                                # compaction, injected context, resume, branch).
+                                # Rebuild once without thinking and latch, so
+                                # the session continues and later requests do
+                                # not repeat the rejection.
+                                self._thinking_replay_disabled = True
+                                payload = _build_messages_payload(
+                                    model=model,
+                                    system=system,
+                                    oauth_system_prompt=self._config.oauth_system_prompt,
+                                    messages=messages,
+                                    tools=tools,
+                                    max_tokens=self._config.max_tokens,
+                                    thinking_budget_tokens=self._config.thinking_budget_tokens,
+                                    thinking_effort=self._config.thinking_effort,
+                                    thinking_mode=self._config.thinking_mode,
+                                    supports_images=self._config.supports_images,
+                                    cache_retention=self._config.cache_retention,
+                                    cache_control_on_tools=self._config.cache_control_on_tools,
+                                    thinking_disabled=True,
+                                    cache_ttl=cache_ttl,
+                                )
+                                continue
                             if self._should_retry(attempt, status_code=response.status_code):
                                 delay = retry_delay_seconds(
                                     attempt,
@@ -338,10 +407,12 @@ class AnthropicProvider:
                                     thinking_signature=thinking_signature,
                                 ),
                             )
+                        usage = usage or Usage()
+                        usage.cache_ttl = cache_ttl
                         yield ProviderResponseEndEvent(
                             message=AssistantMessage(
                                 content=content,
-                                usage=usage or Usage(),
+                                usage=usage,
                             ),
                             finish_reason=finish_reason,
                         )
@@ -441,11 +512,13 @@ def _build_messages_payload(
     supports_images: bool = False,
     cache_retention: CacheRetention = CACHE_RETENTION_SHORT,
     cache_control_on_tools: bool = True,
+    thinking_disabled: bool = False,
+    cache_ttl: str | None = None,
 ) -> dict[str, JSONValue]:
     resolved_max_tokens = max_tokens or DEFAULT_MAX_TOKENS
     if thinking_budget_tokens is not None:
         resolved_max_tokens = max(resolved_max_tokens, thinking_budget_tokens + 1024)
-    cache_control = _cache_control(cache_retention)
+    cache_control = _cache_control(cache_retention, cache_ttl)
     payload_messages = []
     for message in messages:
         converted = _anthropic_message(message, supports_images=supports_images)
@@ -454,6 +527,17 @@ def _build_messages_payload(
         if converted.get("role") == "assistant" and not converted.get("content"):
             continue
         payload_messages.append(converted)
+    if thinking_disabled:
+        _drop_thinking_blocks(payload_messages)
+    else:
+        _prune_replayed_thinking(payload_messages)
+    # Stripping replayed thinking can empty a thinking-only turn; Anthropic
+    # rejects empty assistant content, so omit that inert turn too.
+    payload_messages = [
+        converted
+        for converted in payload_messages
+        if converted.get("role") != "assistant" or converted.get("content")
+    ]
     _apply_message_cache_breakpoints(payload_messages, cache_control)
     payload: dict[str, JSONValue] = {
         "model": model,
@@ -462,16 +546,17 @@ def _build_messages_payload(
         "system": _anthropic_system(system, oauth_system_prompt, cache_control),
         "messages": cast("JSONValue", payload_messages),
     }
-    if thinking_mode == "disabled":
-        payload["thinking"] = {"type": "disabled"}
-    elif thinking_mode == "adaptive" and thinking_effort is not None:
-        payload["thinking"] = {"type": "adaptive", "display": "summarized"}
-        payload["output_config"] = {"effort": thinking_effort}
-    elif thinking_budget_tokens is not None:
-        payload["thinking"] = {
-            "type": "enabled",
-            "budget_tokens": thinking_budget_tokens,
-        }
+    if not thinking_disabled:
+        if thinking_mode == "disabled":
+            payload["thinking"] = {"type": "disabled"}
+        elif thinking_mode == "adaptive" and thinking_effort is not None:
+            payload["thinking"] = {"type": "adaptive", "display": "summarized"}
+            payload["output_config"] = {"effort": thinking_effort}
+        elif thinking_budget_tokens is not None:
+            payload["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": thinking_budget_tokens,
+            }
     if tools:
         # Some Anthropic-protocol gateways accept cache_control everywhere except
         # inside tool objects, so the tools breakpoint is separately suppressible.
@@ -486,14 +571,69 @@ def _build_messages_payload(
     return payload
 
 
-def _cache_control(cache_retention: CacheRetention) -> dict[str, JSONValue] | None:
-    """Return the cache_control marker for a retention preference, if enabled.
+def _cache_ttl(
+    cache_retention: CacheRetention,
+    *,
+    long_lived: bool,
+    supports_long: bool = True,
+    messages: list[AgentMessage] | None = None,
+    now_ms: int | None = None,
+    model: str | None = None,
+) -> str | None:
+    """Return the TTL one request's breakpoints ask for, or None when uncached.
 
-    Attach sites copy the result, so no two breakpoints share one dict.
+    Anthropic serves a 5-minute request from a prefix written at either TTL,
+    but a 1-hour request only from one written at 1 hour, so a warm
+    conversation that flips from 5m to 1h rewrites everything it cached. The
+    TTL therefore only moves to 1h when that costs no extra rewrite, and then
+    stays there:
+
+    - a long retention preference or a long-lived conversation (an interactive
+      session waiting on its user) asks for 1h from the first request;
+    - a conversation whose history already used 1h on this model keeps it, so
+      a resumed conversation reads what it wrote and a switch to another model,
+      whose cache starts empty, does not inherit it;
+    - a conversation idle longer than a 5-minute entry lives (a run waiting on
+      background work, a resumed session) has lost its short cache anyway, so
+      the rewrite it pays now is written at 1h and later waits hit.
+
+    None of it applies where the model cannot keep a 1-hour cache.
     """
     if cache_retention == CACHE_RETENTION_NONE:
         return None
-    if cache_retention == CACHE_RETENTION_LONG:
+    if not supports_long:
+        return CACHE_TTL_DEFAULT
+    if cache_retention == CACHE_RETENTION_LONG or long_lived:
+        return CACHE_TTL_LONG
+    last_request_ms: int | None = None
+    for message in messages or ():
+        if isinstance(message, AssistantMessage) and message.api == "anthropic-messages":
+            if message.usage.cache_ttl == CACHE_TTL_LONG and model in (None, message.model):
+                return CACHE_TTL_LONG
+            last_request_ms = message.timestamp
+    if (
+        last_request_ms is not None
+        and now_ms is not None
+        and now_ms - last_request_ms > SHORT_CACHE_LIFETIME_MS
+    ):
+        return CACHE_TTL_LONG
+    return CACHE_TTL_DEFAULT
+
+
+def _cache_control(
+    cache_retention: CacheRetention, cache_ttl: str | None = None
+) -> dict[str, JSONValue] | None:
+    """Return the cache_control marker for a retention preference, if enabled.
+
+    Attach sites copy the result, so no two breakpoints share one dict. The
+    default TTL is left implicit, so a short-cache request carries the plain
+    ``{"type": "ephemeral"}`` marker; only the change of TTL alters the payload.
+    """
+    if cache_ttl is None:
+        cache_ttl = _cache_ttl(cache_retention, long_lived=False)
+    if cache_retention == CACHE_RETENTION_NONE or cache_ttl is None:
+        return None
+    if cache_ttl == CACHE_TTL_LONG:
         return {"type": "ephemeral", "ttl": CACHE_TTL_LONG}
     return {"type": "ephemeral"}
 
@@ -610,6 +750,88 @@ def _mark_cache_breakpoint(
         if isinstance(inner, list) and not inner:
             return
     last_block["cache_control"] = dict(cache_control)
+
+
+_THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
+
+
+def _is_thinking_signature_rejection(*, status_code: int, body_text: str) -> bool:
+    """Return whether a 400 names a replayed thinking block Anthropic rejects.
+
+    Only signature/block_binding complaints about thinking blocks match, so
+    an ordinary bad-request 400 stays terminal.
+    """
+    if status_code != 400:
+        return False
+    lowered = body_text.lower()
+    if "thinking" not in lowered:
+        return False
+    return "signature" in lowered or "block_binding" in lowered or "block binding" in lowered
+
+
+def _strip_thinking_from_message(message: dict[str, JSONValue]) -> None:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return
+    message["content"] = [
+        block
+        for block in content
+        if not (isinstance(block, Mapping) and block.get("type") in _THINKING_BLOCK_TYPES)
+    ]
+
+
+def _drop_thinking_blocks(messages: list[dict[str, JSONValue]]) -> None:
+    """Remove every replayed thinking block from an Anthropic payload."""
+    for message in messages:
+        if message.get("role") == "assistant":
+            _strip_thinking_from_message(message)
+
+
+def _thinking_continuation_indexes(
+    messages: list[dict[str, JSONValue]],
+) -> set[int]:
+    """Return the assistant indexes of the tool loop the request continues.
+
+    Walk back from the end over tool_result messages and the assistant turns
+    they answer, and stop at the first user message that is not tool results:
+    the turn the loop is serving. Every assistant step since then keeps its
+    thinking, so consecutive requests in one tool loop only ever append and
+    the cached prefix stays byte-stable; each replayed block also goes out
+    under exactly the prefix it was produced with.
+
+    Thinking from before that user message is dropped. It is bound to a
+    request prefix that compaction, injected context, resume or branch can
+    change under it, and a replay under a changed prefix is rejected with a 400.
+    """
+    keep: set[int] = set()
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        role = message.get("role")
+        if role == "assistant":
+            keep.add(index)
+            continue
+        content = message.get("content")
+        blocks = content if isinstance(content, list) else []
+        if (
+            role == "user"
+            and blocks
+            and all(
+                isinstance(block, Mapping) and block.get("type") == "tool_result"
+                for block in blocks
+            )
+        ):
+            continue
+        break
+    return keep
+
+
+def _prune_replayed_thinking(messages: list[dict[str, JSONValue]]) -> None:
+    """Keep replayed thinking only for the tool loop the request continues."""
+    keep = _thinking_continuation_indexes(messages)
+    for index, message in enumerate(messages):
+        if message.get("role") != "assistant" or index in keep:
+            continue
+        _strip_thinking_from_message(message)
 
 
 def _anthropic_message(message: AgentMessage, *, supports_images: bool) -> dict[str, JSONValue]:

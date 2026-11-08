@@ -189,6 +189,8 @@ def test_provider_compat_can_clamp_the_one_hour_ttl_on_oauth(tmp_path) -> None:
 
     assert isinstance(provider, AnthropicProvider)
     assert provider._config.cache_retention == "short"
+    # A long-lived conversation must not ask for 1h behind this cap either.
+    assert provider._config.supports_long_cache_retention is False
 
 
 def test_provider_compat_can_suppress_only_the_tools_breakpoint(tmp_path) -> None:

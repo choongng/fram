@@ -236,7 +236,7 @@ several providers speak the Anthropic protocol through a gateway.
 | Key | Effect when `false` |
 | --- | --- |
 | `supportsCacheControl` | No cache breakpoints at all; the request is byte-identical to an uncached one |
-| `supportsLongCacheRetention` | Clamps the 1 hour TTL to the 5 minute default |
+| `supportsLongCacheRetention` | Holds every request at the 5 minute TTL, including interactive sessions |
 | `supportsCacheControlOnTools` | Drops only the tool-schema breakpoint |
 
 Set them per provider or per model. For example, to stop requesting the one-hour

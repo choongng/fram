@@ -89,6 +89,24 @@ promotes a string `content` to a one-element text block first, and skips empty
 text and empty `tool_result` content, because a breakpoint on an empty block is
 rejected outright.
 
+## Replayed thinking
+
+Anthropic binds a thinking block's signature to the exact message prefix that
+produced it. Replaying old blocks makes every change to that prefix (compaction,
+injected context, resume, branch) a 400 on all later requests.
+
+`_prune_replayed_thinking` keeps thinking only for the tool loop the request
+continues: every assistant step since the last real user message. Dropping it
+from earlier steps of the same loop would change the prefix on each tool call
+and rewrite the cache, so the whole live loop is kept. Requests within a loop
+therefore only append.
+
+If the provider still rejects a signature, the request is rebuilt once with no
+thinking and `_thinking_replay_disabled` holds that until the next user message,
+where pruning has already dropped every older signature. The check matches only
+a 400 naming a thinking signature or block binding, so an ordinary bad request
+stays terminal.
+
 ## Retention
 
 `AnthropicConfig.cache_retention` is a `Literal["none", "short", "long"]`:
@@ -106,6 +124,57 @@ rejected outright.
 - `none` emits no breakpoints at all and leaves the payload byte-identical to the
   pre-caching shape, plain-string `system` field included.
 
+Under `short`, a conversation asks for `ttl: "1h"` when doing so costs no extra
+rewrite, and then keeps it (`_cache_ttl` in `tau_ai/anthropic.py`):
+
+- **Long-lived from the start.** The interactive TUI session ends every turn
+  waiting on its user, so it asks for `1h` on every request.
+  `CodingSessionConfig.long_lived` sets it, the agent loop publishes it for each
+  request through `tau_agent.cache_hints`, and the Anthropic provider reads it.
+- **Already 1h.** A conversation whose history has an Anthropic turn on the same
+  model recorded at `1h` keeps asking for `1h`, so a resumed conversation reads
+  what it wrote.
+- **Idle past five minutes.** A request more than five minutes after the
+  previous Anthropic turn has lost its `5m` cache anyway (a parent waiting on
+  sub-agents or a long job, a print run resumed later), so the rewrite it pays
+  now is written at `1h` for 0.75x more, and every later wait hits.
+
+Everything else (a worker whose requests come seconds apart) keeps the
+five-minute default. The TTL each request used is stored on its
+`usage.cache_ttl`. Where the model cannot keep a 1-hour cache
+(`supportsLongCacheRetention = false`, carried as
+`AnthropicConfig.supports_long_cache_retention`) every request stays at `5m`,
+long-lived or not.
+
+The idle rule only sees a wait once it has happened: the switch to `1h` happens
+on a request that has already lost its `5m` cache, so it costs no extra rewrite.
+The gap is measured from the previous turn's timestamp, which is when its
+response ended, while the cache lifetime runs from its request's start, so a
+slow response plus a short wait can still miss once at `5m` before the switch.
+
+A conversation never asks for `1h` while its `5m` prefix is still live, because
+Anthropic serves a `5m` request from a prefix written at either TTL, but a `1h`
+request only from a prefix written at `1h`. Measured on `claude-opus-5-5` with a
+conversation that grows each turn (a byte-identical replay hits either way, so
+it cannot show this):
+
+| TTLs asked, turn by turn | what the turn in bold read and wrote |
+| --- | --- |
+| 5m, 5m, **1h** | read 0, wrote 28,291: the whole prompt again |
+| 1h, **5m**, **5m** | each read the full prefix, 1h part included |
+| 1h, 5m, 5m, **1h** | read 24,473 (the last `1h` write), rewrote the `5m` turns at `1h` |
+| 1h, 1h, 1h | each read everything and wrote only its new turn |
+
+So the first `1h` request after a run of `5m` turns rewrites the whole prompt,
+and mixing the two costs in the steady state too: each token is written at 1.25x
+for `5m`, then again at 2x by the next `1h` request, about 3.25x of the input
+price against 2x for writing it once at `1h`. A main session ends every turn
+waiting on its user, so that second write would be the common case.
+
+A worker makes its requests seconds apart and ends, so the cheaper `5m` write
+pays there. One that waits on a long test misses once, then switches to `1h` on
+that request.
+
 `none` exists because several catalog providers speak the Anthropic wire protocol
 through a gateway rather than being Anthropic. `minimax`, `minimax-cn`,
 `fireworks`, and `vercel-ai-gateway` are all `kind = "anthropic"` and so route
@@ -121,7 +190,7 @@ compat → per-model compat, exactly like `forceAdaptiveThinking`:
 | Key | Effect when `false` |
 | --- | --- |
 | `supportsCacheControl` | Resolves to `none`. Detected `false` for any host that is not `api.anthropic.com` |
-| `supportsLongCacheRetention` | Clamps `long` to `short` |
+| `supportsLongCacheRetention` | Clamps `long` to `short`, and holds long-lived and idle conversations at `5m` |
 | `supportsCacheControlOnTools` | Drops only the tools breakpoint |
 
 Capability only ever narrows intent, so the two compose with no precedence rule.

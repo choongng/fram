@@ -51,6 +51,8 @@ class Usage(WireModel):
     cache_read: int = 0
     cache_write: int = 0
     cache_write_1h: int | None = None
+    cache_ttl: str | None = None
+    """Prompt-cache TTL the request asked for ("5m" or "1h"); None if uncached."""
     reasoning: int | None = None
     total_tokens: int = 0
     cost: UsageCost = UsageCost()

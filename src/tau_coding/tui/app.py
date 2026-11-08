@@ -9206,6 +9206,7 @@ async def run_tui_app(
                 runtime_provider_config=runtime_provider_config,
                 auto_compact_token_threshold=auto_compact_token_threshold,
                 index_on_first_persist=index_on_first_persist,
+                long_lived=True,
                 shell_command_prefix=shell_settings.shell_command_prefix,
                 extension_paths=extension_paths,
                 extensions_enabled=extensions_enabled,
