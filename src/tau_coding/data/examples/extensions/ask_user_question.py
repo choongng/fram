@@ -1,6 +1,6 @@
 """Let the agent ask the user a multiple-choice question.
 
-Install by copying into `~/.tau/extensions/`, or run:
+Install by copying into the `extensions/` folder of the agent's home, or run:
 
     tau -e examples/extensions/ask_user_question.py
 """

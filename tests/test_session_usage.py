@@ -1,3 +1,5 @@
+import pytest
+
 from tau_agent import (
     AssistantMessage,
     BranchSummaryEntry,
@@ -9,6 +11,8 @@ from tau_agent import (
     UserMessage,
 )
 from tau_agent.messages import Usage, UsageCost, assistant_content
+from tau_coding import session_usage
+from tau_coding.branding import Branding
 from tau_coding.session_usage import USAGE_SCRIPT, collect_session_usage, render_usage_dashboard
 
 
@@ -233,3 +237,12 @@ def test_render_usage_dashboard_without_requests() -> None:
     markup = render_usage_dashboard(collect_session_usage([]))
 
     assert "No assistant responses" in markup
+
+
+def test_render_usage_dashboard_escapes_the_product_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(session_usage, "BRANDING", Branding(product_name="A<b>&C"))
+    usage = collect_session_usage([_assistant("a1", usage=Usage(input=10))])
+
+    assert "Costs use A&lt;b&gt;&amp;C's provider" in render_usage_dashboard(usage)
