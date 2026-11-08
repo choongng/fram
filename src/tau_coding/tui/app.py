@@ -538,6 +538,8 @@ class CompletionActionTarget(Protocol):
 
     def action_toggle_thinking(self) -> None: ...
 
+    def action_toggle_sidebar(self) -> None: ...
+
     def action_edit_queued_message(self) -> bool: ...
 
     async def action_submit_prompt(self) -> None: ...
@@ -678,6 +680,10 @@ class PromptInput(TextArea):
     def action_toggle_thinking(self) -> None:
         """Toggle app-level thinking-token display."""
         self._completion_target().action_toggle_thinking()
+
+    def action_toggle_sidebar(self) -> None:
+        """Toggle app-level sidebar visibility."""
+        self._completion_target().action_toggle_sidebar()
 
     def action_clear_prompt(self) -> None:
         """Clear the current prompt."""
@@ -868,6 +874,9 @@ class PromptInput(TextArea):
         elif event.key == keybindings.toggle_thinking:
             event.stop()
             self._completion_target().action_toggle_thinking()
+        elif event.key == keybindings.toggle_sidebar:
+            event.stop()
+            self._completion_target().action_toggle_sidebar()
         elif event.key == keybindings.copy_message:
             if self.selected_text:
                 return
@@ -6930,6 +6939,10 @@ class TauTuiApp(App[None]):
             theme=self.tui_settings.resolved_theme,
         )
 
+    def action_toggle_sidebar(self) -> None:
+        """Toggle sidebar visibility for this session."""
+        self._toggle_sidebar_visibility()
+
     def action_toggle_thinking(self) -> None:
         """Toggle thinking-token display in the transcript."""
         self.state.toggle_thinking()
@@ -8574,6 +8587,7 @@ def _app_bindings(keybindings: TuiKeybindings) -> list[Binding]:
         ),
         Binding(keybindings.toggle_tool_results, "toggle_tool_results", "Tool results"),
         Binding(keybindings.toggle_thinking, "toggle_thinking", "Thinking tokens"),
+        Binding(keybindings.toggle_sidebar, "toggle_sidebar", "Sidebar"),
         Binding(keybindings.copy_message, "clear_prompt", "Clear input"),
         Binding(keybindings.quit, "quit", "Quit"),
     ]
@@ -8677,6 +8691,7 @@ def _hidden_prompt_bindings(
         (keybindings.model_cycle_reverse, "cycle_model_reverse"),
         (keybindings.toggle_tool_results, "toggle_tool_results"),
         (keybindings.toggle_thinking, "toggle_thinking"),
+        (keybindings.toggle_sidebar, "toggle_sidebar"),
         (keybindings.copy_message, "clear_prompt"),
         (keybindings.accept_completion, "accept_completion"),
         (keybindings.completion_next, "completion_next"),

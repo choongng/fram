@@ -9646,6 +9646,39 @@ async def test_tui_app_uses_configured_command_palette_keybinding() -> None:
 
 
 @pytest.mark.anyio
+async def test_tui_app_uses_configured_sidebar_toggle_keybinding() -> None:
+    app = TauTuiApp(
+        FakeSession(),
+        tui_settings=TuiSettings(keybindings=TuiKeybindings(toggle_sidebar="ctrl+j")),
+    )
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        assert not app.has_class("-hide-sidebar")
+
+        await pilot.press("ctrl+j")
+        await pilot.pause()
+        assert app.has_class("-hide-sidebar")
+
+        await pilot.press("ctrl+j")
+        await pilot.pause()
+        assert not app.has_class("-hide-sidebar")
+
+
+@pytest.mark.anyio
+async def test_tui_app_toggles_sidebar_from_prompt_with_default_keybinding() -> None:
+    app = TauTuiApp(FakeSession())
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        prompt = app.query_one("#prompt")
+        prompt.focus()
+        assert not app.has_class("-hide-sidebar")
+
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        assert app.has_class("-hide-sidebar")
+
+
+@pytest.mark.anyio
 async def test_tui_app_quits_from_focused_prompt_with_default_keybinding() -> None:
     app = TauTuiApp(FakeSession())
 

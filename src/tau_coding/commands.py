@@ -543,6 +543,7 @@ def _hotkeys_command(context: CommandContext) -> CommandResult:
         "- Shift+Tab: cycle thinking mode",
         "- Ctrl+T: toggle thinking tokens",
         "- Ctrl+O: collapse or expand tool output",
+        "- Ctrl+B: show or hide the sidebar",
         "- Ctrl+C: clear prompt input",
         "- Ctrl+D: quit",
     ]

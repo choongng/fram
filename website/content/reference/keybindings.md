@@ -37,6 +37,7 @@ These are the default keys in the interactive [TUI](/guides/tui/). Run
 | `Shift+Ctrl+P` | Cycle scoped (favorite) models backward |
 | `Shift+Tab` | Cycle the thinking mode |
 | `Ctrl+T` | Toggle display of thinking/reasoning tokens |
+| `Ctrl+B` | Show or hide the session sidebar (session-only, like `/sidebar`) |
 
 ## Output & session
 
@@ -49,8 +50,10 @@ These are the default keys in the interactive [TUI](/guides/tui/). Run
 > [!NOTE] Remapping
 > Keys use Textual's syntax (`ctrl+k`, `shift+tab`, `down`, `f2`, …). Tau rejects
 > unknown names, empty keys, and duplicate assignments so mistakes fail early. Any
-> key you don't set keeps its default. If your terminal cannot distinguish
-> `Shift+Enter` from `Enter`, choose a key it can report separately:
+> key you don't set keeps its default. `Ctrl+B` is also tmux's prefix, where only
+> `Ctrl+B Ctrl+B` reaches Tau, so tmux users may prefer another `"toggle_sidebar"`
+> key in `~/.tau/tui.json`. If your terminal cannot distinguish `Shift+Enter` from
+> `Enter`, choose a key it can report separately:
 >
 > ```json
 > {
