@@ -21,10 +21,14 @@ class ShellSettings:
 
     shell_command_prefix: str | None = None
     default_project_trust: TrustDefault = "ask"
+    tool_result_inline_tokens: int | None = None
+    """Tokens of a tool result kept inline before it is buffered to a file."""
 
-    def to_json(self) -> dict[str, str]:
+    def to_json(self) -> dict[str, str | int]:
         """Serialize these settings to JSON-compatible data."""
-        result: dict[str, str] = {}
+        result: dict[str, str | int] = {}
+        if self.tool_result_inline_tokens is not None:
+            result["toolResultInlineTokens"] = self.tool_result_inline_tokens
         if self.default_project_trust != "ask":
             result["defaultProjectTrust"] = self.default_project_trust
         if self.shell_command_prefix is not None:
@@ -62,13 +66,22 @@ def shell_settings_from_json(data: dict[str, Any]) -> ShellSettings:
     if raw_default not in {"ask", "always", "never"}:
         raise ShellConfigError("defaultProjectTrust must be ask, always, or never")
 
+    raw_inline = data.get("toolResultInlineTokens")
+    if raw_inline is not None and (
+        not isinstance(raw_inline, int) or isinstance(raw_inline, bool) or raw_inline <= 0
+    ):
+        raise ShellConfigError("toolResultInlineTokens must be a positive integer")
+
     raw_prefix = data.get("shellCommandPrefix", data.get("shell_command_prefix"))
     if raw_prefix is None:
-        return ShellSettings(default_project_trust=raw_default)
+        return ShellSettings(
+            default_project_trust=raw_default, tool_result_inline_tokens=raw_inline
+        )
     if not isinstance(raw_prefix, str):
         raise ShellConfigError("shellCommandPrefix must be a string")
     prefix = raw_prefix.strip()
     return ShellSettings(
         shell_command_prefix=prefix or None,
         default_project_trust=raw_default,
+        tool_result_inline_tokens=raw_inline,
     )

@@ -14,7 +14,6 @@ import difflib
 import json
 import os
 import signal
-import tempfile
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -49,6 +48,8 @@ DEFAULT_BASH_TIMEOUT_SECONDS = 600.0
 #: tools `create_coding_tools` builds, so one session can run with a different
 #: bound without changing anyone else's.
 BASH_TIMEOUT_ENV_VAR = "TAU_BASH_TIMEOUT_SECONDS"
+#: What `bash` returns for a command that printed nothing.
+NO_OUTPUT = "(no output)"
 IMAGE_SNIFF_BYTES = 64 * 1024
 UTF8_BOM = "\ufeff"
 
@@ -660,11 +661,9 @@ def create_bash_tool_definition(
     shell children from pipelines or compound commands do not continue running;
     non-POSIX platforms fall back to killing the direct subprocess.
 
-    Output is tail-truncated to `DEFAULT_MAX_OUTPUT_LINES` lines or
-    `DEFAULT_MAX_OUTPUT_BYTES` bytes. When truncation occurs, the full output is
-    written to a temporary log file and that path is reported in `data`.
-    Successful and failed command results both include exit code, timeout state,
-    duration, truncation metadata, and full-output path metadata.
+    Output is returned whole; a coding session windows an oversized result and
+    saves the full text (see `tau_coding.tool_buffers`). Successful and failed
+    command results both include exit code, timeout state and duration.
     """
     root = Path.cwd() if cwd is None else Path(cwd)
     prefix = shell_command_prefix.strip() if shell_command_prefix else None
@@ -711,30 +710,9 @@ def create_bash_tool_definition(
             signal=signal,
         )
 
-        output = output_bytes.decode(errors="replace")
-        truncation = truncate_tail(output)
-        full_output_path: str | None = None
-        output_text = truncation.content or "(no output)"
-        if truncation.truncated:
-            full_output_path = _write_temp_output(output)
-            start_line = truncation.total_lines - truncation.output_lines + 1
-            end_line = truncation.total_lines
-            if truncation.last_line_partial:
-                output_text += (
-                    f"\n\n[Showing last {format_size(truncation.output_bytes)} of line {end_line}. "
-                    f"Full output: {full_output_path}]"
-                )
-            elif truncation.truncated_by == "lines":
-                output_text += (
-                    f"\n\n[Showing lines {start_line}-{end_line} of {truncation.total_lines}. "
-                    f"Full output: {full_output_path}]"
-                )
-            else:
-                output_text += (
-                    f"\n\n[Showing lines {start_line}-{end_line} of {truncation.total_lines} "
-                    f"({format_size(DEFAULT_MAX_OUTPUT_BYTES)} limit). "
-                    f"Full output: {full_output_path}]"
-                )
+        # Not cut here: the session buffers any oversized tool result, this one
+        # included, and keeps the whole of it in a file the model can page.
+        output_text = output_bytes.decode(errors="replace") or NO_OUTPUT
 
         exit_code = process.returncode
         status: str | None = None
@@ -763,8 +741,6 @@ def create_bash_tool_definition(
                 "timeout_seconds": timeout,
                 "cancelled": cancelled,
                 "duration_seconds": round(monotonic() - start, 3),
-                "truncation": truncation.to_json(),
-                "full_output_path": full_output_path,
                 "shell_command_prefix_applied": prefix is not None,
             },
         )
@@ -773,9 +749,8 @@ def create_bash_tool_definition(
         name="bash",
         description=(
             "Execute a bash command in the current working directory. Returns stdout and stderr. "
-            f"Output is truncated to last {DEFAULT_MAX_OUTPUT_LINES} lines or "
-            f"{DEFAULT_MAX_OUTPUT_BYTES // 1024}KB (whichever is hit first). If truncated, "
-            "full output is saved to a temp file. Optionally provide a timeout in seconds"
+            "Long output is shortened to its end, and the full output is saved to a "
+            "file named in the result. Optionally provide a timeout in seconds"
             + (
                 f"; without one the command is killed after {default_timeout:g} seconds."
                 if default_timeout is not None
@@ -936,53 +911,6 @@ def truncate_head(
         total_bytes,
         len(output_lines),
         len(output.encode()),
-    )
-
-
-def truncate_tail(
-    content: str,
-    *,
-    max_lines: int = DEFAULT_MAX_OUTPUT_LINES,
-    max_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
-) -> TruncationResult:
-    lines = _split_lines_for_counting(content)
-    total_lines = len(lines)
-    total_bytes = len(content.encode())
-    if total_lines <= max_lines and total_bytes <= max_bytes:
-        return _truncation_result(
-            content, False, None, total_lines, total_bytes, total_lines, total_bytes
-        )
-
-    output_lines: list[str] = []
-    output_bytes = 0
-    truncated_by = "lines"
-    last_line_partial = False
-    for line in reversed(lines):
-        line_bytes = len(line.encode()) + (1 if output_lines else 0)
-        if len(output_lines) >= max_lines:
-            truncated_by = "lines"
-            break
-        if output_bytes + line_bytes > max_bytes:
-            truncated_by = "bytes"
-            if not output_lines:
-                clipped = _truncate_string_to_bytes_from_end(line, max_bytes)
-                output_lines.insert(0, clipped)
-                output_bytes = len(clipped.encode())
-                last_line_partial = True
-            break
-        output_lines.insert(0, line)
-        output_bytes += line_bytes
-
-    output = "\n".join(output_lines)
-    return _truncation_result(
-        output,
-        True,
-        truncated_by,
-        total_lines,
-        total_bytes,
-        len(output_lines),
-        len(output.encode()),
-        last_line_partial=last_line_partial,
     )
 
 
@@ -1273,18 +1201,6 @@ def _kill_process_tree(process: asyncio.subprocess.Process) -> None:
             process.kill()
         except ProcessLookupError:
             return
-
-
-def _write_temp_output(output: str) -> str:
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        prefix="tau-bash-",
-        suffix=".log",
-        delete=False,
-    ) as handle:
-        handle.write(output)
-        return handle.name
 
 
 class _FileLockContext:

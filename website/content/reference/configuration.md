@@ -73,6 +73,11 @@ policy. The default is `ask`. Interactive `ask` opens the trust modal; headless
 `ask` safely declines. `trust.json` is managed atomically by Tau; do not add
 relative paths or unknown fields. See [Project trust](/guides/project-trust/).
 
+`settings.json` may also set `"toolResultInlineTokens"`, a positive token count:
+tool results larger than it are saved to a file and only a window of them stays
+in context. `TAU_TOOL_RESULT_INLINE_TOKENS` overrides it for one run. See [Large
+tool results](/guides/context/#large-tool-results).
+
 Startup update checks cache their latest PyPI result in
 `~/.tau/cache/update-check.json` and refresh at most once per day. A failed
 check (for example while offline) is retried after an hour. Set

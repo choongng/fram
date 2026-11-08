@@ -111,10 +111,10 @@ Runs a shell command in the working directory.
 | `description` | no | string | Short summary of the command's purpose, shown as the call's label. |
 | `timeout` | no | number | Max runtime in seconds (> 0). Default `600`. |
 
-Combines stdout and stderr, succeeds on exit code `0`, and returns the **tail**
-of large output (truncated to 2,000 lines / 50 KB; the full output is written to
-a temp `.log` file whose path is included in the result). On POSIX, a timeout
-kills the whole process group.
+Combines stdout and stderr and succeeds on exit code `0`. Large output is
+reduced to its **tail**, and the full text is saved to a file named in the
+result (see [Large tool results](/guides/context/#large-tool-results)). On
+POSIX, a timeout kills the whole process group.
 
 A call without `timeout` is stopped after 600 seconds, and the result says the
 default was hit so the model can retry with a larger value. Set

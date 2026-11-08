@@ -17,6 +17,7 @@ from tau_agent.messages import (
     AgentMessage,
     AssistantMessage,
     CustomMessage,
+    ToolCall,
     Usage,
     UserMessage,
     message_text,
@@ -42,7 +43,7 @@ from tau_agent.session.entries import SessionEntry
 from tau_agent.session.jsonl import entry_to_json_line
 from tau_agent.session.tree import SessionTreeError, path_to_entry
 from tau_agent.tool_history import ToolHistoryRepair, repair_tool_history
-from tau_agent.tools import AgentTool
+from tau_agent.tools import AgentTool, AgentToolResult
 from tau_agent.types import JSONValue
 from tau_ai.model_catalog import ModelCatalogProvider, RuntimeModel, RuntimeModelCatalog
 from tau_ai.model_limits import ModelLimitsProvider, RuntimeModelLimits
@@ -170,6 +171,13 @@ from tau_coding.thinking import (
     ThinkingLevel,
     next_thinking_level,
     normalize_thinking_level,
+)
+from tau_coding.tool_buffers import (
+    BufferLimits,
+    buffer_tool_result,
+    default_buffer_dir,
+    output_file_name,
+    session_outputs_dir,
 )
 from tau_coding.tools import ImageSupportState, create_bash_tool, create_coding_tools
 
@@ -388,6 +396,7 @@ class CodingSessionConfig:
     """
     index_on_first_persist: bool = False
     shell_command_prefix: str | None = None
+    tool_result_inline_tokens: int | None = None
     skills_enabled: bool = True
     """Whether skill discovery is enabled for this session.
 
@@ -797,6 +806,7 @@ class CodingSession:
             image_support=image_support,
             project_trust_resolution=trust_resolution,
         )
+        harness.config.after_tool_call = session._after_tool_call
         if config.owns_initial_provider:
             # Ownership starts before any repair/discovery work so every
             # failure path has exactly one closer for the candidate.
@@ -1337,6 +1347,43 @@ class CodingSession:
     def auto_compaction_enabled(self) -> bool:
         """Return whether automatic compaction is enabled."""
         return self._auto_compact_enabled
+
+    async def _after_tool_call(
+        self, call: ToolCall, result: AgentToolResult, is_error: bool
+    ) -> tuple[AgentToolResult, bool]:
+        """Save a tool call's output and keep an oversized one out of the transcript."""
+        return (
+            self._buffer_result(
+                result, tool_name=call.name, output_name=output_file_name(call.name, call.id)
+            ),
+            is_error,
+        )
+
+    def _buffer_result(
+        self, result: AgentToolResult, *, tool_name: str, output_name: str | None = None
+    ) -> AgentToolResult:
+        """Save a tool call's output beside the session file; window it if oversized.
+
+        With `output_name` the output is saved whatever its size (see
+        `buffer_tool_result`). A session with no file of its own saves only
+        oversized outputs, to the per-user temp buffer directory.
+        """
+        buffer_dir = self.outputs_dir
+        return buffer_tool_result(
+            result,
+            tool_name=tool_name,
+            buffer_dir=buffer_dir if buffer_dir is not None else default_buffer_dir(),
+            limits=BufferLimits.for_context_window(
+                self.context_window_tokens, self._config.tool_result_inline_tokens
+            ),
+            output_name=output_name if buffer_dir is not None else None,
+        )
+
+    @property
+    def outputs_dir(self) -> Path | None:
+        """Where this session's tool outputs are saved, or None without a session file."""
+        session_path = _storage_path(self._config.storage)
+        return session_outputs_dir(session_path) if session_path is not None else None
 
     @property
     def context_window_tokens(self) -> int:
@@ -2886,6 +2933,7 @@ class CodingSession:
                 auto_compact_enabled=self._auto_compact_enabled,
                 thinking_level=self._thinking_level,
                 shell_command_prefix=self._config.shell_command_prefix,
+                tool_result_inline_tokens=self._config.tool_result_inline_tokens,
                 skills_enabled=self._config.skills_enabled,
                 allowed_tool_names=self._config.allowed_tool_names,
                 extension_paths=self._config.extension_paths,
@@ -3319,7 +3367,10 @@ class CodingSession:
             # need a bound to get control back.
             default_timeout=None,
         )
-        result = await bash_tool.execute("terminal-command", {"command": normalized_command})
+        result = self._buffer_result(
+            await bash_tool.execute("terminal-command", {"command": normalized_command}),
+            tool_name="bash",
+        )
         exit_code = None
         if isinstance(result.details, dict):
             raw_exit_code = result.details.get("exit_code")

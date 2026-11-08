@@ -7401,3 +7401,84 @@ async def test_session_switch_keeps_a_single_queued_request_notice(tmp_path: Pat
 
     assert ui.notices == ["Waiting for llama: 1 request ahead (max_concurrent_requests=1)"]
     await session.aclose()
+
+
+@pytest.mark.anyio
+async def test_terminal_command_output_is_buffered_like_a_tool_result(tmp_path: Path) -> None:
+    storage = JsonlSessionStorage(tmp_path / "session.jsonl")
+    session = await CodingSession.load(_config(tmp_path, FakeProvider([]), storage))
+
+    result = await session.run_terminal_command("seq 1 100000", add_to_context=True)
+
+    [buffer] = list((tmp_path / "session.outputs").iterdir())
+    assert buffer.read_text().splitlines()[-1] == "100000"
+    assert result.output.rstrip().endswith(
+        f"Full output: {buffer} — page it with read (offset/limit) or grep it.]"
+    )
+    assert "\n99999\n100000\n" in result.output and "\n1\n2\n" not in result.output
+    assert len((tmp_path / "session.jsonl").read_text()) < 100_000
+
+
+def _fetch_tool(text: str) -> AgentTool:
+    async def fetch(
+        tool_call_id: object,
+        arguments: object,
+        signal: object = None,
+        on_update: object = None,
+    ) -> AgentToolResult:
+        return AgentToolResult(content=[TextContent(text=text)])
+
+    return AgentTool(
+        name="fetch",
+        label="Fetch",
+        description="Return a large document.",
+        parameters={"type": "object"},
+        execute_fn=fetch,
+    )
+
+
+@pytest.mark.anyio
+async def test_session_buffers_an_oversized_tool_result_beside_the_session(
+    tmp_path: Path,
+) -> None:
+    storage = JsonlSessionStorage(tmp_path / "session.jsonl")
+    tool_call = ToolCall(id="call-1", name="fetch", arguments={})
+    provider = FakeProvider(
+        [
+            [
+                assistant_start(model="fake"),
+                assistant_done(
+                    message=AssistantMessage(
+                        content=assistant_content("Fetching.", [tool_call]),
+                        stop_reason="toolUse",
+                    )
+                ),
+            ],
+            [
+                assistant_start(model="fake"),
+                assistant_done(message=AssistantMessage(content="Done")),
+            ],
+        ]
+    )
+    output = "\n".join(f"event {i}" for i in range(100_000))
+    session = await CodingSession.load(
+        CodingSessionConfig(
+            provider=provider,
+            model="fake",
+            system="You are Tau.",
+            storage=storage,
+            cwd=tmp_path,
+            tools=[_fetch_tool(output)],
+        )
+    )
+
+    await _collect_session_events(session.prompt("Fetch it."))
+
+    [buffer] = list((tmp_path / "session.outputs").iterdir())
+    assert buffer.name == "fetch-call-1.txt"
+    assert buffer.read_text() == output
+    [result] = [m for m in provider.calls[1][2] if m.role == "toolResult"]
+    assert "event 99999" in result.text and "event 0\n" not in result.text
+    assert f"Full output: {buffer}" in result.text
+    assert len(result.text) < 60_000
+    assert "event 0\n" not in (tmp_path / "session.jsonl").read_text()

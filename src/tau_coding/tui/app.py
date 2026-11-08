@@ -9208,6 +9208,7 @@ async def run_tui_app(
                 index_on_first_persist=index_on_first_persist,
                 long_lived=True,
                 shell_command_prefix=shell_settings.shell_command_prefix,
+                tool_result_inline_tokens=shell_settings.tool_result_inline_tokens,
                 extension_paths=extension_paths,
                 extensions_enabled=extensions_enabled,
                 project_extensions_enabled=project_extensions_enabled,

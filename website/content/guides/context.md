@@ -71,6 +71,33 @@ the original context. During successful overflow recovery, the TUI shows compact
 and retry progress instead of presenting the intermediate provider rejection as a
 terminal error. The error becomes visible only if recovery cannot complete.
 
+## Large tool results
+
+A tool result larger than the inline limit does not go into context whole. Tau
+saves the full text to a file beside the session
+(`<session>.outputs/<tool>-<call-id>.txt`) and the model sees a window of it (the
+last 60 lines, or the first 60 for `read`) plus the file's path, which it can page
+through with `read` or search with `grep`.
+
+The limit is 1/50 of the model's context window, between 1,000 and 4,000 tokens
+(at about 4 characters per token): about 16,000 characters on a 200K-token
+window. To change it, set a token count in `~/.tau/settings.json`:
+
+```json
+{
+  "toolResultInlineTokens": 8000
+}
+```
+
+or for one run, in the environment:
+
+```bash
+TAU_TOOL_RESULT_INLINE_TOKENS=8000 tau
+```
+
+The environment variable wins over the settings file. Both apply to sessions
+started after the change.
+
 ## Manual compaction
 
 Compact on demand any time:
