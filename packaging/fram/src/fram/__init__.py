@@ -6,7 +6,7 @@ the fourth counts Fram releases on top of it.
 
 from __future__ import annotations
 
-__version__ = "0.4.8.1"
+__version__ = "0.4.9.1"
 
 
 def tau_base_version(version: str = __version__) -> str:
