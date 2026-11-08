@@ -89,6 +89,24 @@ promotes a string `content` to a one-element text block first, and skips empty
 text and empty `tool_result` content, because a breakpoint on an empty block is
 rejected outright.
 
+## Replayed thinking
+
+Anthropic binds a thinking block's signature to the exact message prefix that
+produced it. Replaying old blocks makes every change to that prefix (compaction,
+injected context, resume, branch) a 400 on all later requests.
+
+`_prune_replayed_thinking` keeps thinking only for the tool loop the request
+continues: every assistant step since the last real user message. Dropping it
+from earlier steps of the same loop would change the prefix on each tool call
+and rewrite the cache, so the whole live loop is kept. Requests within a loop
+therefore only append.
+
+If the provider still rejects a signature, the request is rebuilt once with no
+thinking and `_thinking_replay_disabled` holds that until the next user message,
+where pruning has already dropped every older signature. The check matches only
+a 400 naming a thinking signature or block binding, so an ordinary bad request
+stays terminal.
+
 ## Retention
 
 `AnthropicConfig.cache_retention` is a `Literal["none", "short", "long"]`:

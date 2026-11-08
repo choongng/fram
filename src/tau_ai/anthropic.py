@@ -87,6 +87,10 @@ class AnthropicProvider:
         self._config = config
         self._client = client
         self._owns_client = client is None
+        # Set once Anthropic rejects a replayed thinking block, so the rest of
+        # that tool loop sends no thinking. Cleared at the next user message,
+        # where pruning already drops every older signature.
+        self._thinking_replay_disabled = False
 
     async def aclose(self) -> None:
         """Close the underlying HTTP client if this provider created it."""
@@ -124,6 +128,9 @@ class AnthropicProvider:
     ) -> AsyncIterator[ProviderEvent]:
         """Stream one Anthropic response as provider-neutral events."""
 
+        if messages and isinstance(messages[-1], UserMessage):
+            self._thinking_replay_disabled = False
+
         async def iterator() -> AsyncIterator[ProviderEvent]:
             client = self._get_client()
             api_key = self._config.api_key
@@ -150,6 +157,7 @@ class AnthropicProvider:
                 supports_images=self._config.supports_images,
                 cache_retention=self._config.cache_retention,
                 cache_control_on_tools=self._config.cache_control_on_tools,
+                thinking_disabled=self._thinking_replay_disabled,
             )
             headers = {
                 "anthropic-version": ANTHROPIC_VERSION,
@@ -179,6 +187,36 @@ class AnthropicProvider:
                         if response.status_code >= 400:
                             body = await response.aread()
                             body_text = body.decode(errors="replace")
+                            if (
+                                not self._thinking_replay_disabled
+                                and _is_thinking_signature_rejection(
+                                    status_code=response.status_code,
+                                    body_text=body_text,
+                                )
+                            ):
+                                # Anthropic no longer recognises a replayed
+                                # thinking signature (the bound prefix changed:
+                                # compaction, injected context, resume, branch).
+                                # Rebuild once without thinking and latch, so
+                                # the session continues and later requests do
+                                # not repeat the rejection.
+                                self._thinking_replay_disabled = True
+                                payload = _build_messages_payload(
+                                    model=model,
+                                    system=system,
+                                    oauth_system_prompt=self._config.oauth_system_prompt,
+                                    messages=messages,
+                                    tools=tools,
+                                    max_tokens=self._config.max_tokens,
+                                    thinking_budget_tokens=self._config.thinking_budget_tokens,
+                                    thinking_effort=self._config.thinking_effort,
+                                    thinking_mode=self._config.thinking_mode,
+                                    supports_images=self._config.supports_images,
+                                    cache_retention=self._config.cache_retention,
+                                    cache_control_on_tools=self._config.cache_control_on_tools,
+                                    thinking_disabled=True,
+                                )
+                                continue
                             if self._should_retry(attempt, status_code=response.status_code):
                                 delay = retry_delay_seconds(
                                     attempt,
@@ -441,6 +479,7 @@ def _build_messages_payload(
     supports_images: bool = False,
     cache_retention: CacheRetention = CACHE_RETENTION_SHORT,
     cache_control_on_tools: bool = True,
+    thinking_disabled: bool = False,
 ) -> dict[str, JSONValue]:
     resolved_max_tokens = max_tokens or DEFAULT_MAX_TOKENS
     if thinking_budget_tokens is not None:
@@ -454,6 +493,17 @@ def _build_messages_payload(
         if converted.get("role") == "assistant" and not converted.get("content"):
             continue
         payload_messages.append(converted)
+    if thinking_disabled:
+        _drop_thinking_blocks(payload_messages)
+    else:
+        _prune_replayed_thinking(payload_messages)
+    # Stripping replayed thinking can empty a thinking-only turn; Anthropic
+    # rejects empty assistant content, so omit that inert turn too.
+    payload_messages = [
+        converted
+        for converted in payload_messages
+        if converted.get("role") != "assistant" or converted.get("content")
+    ]
     _apply_message_cache_breakpoints(payload_messages, cache_control)
     payload: dict[str, JSONValue] = {
         "model": model,
@@ -462,16 +512,17 @@ def _build_messages_payload(
         "system": _anthropic_system(system, oauth_system_prompt, cache_control),
         "messages": cast("JSONValue", payload_messages),
     }
-    if thinking_mode == "disabled":
-        payload["thinking"] = {"type": "disabled"}
-    elif thinking_mode == "adaptive" and thinking_effort is not None:
-        payload["thinking"] = {"type": "adaptive", "display": "summarized"}
-        payload["output_config"] = {"effort": thinking_effort}
-    elif thinking_budget_tokens is not None:
-        payload["thinking"] = {
-            "type": "enabled",
-            "budget_tokens": thinking_budget_tokens,
-        }
+    if not thinking_disabled:
+        if thinking_mode == "disabled":
+            payload["thinking"] = {"type": "disabled"}
+        elif thinking_mode == "adaptive" and thinking_effort is not None:
+            payload["thinking"] = {"type": "adaptive", "display": "summarized"}
+            payload["output_config"] = {"effort": thinking_effort}
+        elif thinking_budget_tokens is not None:
+            payload["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": thinking_budget_tokens,
+            }
     if tools:
         # Some Anthropic-protocol gateways accept cache_control everywhere except
         # inside tool objects, so the tools breakpoint is separately suppressible.
@@ -610,6 +661,88 @@ def _mark_cache_breakpoint(
         if isinstance(inner, list) and not inner:
             return
     last_block["cache_control"] = dict(cache_control)
+
+
+_THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
+
+
+def _is_thinking_signature_rejection(*, status_code: int, body_text: str) -> bool:
+    """Return whether a 400 names a replayed thinking block Anthropic rejects.
+
+    Only signature/block_binding complaints about thinking blocks match, so
+    an ordinary bad-request 400 stays terminal.
+    """
+    if status_code != 400:
+        return False
+    lowered = body_text.lower()
+    if "thinking" not in lowered:
+        return False
+    return "signature" in lowered or "block_binding" in lowered or "block binding" in lowered
+
+
+def _strip_thinking_from_message(message: dict[str, JSONValue]) -> None:
+    content = message.get("content")
+    if not isinstance(content, list):
+        return
+    message["content"] = [
+        block
+        for block in content
+        if not (isinstance(block, Mapping) and block.get("type") in _THINKING_BLOCK_TYPES)
+    ]
+
+
+def _drop_thinking_blocks(messages: list[dict[str, JSONValue]]) -> None:
+    """Remove every replayed thinking block from an Anthropic payload."""
+    for message in messages:
+        if message.get("role") == "assistant":
+            _strip_thinking_from_message(message)
+
+
+def _thinking_continuation_indexes(
+    messages: list[dict[str, JSONValue]],
+) -> set[int]:
+    """Return the assistant indexes of the tool loop the request continues.
+
+    Walk back from the end over tool_result messages and the assistant turns
+    they answer, and stop at the first user message that is not tool results:
+    the turn the loop is serving. Every assistant step since then keeps its
+    thinking, so consecutive requests in one tool loop only ever append and
+    the cached prefix stays byte-stable; each replayed block also goes out
+    under exactly the prefix it was produced with.
+
+    Thinking from before that user message is dropped. It is bound to a
+    request prefix that compaction, injected context, resume or branch can
+    change under it, and a replay under a changed prefix is rejected with a 400.
+    """
+    keep: set[int] = set()
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        role = message.get("role")
+        if role == "assistant":
+            keep.add(index)
+            continue
+        content = message.get("content")
+        blocks = content if isinstance(content, list) else []
+        if (
+            role == "user"
+            and blocks
+            and all(
+                isinstance(block, Mapping) and block.get("type") == "tool_result"
+                for block in blocks
+            )
+        ):
+            continue
+        break
+    return keep
+
+
+def _prune_replayed_thinking(messages: list[dict[str, JSONValue]]) -> None:
+    """Keep replayed thinking only for the tool loop the request continues."""
+    keep = _thinking_continuation_indexes(messages)
+    for index, message in enumerate(messages):
+        if message.get("role") != "assistant" or index in keep:
+            continue
+        _strip_thinking_from_message(message)
 
 
 def _anthropic_message(message: AgentMessage, *, supports_images: bool) -> dict[str, JSONValue]:
