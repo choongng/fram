@@ -14,8 +14,8 @@ has no highlighted background; thin rules above and below frame it and change
 color to reflect shell mode without boxing it in. While the agent is working,
 the `τ` beside the prompt becomes a gently pulsing braille-dot spinner (`⣾⣽⣻⢿`) and
 returns to `τ` when the run ends.
-**Shift+Enter** inserts a newline for multi-line prompts. If your terminal cannot
-distinguish it from Enter, remap `insert_newline` in `~/.tau/tui.json`; see
+**Ctrl+J** inserts a newline for multi-line prompts, in any terminal. To use
+another key, remap `insert_newline` in `~/.tau/tui.json`; see
 [Keyboard shortcuts](/reference/keybindings/#prompting). Tau streams the
 assistant's reply above the prompt, showing tool calls as they run. When OpenAI
 returns several reasoning-summary parts, Tau keeps them as separate Markdown
@@ -340,8 +340,8 @@ branch, and provider use the quieter metadata color.
 
 The sidebar appears on the **right** by default. It can be moved to the **left**
 or turned **off** entirely by setting `sidebar_position` in `~/.tau/tui.json` —
-see [Configuration](/reference/configuration/#tui-settings).
-Use `/sidebar` to toggle visibility during a session. This is temporary: it
+see [Configuration](/reference/configuration/#tui-settings). Use `/sidebar`, or
+press `Ctrl+B`, to toggle visibility during a session. This is temporary: it
 preserves a configured left/right position, does not change `tui.json`, and is
 forgotten when Tau restarts. A configured `off` sidebar can be shown temporarily
 on the default right side.

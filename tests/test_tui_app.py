@@ -4386,7 +4386,7 @@ async def test_tui_app_omits_footer_but_keeps_shortcuts_active() -> None:
             "Clear": "ctrl+c",
             "Commands": "ctrl+k",
             "Submit": "enter",
-            "Newline": "shift+enter",
+            "Newline": "ctrl+j",
             "Sessions": "ctrl+r",
             "Thinking": "shift+tab",
             "Model": "ctrl+p",
@@ -7526,7 +7526,7 @@ async def test_tui_app_submits_multiline_prompt_with_enter() -> None:
         prompt = app.query_one("#prompt")
         prompt.value = "first"
         prompt.cursor_position = len(prompt.value)
-        await pilot.press("shift+enter")
+        await pilot.press("ctrl+j")
         prompt.value += "second"
         await pilot.press("enter")
         await pilot.pause()
@@ -9628,7 +9628,7 @@ async def test_tui_app_escape_without_running_does_not_append_transcript_status(
 async def test_tui_app_uses_configured_command_palette_keybinding() -> None:
     app = TauTuiApp(
         FakeSession(),
-        tui_settings=TuiSettings(keybindings=TuiKeybindings(command_palette="ctrl+j")),
+        tui_settings=TuiSettings(keybindings=TuiKeybindings(command_palette="ctrl+g")),
     )
 
     async with app.run_test() as pilot:
@@ -9638,11 +9638,44 @@ async def test_tui_app_uses_configured_command_palette_keybinding() -> None:
         assert prompt.value == ""
         assert app._completion_state.items == ()
 
-        await pilot.press("ctrl+j")
+        await pilot.press("ctrl+g")
 
         assert prompt.value == "/"
         assert app._completion_state.items
         assert any(item.display == "/session" for item in app._completion_state.items)
+
+
+@pytest.mark.anyio
+async def test_tui_app_uses_configured_sidebar_toggle_keybinding() -> None:
+    app = TauTuiApp(
+        FakeSession(),
+        tui_settings=TuiSettings(keybindings=TuiKeybindings(toggle_sidebar="ctrl+g")),
+    )
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        assert not app.has_class("-hide-sidebar")
+
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert app.has_class("-hide-sidebar")
+
+        await pilot.press("ctrl+g")
+        await pilot.pause()
+        assert not app.has_class("-hide-sidebar")
+
+
+@pytest.mark.anyio
+async def test_tui_app_toggles_sidebar_from_prompt_with_default_keybinding() -> None:
+    app = TauTuiApp(FakeSession())
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        prompt = app.query_one("#prompt")
+        prompt.focus()
+        assert not app.has_class("-hide-sidebar")
+
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        assert app.has_class("-hide-sidebar")
 
 
 @pytest.mark.anyio
@@ -13682,3 +13715,145 @@ async def test_tui_login_provider_search_autofocus() -> None:
 
         search = app.screen.query_one("#login-provider-search", Input)
         assert search.has_focus, "Search input failed to automatically gain focus on screen mount."
+
+
+@pytest.mark.anyio
+async def test_page_keys_page_across_the_bounded_transcript_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tau_coding.tui import widgets as tui_widgets
+
+    monkeypatch.setattr(tui_widgets, "TRANSCRIPT_WINDOW_ITEMS", 6)
+    monkeypatch.setattr(tui_widgets, "TRANSCRIPT_WINDOW_PAGE_ITEMS", 2)
+    app = TauTuiApp(
+        FakeSession(
+            messages=[
+                UserMessage(content=f"message {index}\n" + "line\n" * 4) for index in range(12)
+            ]
+        )
+    )
+
+    async with app.run_test(size=(40, 30)) as pilot:
+        await pilot.pause()
+        transcript = app.query_one("#transcript", TranscriptView)
+        assert transcript._window_start == 6
+
+        for _ in range(100):
+            await pilot.press("pageup")
+            await pilot.pause()
+            if transcript._window_start == 0 and transcript.scroll_y == 0:
+                break
+        assert transcript._window_start == 0
+        assert transcript.scroll_y == 0
+
+        for _ in range(100):
+            await pilot.press("pagedown")
+            await pilot.pause()
+            if transcript._window_end == 12 and transcript.is_vertical_scroll_end:
+                break
+        assert transcript._window_end == 12
+        assert transcript.is_vertical_scroll_end
+
+
+@pytest.mark.anyio
+async def test_page_keys_jump_transcript_while_prompt_has_focus() -> None:
+    app = TauTuiApp(
+        FakeSession(
+            messages=[
+                UserMessage(content=f"message {index}\n" + "line\n" * 4) for index in range(12)
+            ]
+        )
+    )
+
+    async with app.run_test(size=(40, 12)) as pilot:
+        await pilot.pause()
+        transcript = app.query_one("#transcript", TranscriptView)
+        assert isinstance(app.focused, PromptInput)
+        bottom_y = transcript.scroll_y
+        assert bottom_y > 0
+
+        page = transcript.scrollable_content_region.height
+        await pilot.press("pageup")
+        assert transcript.scroll_y == bottom_y - page
+        assert isinstance(app.focused, PromptInput)
+
+        # The page keys jump like the wheel does: soon after the key, the
+        # view is already a page up, not partway through a glide. pilot.press
+        # waits animations out, so call the action directly.
+        app.action_page_transcript_up()
+        await asyncio.sleep(0.05)
+        assert transcript.scroll_y == bottom_y - 2 * page
+
+        await pilot.press("pagedown", "pagedown")
+        await pilot.pause()
+        assert transcript.scroll_y == bottom_y
+
+
+@pytest.mark.anyio
+async def test_tui_app_down_arrow_returns_to_blank_after_recalling_prompt() -> None:
+    """After Up recalls a previous prompt, Down returns to a blank input."""
+    app = TauTuiApp(FakeSession())
+
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", TextArea)
+        prompt.text = "first"
+        await pilot.press("enter")
+        await pilot.pause()
+        prompt.text = "second"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        prompt.text = ""
+        await pilot.press("up")
+        await pilot.pause()
+        assert prompt.text == "second"
+
+        await pilot.press("down")
+        await pilot.pause()
+        assert prompt.text == ""
+        assert prompt.cursor_location == (0, 0)
+
+
+@pytest.mark.anyio
+async def test_tui_app_down_keeps_a_later_prompt_that_matches_the_recalled_one() -> None:
+    app = TauTuiApp(FakeSession())
+
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", TextArea)
+        prompt.text = "continue"
+        await pilot.press("enter")
+        await pilot.pause()
+        prompt.text = ""
+        await pilot.press("up")
+        await pilot.pause()
+        assert prompt.text == "continue"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        prompt.text = "continue"
+        prompt.move_cursor((0, len("continue")))
+        await pilot.press("down")
+        await pilot.pause()
+
+        assert prompt.text == "continue"
+
+
+@pytest.mark.anyio
+async def test_tui_app_down_moves_the_cursor_inside_a_recalled_multiline_prompt() -> None:
+    app = TauTuiApp(FakeSession())
+
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", TextArea)
+        prompt.text = "one\ntwo"
+        await pilot.press("enter")
+        await pilot.pause()
+        prompt.text = ""
+        await pilot.press("up")
+        await pilot.pause()
+        assert prompt.text == "one\ntwo"
+        prompt.move_cursor((0, 0))
+
+        await pilot.press("down")
+        await pilot.pause()
+
+        assert prompt.text == "one\ntwo"

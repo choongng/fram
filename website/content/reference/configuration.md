@@ -427,7 +427,7 @@ The built-in frontend reads optional settings from `~/.tau/tui.json`:
     "command_palette": "ctrl+k",
     "session_picker": "ctrl+r",
     "queue_follow_up": "alt+enter",
-    "insert_newline": "shift+enter",
+    "insert_newline": "ctrl+j",
     "accept_completion": "tab",
     "completion_next": "down",
     "completion_previous": "up",
@@ -436,6 +436,9 @@ The built-in frontend reads optional settings from `~/.tau/tui.json`:
     "model_cycle_reverse": "ctrl+shift+p",
     "toggle_thinking": "ctrl+t",
     "toggle_tool_results": "ctrl+o",
+    "toggle_sidebar": "ctrl+b",
+    "suspend": "ctrl+z",
+    "undo": "ctrl+underscore,ctrl+slash",
     "copy_message": "ctrl+c",
     "quit": "ctrl+d"
   }

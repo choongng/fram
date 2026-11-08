@@ -46,11 +46,11 @@ access.
 
 ## `/sidebar`
 
-Use `/sidebar` to toggle the detailed session sidebar for the current TUI
-session. It preserves a configured `left` or `right` position and never writes
-`~/.tau/tui.json`; the choice is forgotten when Tau restarts. When
-`sidebar_position` is `"off"`, an explicit show temporarily uses the default
-right position.
+Use `/sidebar`, or the `Ctrl+B` keybinding, to toggle the detailed session
+sidebar for the current TUI session. It preserves a configured `left` or `right`
+position and never writes `~/.tau/tui.json`; the choice is forgotten when Tau
+restarts. When `sidebar_position` is `"off"`, an explicit show temporarily uses
+the default right position.
 
 ## Sidebar file editor
 

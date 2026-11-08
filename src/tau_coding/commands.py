@@ -534,7 +534,7 @@ def _hotkeys_command(context: CommandContext) -> CommandResult:
     lines = [
         "Common keyboard shortcuts:",
         "- Enter: submit prompt",
-        "- Shift+Enter: insert newline",
+        "- Ctrl+J: insert newline",
         "- Alt+Enter: queue follow-up while running",
         "- Esc: cancel active run",
         "- Ctrl+K: open slash-command completions",
@@ -543,7 +543,11 @@ def _hotkeys_command(context: CommandContext) -> CommandResult:
         "- Shift+Tab: cycle thinking mode",
         "- Ctrl+T: toggle thinking tokens",
         "- Ctrl+O: collapse or expand tool output",
+        "- PgUp/PgDn: page the transcript",
+        "- Ctrl+B: show or hide the sidebar",
         "- Ctrl+C: clear prompt input",
+        "- Ctrl+Z: suspend to the shell (fg resumes it)",
+        "- Ctrl+_ or Ctrl+/: undo in the prompt and editors (Ctrl+Y redoes)",
         "- Ctrl+D: quit",
     ]
     return CommandResult(handled=True, message="\n".join(lines))

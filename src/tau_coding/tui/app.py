@@ -6,7 +6,9 @@ import asyncio
 import errno
 import gc
 import os
+import signal
 import stat
+import sys
 import tempfile
 import threading
 import traceback
@@ -538,6 +540,12 @@ class CompletionActionTarget(Protocol):
 
     def action_toggle_thinking(self) -> None: ...
 
+    def action_toggle_sidebar(self) -> None: ...
+
+    def action_page_transcript_up(self) -> None: ...
+
+    def action_page_transcript_down(self) -> None: ...
+
     def action_edit_queued_message(self) -> bool: ...
 
     async def action_submit_prompt(self) -> None: ...
@@ -558,6 +566,15 @@ class SessionCompletionRecord(Protocol):
 PASTE_DISPLAY_THRESHOLD = 2_000
 
 
+class EditorTextArea(TextArea):
+    """A text area that undoes with the configured key, as Ctrl+Z suspends."""
+
+    def on_mount(self) -> None:
+        settings = getattr(self.app, "tui_settings", None)
+        if isinstance(settings, TuiSettings):
+            self._bindings.bind(settings.keybindings.undo, "undo", show=False)
+
+
 class PromptInput(TextArea):
     """Multiline prompt input with completion key bindings."""
 
@@ -567,6 +584,9 @@ class PromptInput(TextArea):
         Binding("alt+right,alt+f", "cursor_word_right", show=False),
         Binding("alt+shift+left", "cursor_word_left(True)", show=False),
         Binding("alt+shift+right", "cursor_word_right(True)", show=False),
+        # Page keys scroll the transcript, not the prompt's own lines.
+        Binding("pageup", "page_transcript_up", show=False),
+        Binding("pagedown", "page_transcript_down", show=False),
     ]
     shell_mode_style: str = ""
 
@@ -678,6 +698,18 @@ class PromptInput(TextArea):
     def action_toggle_thinking(self) -> None:
         """Toggle app-level thinking-token display."""
         self._completion_target().action_toggle_thinking()
+
+    def action_toggle_sidebar(self) -> None:
+        """Toggle app-level sidebar visibility."""
+        self._completion_target().action_toggle_sidebar()
+
+    def action_page_transcript_up(self) -> None:
+        """Scroll the app-level transcript up one page."""
+        self._completion_target().action_page_transcript_up()
+
+    def action_page_transcript_down(self) -> None:
+        """Scroll the app-level transcript down one page."""
+        self._completion_target().action_page_transcript_down()
 
     def action_clear_prompt(self) -> None:
         """Clear the current prompt."""
@@ -868,6 +900,9 @@ class PromptInput(TextArea):
         elif event.key == keybindings.toggle_thinking:
             event.stop()
             self._completion_target().action_toggle_thinking()
+        elif event.key == keybindings.toggle_sidebar:
+            event.stop()
+            self._completion_target().action_toggle_sidebar()
         elif event.key == keybindings.copy_message:
             if self.selected_text:
                 return
@@ -1461,7 +1496,7 @@ class PromptTemplateEditorScreen(ModalScreen[str | None]):
         with Vertical(id="prompt-template-editor"):
             yield Static(f"Edit /{self.template.name}", id="prompt-template-editor-title")
             yield Static(str(self.template.path), id="prompt-template-editor-path")
-            yield TextArea(self.source, id="prompt-template-editor-input")
+            yield EditorTextArea(self.source, id="prompt-template-editor-input")
             yield Static(
                 "Ctrl+S saves - Escape returns without saving",
                 id="prompt-template-editor-help",
@@ -1587,7 +1622,7 @@ class SidebarFileEditor(Vertical):
     def compose(self) -> ComposeResult:
         yield Static(f"Edit {self.kind}: {self.label}", id="sidebar-file-editor-title")
         yield Static(str(self.path), id="sidebar-file-editor-path")
-        yield TextArea(self.source, id="sidebar-file-editor-input")
+        yield EditorTextArea(self.source, id="sidebar-file-editor-input")
         yield Static(
             "Ctrl+S saves - Escape closes",
             id="sidebar-file-editor-help",
@@ -2608,7 +2643,7 @@ class BranchSummaryInstructionsScreen(ModalScreen[str | None]):
                 "Custom summarization instructions",
                 id="branch-summary-instructions-title",
             )
-            yield TextArea(id="branch-summary-instructions-input")
+            yield EditorTextArea(id="branch-summary-instructions-input")
             yield Static(
                 "Ctrl+Enter submits - Escape returns to tree",
                 id="branch-summary-instructions-help",
@@ -4652,6 +4687,7 @@ class TauTuiApp(App[None]):
                 f"using {self.tui_settings.resolved_theme.name}.",
             )
         self._prompt_history: tuple[str, ...] = ()
+        self._prompt_history_return_value: str | None = None
         self._load_session_messages_from_session()
         self.adapter = TuiEventAdapter(self.state)
         # Component seam: host-owned tracking of extension
@@ -4688,6 +4724,7 @@ class TauTuiApp(App[None]):
         self._pending_prompt_started = asyncio.Event()
         self._compaction_worker: Worker[None] | None = None
         self._compacting = False
+        self._suspended_while_working = False
         self._compaction_run_id = 0
         self._prompt_run_id = 0
         self._optimistic_user_messages: list[tuple[int, str]] = []
@@ -4862,6 +4899,7 @@ class TauTuiApp(App[None]):
         prompt.shell_mode_style = self.tui_settings.resolved_theme.role_styles["tool"].border
         self._sync_prompt_shell_mode(prompt.text)
         prompt.focus()
+        self.app_resume_signal.subscribe(self, self._on_resumed_from_suspend)
         self._update_responsive_layout(self.size.width, self.size.height)
         self._apply_sidebar_position()
         self._refresh()
@@ -5277,6 +5315,7 @@ class TauTuiApp(App[None]):
         if not text.strip():
             return
         self._prompt_history = (*self._prompt_history, text)
+        self._prompt_history_return_value = None
 
     def _load_session_messages_from_session(self) -> None:
         """Load visible session messages and reseed prompt history from them."""
@@ -6638,6 +6677,8 @@ class TauTuiApp(App[None]):
             self.screen.action_cursor_down()
             return
         if not self._completion_state.items:
+            if self.action_return_to_blank_prompt():
+                return
             self.query_one("#prompt", PromptInput).action_cursor_down()
             return
         self._completion_state = self._completion_state.select_next()
@@ -6696,6 +6737,31 @@ class TauTuiApp(App[None]):
         previous_prompt = self._prompt_history[-1]
         prompt.text = previous_prompt
         prompt.move_cursor(_text_end_location(previous_prompt))
+        # Remember where we entered history from so Down can return to it.
+        self._prompt_history_return_value = ""
+        self._completion_state = self._build_completion_state(prompt.text)
+        self._refresh_completions()
+        return True
+
+    def action_return_to_blank_prompt(self) -> bool:
+        """Return to the blank prompt after recalling a previous one.
+
+        Only works if the current text is exactly what was recalled: if the
+        user has edited it, Down should not erase their work.
+        """
+        prompt = self.query_one("#prompt", PromptInput)
+        if not self._prompt_history:
+            return False
+        if prompt.text != self._prompt_history[-1]:
+            return False
+        if prompt.cursor_location != _text_end_location(prompt.text):
+            return False
+        return_value = self._prompt_history_return_value
+        if return_value is None:
+            return False
+        prompt.text = return_value
+        prompt.move_cursor(_text_end_location(return_value))
+        self._prompt_history_return_value = None
         self._completion_state = self._build_completion_state(prompt.text)
         self._refresh_completions()
         return True
@@ -6929,6 +6995,55 @@ class TauTuiApp(App[None]):
             self.state,
             theme=self.tui_settings.resolved_theme,
         )
+
+    def action_toggle_sidebar(self) -> None:
+        """Toggle sidebar visibility for this session."""
+        self._toggle_sidebar_visibility()
+
+    def action_page_transcript_up(self) -> None:
+        """Scroll the transcript up one page while the prompt keeps focus."""
+        transcript = self.query_one("#transcript", TranscriptView)
+        if transcript.display:
+            transcript.action_page_up()
+
+    def action_page_transcript_down(self) -> None:
+        """Scroll the transcript down one page while the prompt keeps focus."""
+        transcript = self.query_one("#transcript", TranscriptView)
+        if transcript.display:
+            transcript.action_page_down()
+
+    def action_suspend_process(self) -> None:
+        """Suspend tau to the shell as the terminal's own ctrl+z would.
+
+        ``App.suspend`` restores the terminal first and re-enters application
+        mode once the process continues (``fg`` sends SIGCONT), then publishes
+        ``app_resume_signal`` for the redraw. SIGTSTP goes to the whole process
+        group, as the tty sends it in cooked mode: a launcher such as
+        ``uv run tau`` and any tool subprocess stop with tau, so the shell sees
+        the job stopped. Its default action stops tau here, inside the
+        ``with``; Textual's own SIGTSTP handler is set aside meanwhile because a
+        launcher that forwards SIGTSTP would otherwise trip that handler again
+        after ``fg`` and stop tau a second time. A turn in flight pauses with
+        the process and carries on after ``fg``.
+        """
+        driver = self._driver
+        if _WINDOWS or driver is None or not driver.can_suspend:
+            self._notify("Suspend (ctrl+z) is not supported in this terminal.")
+            return
+        self._suspended_while_working = self._is_working()
+        with self.suspend():
+            handler = signal.signal(signal.SIGTSTP, signal.SIG_DFL)
+            try:
+                os.kill(0, signal.SIGTSTP)
+            finally:
+                signal.signal(signal.SIGTSTP, handler)
+
+    def _on_resumed_from_suspend(self, _app: App[None]) -> None:
+        """Redraw everything after ``fg``; the shell owned the screen meanwhile."""
+        self.refresh(repaint=True, layout=True)
+        if self._suspended_while_working:
+            self._suspended_while_working = False
+            self._notify("Resumed; the turn in flight was paused while suspended.")
 
     def action_toggle_thinking(self) -> None:
         """Toggle thinking-token display in the transcript."""
@@ -8574,6 +8689,10 @@ def _app_bindings(keybindings: TuiKeybindings) -> list[Binding]:
         ),
         Binding(keybindings.toggle_tool_results, "toggle_tool_results", "Tool results"),
         Binding(keybindings.toggle_thinking, "toggle_thinking", "Thinking tokens"),
+        Binding(keybindings.toggle_sidebar, "toggle_sidebar", "Sidebar"),
+        # Priority, so ctrl+z suspends whichever widget has focus; the prompt's
+        # TextArea would otherwise take it as undo (moved to keybindings.undo).
+        Binding(keybindings.suspend, "suspend_process", "Suspend", show=False, priority=True),
         Binding(keybindings.copy_message, "clear_prompt", "Clear input"),
         Binding(keybindings.quit, "quit", "Quit"),
     ]
@@ -8677,6 +8796,8 @@ def _hidden_prompt_bindings(
         (keybindings.model_cycle_reverse, "cycle_model_reverse"),
         (keybindings.toggle_tool_results, "toggle_tool_results"),
         (keybindings.toggle_thinking, "toggle_thinking"),
+        (keybindings.toggle_sidebar, "toggle_sidebar"),
+        (keybindings.undo, "undo"),
         (keybindings.copy_message, "clear_prompt"),
         (keybindings.accept_completion, "accept_completion"),
         (keybindings.completion_next, "completion_next"),
@@ -8685,7 +8806,8 @@ def _hidden_prompt_bindings(
     )
     return [
         Binding(key, action, show=False, priority=True)
-        for key, action in candidates
+        for keys, action in candidates
+        for key in keys.split(",")
         if key not in visible_keys
     ]
 
@@ -8705,6 +8827,8 @@ def _format_prompt_error(exc: BaseException, session: CodingSession) -> str:
     return message
 
 
+# Windows has no SIGTSTP, so ctrl+z there only shows a notice.
+_WINDOWS = sys.platform == "win32"
 _TERMINAL_ERROR_RETRY_HINT = "Run ended before completion. Send a message to retry."
 
 

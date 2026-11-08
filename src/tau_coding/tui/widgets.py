@@ -24,6 +24,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
+from textual.actions import SkipAction
 from textual.color import Color as TextualColor
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.content import Content, Span
@@ -1043,6 +1044,18 @@ class TranscriptView(VerticalScroll):
                 self.scroll_end(animate=False, immediate=True)
 
         self.call_after_refresh(scroll_if_still_following)
+
+    def action_page_up(self) -> None:
+        """Jump up one page; the wheel does not animate, so neither do the page keys."""
+        if not self.allow_vertical_scroll:
+            raise SkipAction()
+        self.scroll_page_up(animate=False)
+
+    def action_page_down(self) -> None:
+        """Jump down one page without the default scroll animation."""
+        if not self.allow_vertical_scroll:
+            raise SkipAction()
+        self.scroll_page_down(animate=False)
 
     @property
     def _should_follow_output(self) -> bool:
