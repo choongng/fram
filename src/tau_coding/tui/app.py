@@ -4676,6 +4676,7 @@ class TauTuiApp(App[None]):
                 f"using {self.tui_settings.resolved_theme.name}.",
             )
         self._prompt_history: tuple[str, ...] = ()
+        self._prompt_history_return_value: str | None = None
         self._load_session_messages_from_session()
         self.adapter = TuiEventAdapter(self.state)
         # Component seam: host-owned tracking of extension
@@ -5301,6 +5302,7 @@ class TauTuiApp(App[None]):
         if not text.strip():
             return
         self._prompt_history = (*self._prompt_history, text)
+        self._prompt_history_return_value = None
 
     def _load_session_messages_from_session(self) -> None:
         """Load visible session messages and reseed prompt history from them."""
@@ -6662,6 +6664,8 @@ class TauTuiApp(App[None]):
             self.screen.action_cursor_down()
             return
         if not self._completion_state.items:
+            if self.action_return_to_blank_prompt():
+                return
             self.query_one("#prompt", PromptInput).action_cursor_down()
             return
         self._completion_state = self._completion_state.select_next()
@@ -6720,6 +6724,31 @@ class TauTuiApp(App[None]):
         previous_prompt = self._prompt_history[-1]
         prompt.text = previous_prompt
         prompt.move_cursor(_text_end_location(previous_prompt))
+        # Remember where we entered history from so Down can return to it.
+        self._prompt_history_return_value = ""
+        self._completion_state = self._build_completion_state(prompt.text)
+        self._refresh_completions()
+        return True
+
+    def action_return_to_blank_prompt(self) -> bool:
+        """Return to the blank prompt after recalling a previous one.
+
+        Only works if the current text is exactly what was recalled: if the
+        user has edited it, Down should not erase their work.
+        """
+        prompt = self.query_one("#prompt", PromptInput)
+        if not self._prompt_history:
+            return False
+        if prompt.text != self._prompt_history[-1]:
+            return False
+        if prompt.cursor_location != _text_end_location(prompt.text):
+            return False
+        return_value = self._prompt_history_return_value
+        if return_value is None:
+            return False
+        prompt.text = return_value
+        prompt.move_cursor(_text_end_location(return_value))
+        self._prompt_history_return_value = None
         self._completion_state = self._build_completion_state(prompt.text)
         self._refresh_completions()
         return True

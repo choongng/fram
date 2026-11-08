@@ -13787,3 +13787,73 @@ async def test_page_keys_jump_transcript_while_prompt_has_focus() -> None:
         await pilot.press("pagedown", "pagedown")
         await pilot.pause()
         assert transcript.scroll_y == bottom_y
+
+
+@pytest.mark.anyio
+async def test_tui_app_down_arrow_returns_to_blank_after_recalling_prompt() -> None:
+    """After Up recalls a previous prompt, Down returns to a blank input."""
+    app = TauTuiApp(FakeSession())
+
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", TextArea)
+        prompt.text = "first"
+        await pilot.press("enter")
+        await pilot.pause()
+        prompt.text = "second"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        prompt.text = ""
+        await pilot.press("up")
+        await pilot.pause()
+        assert prompt.text == "second"
+
+        await pilot.press("down")
+        await pilot.pause()
+        assert prompt.text == ""
+        assert prompt.cursor_location == (0, 0)
+
+
+@pytest.mark.anyio
+async def test_tui_app_down_keeps_a_later_prompt_that_matches_the_recalled_one() -> None:
+    app = TauTuiApp(FakeSession())
+
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", TextArea)
+        prompt.text = "continue"
+        await pilot.press("enter")
+        await pilot.pause()
+        prompt.text = ""
+        await pilot.press("up")
+        await pilot.pause()
+        assert prompt.text == "continue"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        prompt.text = "continue"
+        prompt.move_cursor((0, len("continue")))
+        await pilot.press("down")
+        await pilot.pause()
+
+        assert prompt.text == "continue"
+
+
+@pytest.mark.anyio
+async def test_tui_app_down_moves_the_cursor_inside_a_recalled_multiline_prompt() -> None:
+    app = TauTuiApp(FakeSession())
+
+    async with app.run_test() as pilot:
+        prompt = app.query_one("#prompt", TextArea)
+        prompt.text = "one\ntwo"
+        await pilot.press("enter")
+        await pilot.pause()
+        prompt.text = ""
+        await pilot.press("up")
+        await pilot.pause()
+        assert prompt.text == "one\ntwo"
+        prompt.move_cursor((0, 0))
+
+        await pilot.press("down")
+        await pilot.pause()
+
+        assert prompt.text == "one\ntwo"
