@@ -673,6 +673,7 @@ Observation events mirror the canonical agent/session stream. Handlers receive
 | `thinking_level_changed` | `level`; emitted after an explicit thinking-mode change |
 | `auto_retry_start` | `attempt`, `max_attempts`, `delay_ms`, `error_message` |
 | `auto_retry_end` | `success`, `attempt`, `final_error` |
+| `prompt_cache_miss` | `provider`, `model`, `prompt_tokens`; a large prompt was fully reprocessed by a provider and model that reported a cache hit earlier in the session |
 
 `message_update.assistant_message_event` is the provider-neutral incremental
 stream. Its nested `type` is one of `text_start`, `text_delta`, `text_end`,

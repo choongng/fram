@@ -284,6 +284,106 @@ docs_url = "http://localhost:11434/v1"
     assert settings.scoped_models == (ScopedModelConfig(provider="local", model="qwen"),)
 
 
+_LOCAL_SERVER_CATALOG = """
+schema_version = 1
+
+[[providers]]
+name = "local"
+display_name = "local"
+kind = "openai-compatible"
+base_url = "http://localhost:8080/v1"
+api_key_env = "LOCAL_API_KEY"
+models = ["qwen"]
+default_model = "qwen"
+docs_url = "http://localhost:8080/v1"
+""".strip()
+
+
+def test_local_server_options_load_reach_runtime_config_and_round_trip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tau_home = tmp_path / ".tau"
+    tau_home.mkdir()
+    (tau_home / "catalog.toml").write_text(_LOCAL_SERVER_CATALOG, encoding="utf-8")
+    (tau_home / "providers.json").write_text(
+        json.dumps(
+            {
+                "default_provider": "local",
+                "provider_preferences": {
+                    "local": {
+                        "cache_prompt": True,
+                        "id_slot_count": 2,
+                        "max_concurrent_requests": 1,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    paths = TauPaths(home=tau_home)
+
+    provider = load_provider_settings(paths).get_provider("local")
+    assert isinstance(provider, OpenAICompatibleProviderConfig)
+    assert provider.cache_prompt is True
+    assert provider.id_slot_count == 2
+    assert provider.max_concurrent_requests == 1
+    monkeypatch.setenv("LOCAL_API_KEY", "local-key")
+    config = openai_compatible_config_from_provider(provider)
+    assert config.cache_prompt is True
+    assert config.id_slot_count == 2
+
+    save_provider_settings(load_provider_settings(paths), paths)
+    saved = json.loads((tau_home / "providers.json").read_text(encoding="utf-8"))
+    assert saved["provider_preferences"]["local"]["cache_prompt"] is True
+    assert saved["provider_preferences"]["local"]["id_slot_count"] == 2
+    assert saved["provider_preferences"]["local"]["max_concurrent_requests"] == 1
+
+
+def test_local_server_options_default_off_and_stay_out_of_saved_preferences(
+    tmp_path: Path,
+) -> None:
+    tau_home = tmp_path / ".tau"
+    tau_home.mkdir()
+    (tau_home / "catalog.toml").write_text(_LOCAL_SERVER_CATALOG, encoding="utf-8")
+    paths = TauPaths(home=tau_home)
+
+    settings = load_provider_settings(paths)
+    provider = settings.get_provider("local")
+    assert isinstance(provider, OpenAICompatibleProviderConfig)
+    assert provider.cache_prompt is False
+    assert provider.id_slot_count is None
+
+    save_provider_settings(settings, paths)
+    saved = json.loads((tau_home / "providers.json").read_text(encoding="utf-8"))
+    local = saved["provider_preferences"].get("local", {})
+    assert "cache_prompt" not in local
+    assert "id_slot_count" not in local
+    assert "max_concurrent_requests" not in local
+
+
+@pytest.mark.parametrize(
+    "preference",
+    [
+        {"cache_prompt": "yes"},
+        {"id_slot_count": 0},
+        {"id_slot_count": True},
+        {"max_concurrent_requests": 0},
+    ],
+)
+def test_local_server_options_reject_invalid_values(
+    tmp_path: Path, preference: dict[str, object]
+) -> None:
+    tau_home = tmp_path / ".tau"
+    tau_home.mkdir()
+    (tau_home / "catalog.toml").write_text(_LOCAL_SERVER_CATALOG, encoding="utf-8")
+    (tau_home / "providers.json").write_text(
+        json.dumps({"provider_preferences": {"local": preference}}), encoding="utf-8"
+    )
+
+    with pytest.raises(ProviderConfigError):
+        load_provider_settings(TauPaths(home=tau_home))
+
+
 def test_provider_settings_ignore_unknown_fields(tmp_path: Path) -> None:
     settings = provider_settings_from_json(
         {

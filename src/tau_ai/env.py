@@ -63,6 +63,10 @@ class OpenAICompatibleConfig:
     credential_resolver: RuntimeProviderAuthResolver | None = None
     response_headers_observer: RuntimeResponseHeadersObserver | None = None
     infer_api_from_model: bool = True
+    cache_prompt: bool = False
+    """Send ``cache_prompt: true`` (llama.cpp) on chat-completions requests."""
+    id_slot_count: int | None = None
+    """Send a per-session ``id_slot`` in ``[0, id_slot_count)`` (llama.cpp)."""
 
 
 @dataclass(frozen=True, slots=True)

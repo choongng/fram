@@ -549,9 +549,11 @@ tau --provider local-gateway -p "summarize this project" # one-shot print mode
 Catalog TOML is for provider and model metadata. It does **not** accept runtime
 request options such as custom HTTP headers, timeouts, or retry settings. Put
 those in `~/.tau/providers.json` instead. Saved `providers.json` entries support
-`headers`, `timeout_seconds`, `max_retries`, and `max_retry_delay_seconds`. For
-the full JSON shape, the catalog TOML shape, and `thinking_levels` for custom
-models, see [Configuration](/reference/configuration/#providers).
+`headers`, `timeout_seconds`, `max_retries`, and `max_retry_delay_seconds`, and
+the opt-in local-server options described under [Single-slot local
+servers](#single-slot-local-servers). For the full JSON shape, the catalog TOML
+shape, and `thinking_levels` for custom models, see
+[Configuration](/reference/configuration/#providers).
 
 > [!TIP] Hugging Face org billing
 > To send a Hugging Face billing header, keep the provider definition in the
@@ -574,6 +576,74 @@ models, see [Configuration](/reference/configuration/#providers).
 >   "scoped_models": []
 > }
 > ```
+
+## Single-slot local servers
+
+A llama.cpp server keeps a cached prompt prefix per slot, and with
+`--parallel 1` it has exactly one slot. Tau's hosted-API cache hints
+(`prompt_cache_key`, affinity headers) do nothing there, so custom
+OpenAI-compatible providers that point at `llama-server` can opt in to its own
+fields in `~/.tau/providers.json`. Every option is off unless you set it:
+
+```json
+{
+  "provider_preferences": {
+    "llama": {
+      "cache_prompt": true,
+      "id_slot_count": 1,
+      "max_concurrent_requests": 1
+    }
+  }
+}
+```
+
+- `cache_prompt: true` sends llama.cpp's `cache_prompt` field, asking the server
+  to reuse the longest cached prefix instead of reprocessing the whole prompt.
+  Current `llama-server` builds default it on; setting it keeps the behavior
+  explicit and turns it on for older builds.
+- `id_slot_count` sends an `id_slot` chosen from the session id, in
+  `0..id_slot_count-1`. Set it to the server's `--parallel` value. Each session
+  then asks for the same slot on every turn (and after a resume), so sessions on
+  a multi-slot server stop overwriting each other's cached prefix. Requests
+  without a session id, such as model discovery, omit it.
+- `max_concurrent_requests` (integer ≥ 1) makes Tau queue its own requests to
+  this provider once that many are in flight. With `1`, a background subagent's
+  request waits for the main session's request to finish, and vice versa,
+  instead of both being sent and evicting each other's cached prefix from the
+  one slot. The waiting session shows a notice such as
+  `Waiting for llama: 1 request ahead (max_concurrent_requests=1)`. The queue is
+  shared by everything in one Tau process (sessions, in-process subagents,
+  compaction, naming); it cannot see other Tau processes or other clients of the
+  same server.
+
+`cache_prompt` and `id_slot` apply to chat-completions requests only. Servers
+that reject unknown request fields will fail with them set, so enable them only
+for llama.cpp or servers that accept its fields. The built-in `llama.cpp`
+backend configured through `/local` is managed separately and does not read
+these preferences.
+
+## Prompt-cache misses
+
+Tau watches the `cache_read` count that providers report with each response.
+Once a provider and model have served part of a prompt from cache in the current
+session, a later response that reports no cache read for a prompt of at least
+8,192 tokens shows a status line such as:
+
+```text
+… Prompt cache miss: 41,250 prompt tokens reprocessed (earlier llama turns were served from cache)
+```
+
+On a hosted API this usually means the cache expired between turns and the
+prompt was billed at the full input price. On a local server with one slot, it
+usually means another request (a subagent, another Tau process, or another
+client) used the slot and evicted this session's cached prefix, so the turn ran
+as slowly as a cold start. The same signal reaches extensions and RPC clients as
+the `prompt_cache_miss` event. Providers that never report cache reads never
+show it.
+
+A compaction's own request can displace the cached prefix, so the turn after it
+is not judged, and a new or resumed session is not judged until it has seen a
+cache hit of its own.
 
 ## How credentials are resolved
 

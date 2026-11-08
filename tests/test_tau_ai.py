@@ -1,6 +1,7 @@
 import ssl
 from collections.abc import AsyncIterator, Mapping
 from json import loads
+from typing import Any
 
 import httpx
 import pytest
@@ -41,6 +42,7 @@ from tau_ai import (
     ToolCallEndEvent,
     openai_compatible_config_from_env,
 )
+from tau_ai.openai_compatible import llama_slot_for_session
 
 
 async def _collect(stream: AsyncIterator[object]) -> list[object]:
@@ -384,6 +386,72 @@ async def test_openai_compatible_provider_does_not_retry_after_partial_output() 
     assert len(requests) == 1
     assert isinstance(events[-1], AssistantErrorEvent)
     assert events[-1].error.text == "partial"
+
+
+async def _local_server_chat_payloads(
+    config: OpenAICompatibleConfig, session_ids: list[str | None]
+) -> list[dict[str, Any]]:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            text='data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n',
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(config, client=client)
+        for session_id in session_ids:
+            await _collect(
+                provider.stream_response(
+                    model="local-model",
+                    system="You are Tau.",
+                    messages=[UserMessage(content="Say ok")],
+                    tools=[],
+                    session_id=session_id,
+                )
+            )
+    return [loads(request.content) for request in requests]
+
+
+@pytest.mark.anyio
+async def test_local_server_cache_fields_are_absent_unless_opted_in() -> None:
+    (payload,) = await _local_server_chat_payloads(
+        OpenAICompatibleConfig(api_key="k", base_url="http://localhost:8080/v1"),
+        ["session-a"],
+    )
+
+    assert "cache_prompt" not in payload
+    assert "id_slot" not in payload
+
+
+@pytest.mark.anyio
+async def test_local_server_opt_in_sends_cache_prompt_and_a_stable_slot_per_session() -> None:
+    payloads = await _local_server_chat_payloads(
+        OpenAICompatibleConfig(
+            api_key="k",
+            base_url="http://localhost:8080/v1",
+            cache_prompt=True,
+            id_slot_count=4,
+        ),
+        ["session-a", "session-a", "session-b", None],
+    )
+
+    assert all(payload["cache_prompt"] is True for payload in payloads)
+    assert payloads[0]["id_slot"] == payloads[1]["id_slot"]
+    assert payloads[0]["id_slot"] == llama_slot_for_session("session-a", 4)
+    assert payloads[2]["id_slot"] == llama_slot_for_session("session-b", 4)
+    assert 0 <= payloads[0]["id_slot"] < 4
+    # Without a session there is no stable slot to ask for; the server picks one.
+    assert "id_slot" not in payloads[3]
+
+
+def test_llama_slot_for_session_is_zero_with_one_slot_and_none_when_unset() -> None:
+    assert llama_slot_for_session("any-session", 1) == 0
+    assert llama_slot_for_session("any-session", None) is None
+    assert llama_slot_for_session(None, 4) is None
 
 
 @pytest.mark.anyio

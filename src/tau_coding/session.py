@@ -99,6 +99,7 @@ from tau_coding.project_trust import (
     TrustPrompt,
     format_trust_diagnostic,
 )
+from tau_coding.prompt_cache import PromptCacheMissDetector
 from tau_coding.prompt_templates import (
     PromptTemplate,
     expand_prompt_template_command,
@@ -133,6 +134,7 @@ from tau_coding.provider_runtime import (
     create_model_provider,
 )
 from tau_coding.reload import CodingReloadSummary, ReloadCategorySummary
+from tau_coding.request_gate import RequestQueued, observe_queued_requests
 from tau_coding.resources import (
     ResourceDiagnostic,
     ResourceError,
@@ -507,7 +509,9 @@ class CodingSession:
         self._persisted_message_ids: set[int] = set()
         self._ended_message_ids: set[int] = set()
         self._pending_message_writes: dict[int, _PendingMessageWrite] = {}
+        self._prompt_cache_misses = PromptCacheMissDetector()
         self._attach_persistence_listener()
+        self._stop_observing_queued_requests = observe_queued_requests(self._report_queued_request)
 
     @classmethod
     async def load(cls, config: CodingSessionConfig) -> CodingSession:
@@ -1582,6 +1586,14 @@ class CodingSession:
         message = self._harness.pop_latest_steering()
         return None if message is None else message_text(message)
 
+    async def _signals_after(self, event: AgentEvent) -> AsyncIterator[CodingSessionEvent]:
+        """Yield session diagnostics that one agent event gives rise to."""
+        if isinstance(event, MessageEndEvent) and isinstance(event.message, AssistantMessage):
+            cache_miss = self._prompt_cache_misses.observe(event.message)
+            if cache_miss is not None:
+                await self._extension_runtime.emit_event(cache_miss)
+                yield cache_miss
+
     def set_model(self, model: str) -> None:
         """Switch the active model for future turns and make it the default."""
         provider = self._active_provider_config()
@@ -2322,6 +2334,8 @@ class CodingSession:
                     )
                 else:
                     yield retry_event
+                async for signal in self._signals_after(retry_event):
+                    yield signal
         finally:
             aclose = getattr(retry_events, "aclose", None)
             if aclose is not None:
@@ -3079,11 +3093,14 @@ class CodingSession:
         self._harness = replacement._harness
         self._preview_model = None
         self._preview_thinking = None
+        self._prompt_cache_misses = replacement._prompt_cache_misses
         # Detach the replacement's persistence listener so writes advance
         # this session's parent pointers, not the discarded replacement's.
         if replacement._persistence_unsubscribe is not None:
             replacement._persistence_unsubscribe()
             replacement._persistence_unsubscribe = None
+        # This session keeps its own observer, which follows the adopted config.
+        replacement._stop_observing_queued_requests()
         self._attach_persistence_listener()
         self._invalidate_context_usage_cache()
         self._last_parent_id = replacement._last_parent_id
@@ -3165,6 +3182,16 @@ class CodingSession:
         result = await self.compact_detailed(instructions)
         return f"Compacted {result.replaced_entry_count} context entries."
 
+    def _report_queued_request(self, notice: RequestQueued) -> None:
+        """Tell the user this session's model request is waiting for a free slot."""
+        if notice.session_id is None or notice.session_id != self._config.session_id:
+            return
+        ahead = "1 request" if notice.ahead == 1 else f"{notice.ahead} requests"
+        self._extension_runtime.ui.notify(
+            f"Waiting for {notice.provider_name}: {ahead} ahead "
+            f"(max_concurrent_requests={notice.limit})"
+        )
+
     async def aclose(self) -> None:
         """Close every owned extension/provider resource exactly once.
 
@@ -3193,6 +3220,7 @@ class CodingSession:
 
     async def _close_owned_resources(self) -> None:
         """Run the sole close pass, continuing after individual failures."""
+        self._stop_observing_queued_requests()
         error: BaseException | None = None
         try:
             if self._extension_runtime.active:
@@ -3423,6 +3451,8 @@ class CodingSession:
                     )
                 else:
                     yield event
+                async for signal in self._signals_after(event):
+                    yield signal
                 # Frontends have rendered the confirmed, expanded prompt. Name
                 # the session alongside the agent's reply instead of delaying
                 # the reply's request behind the naming request.
@@ -3486,6 +3516,8 @@ class CodingSession:
                             )
                         else:
                             yield retry_event
+                        async for signal in self._signals_after(retry_event):
+                            yield signal
                     session_event_4 = AutoRetryEndEvent(
                         success=overflow_retry_error is None,
                         attempt=1,
@@ -3554,6 +3586,8 @@ class CodingSession:
                     )
                 else:
                     yield event
+                async for signal in self._signals_after(event):
+                    yield signal
             if route_failure_message is not None:
                 async for failover_event in self._run_huggingface_route_failover(context=context):
                     yield failover_event
@@ -4071,6 +4105,9 @@ class CodingSession:
             messages,
             custom_instructions="\n\n".join(focus) or None,
         )
+        # The summary request has its own prompt, so on a single-slot server it
+        # displaces the conversation's cached prefix.
+        self._prompt_cache_misses.expect_miss()
         text_parts: list[str] = []
         final_text: str | None = None
         response_usages: list[Usage] = []

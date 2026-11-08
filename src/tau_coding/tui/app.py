@@ -91,6 +91,7 @@ from tau_coding.events import (
     CodingSessionEvent,
     CompactionEndEvent,
     CompactionStartEvent,
+    PromptCacheMissEvent,
     QueueUpdateEvent,
 )
 from tau_coding.extensions.api import (
@@ -6521,10 +6522,11 @@ class TauTuiApp(App[None]):
                 )
             self._refresh_chrome()
             return
-        if isinstance(event, (AutoRetryStartEvent, CompactionStartEvent)):
+        if isinstance(event, (AutoRetryStartEvent, CompactionStartEvent, PromptCacheMissEvent)):
             await transcript.finish_assistant_message()
             if self.state.items and (
-                isinstance(event, AutoRetryStartEvent) or event.reason == "overflow"
+                isinstance(event, (AutoRetryStartEvent, PromptCacheMissEvent))
+                or event.reason == "overflow"
             ):
                 await transcript.append_item(
                     self.state.items[-1],
