@@ -72,6 +72,22 @@ class ToolExecutionEndEvent(WireModel):
     is_error: bool
 
 
+class ProviderRetryEvent(WireModel):
+    """The provider is re-sending a request that transiently failed.
+
+    Emitted while the agent waits between transport attempts (a dropped
+    connection, a transient HTTP error, a stream that sent nothing), so a
+    frontend can say why the agent is quiet.
+    Transient: nothing is persisted and no assistant content exists for it.
+    """
+
+    type: Literal["provider_retry"] = "provider_retry"
+    attempt: int
+    max_attempts: int
+    delay_seconds: float
+    message: str
+
+
 type AgentEvent = Annotated[
     AgentStartEvent
     | AgentEndEvent
@@ -82,6 +98,7 @@ type AgentEvent = Annotated[
     | MessageEndEvent
     | ToolExecutionStartEvent
     | ToolExecutionUpdateEvent
-    | ToolExecutionEndEvent,
+    | ToolExecutionEndEvent
+    | ProviderRetryEvent,
     Field(discriminator="type"),
 ]

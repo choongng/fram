@@ -25,6 +25,7 @@ from tau_ai.events import (
     AssistantDoneEvent,
     AssistantErrorEvent,
     AssistantMessageEvent,
+    AssistantRetryEvent,
     AssistantStartEvent,
     TextDeltaEvent,
     TextEndEvent,
@@ -109,7 +110,15 @@ async def canonicalize_provider_stream(
 
     async for event in source:
         if isinstance(event, ProviderRetryEvent):
-            # Retries are provider-internal at the Pi AI boundary.
+            # Retries never become assistant content; they are surfaced as a
+            # transient status (AssistantRetryEvent -> ProviderRetryEvent) so a
+            # frontend can say why the agent is quiet between attempts.
+            yield AssistantRetryEvent(
+                attempt=event.attempt,
+                max_attempts=event.max_attempts,
+                delay_seconds=event.delay_seconds,
+                message=event.message,
+            )
             continue
         if isinstance(event, ProviderResponseStartEvent):
             if event.response_provider is not None:

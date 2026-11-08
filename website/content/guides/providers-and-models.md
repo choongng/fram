@@ -592,6 +592,9 @@ Set `TAU_STREAM_STALL_SECONDS` to use one fixed wait on every try, or to `0` or
 `off` to turn the timer off. Once text, thinking or a tool call has arrived, a
 stall is reported as an error rather than retried.
 
+Each retry appears as a status line while Tau waits, and print mode writes it to
+stderr, so you can see that Tau is waiting, not hung.
+
 ## Single-slot local servers
 
 A llama.cpp server keeps a cached prompt prefix per slot, and with

@@ -46,6 +46,7 @@ from tau_agent import (
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
+    ProviderRetryEvent,
     TextContent,
     ThinkingContent,
     ToolCall,
@@ -2860,6 +2861,25 @@ async def test_streaming_transcript_applies_role_foreground() -> None:
             w for w in app.query(StreamingTranscriptMessageWidget) if w.item.role == "assistant"
         )
         assert assistant.styles.color == Color.parse(assistant_fg)
+
+
+@pytest.mark.anyio
+async def test_provider_retry_status_appears_while_waiting() -> None:
+    app = TauTuiApp(FakeSession())
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await pilot.pause()
+        event = ProviderRetryEvent(
+            attempt=1, max_attempts=5, delay_seconds=0.25, message="retrying provider"
+        )
+        app.adapter.apply(event)
+        await app._apply_streaming_transcript_event(event)
+        await pilot.pause()
+
+        assert any(
+            widget.item.role == "status" and "retrying provider" in widget.item.text
+            for widget in app.query(TranscriptMessageWidget)
+        )
 
 
 @pytest.mark.anyio

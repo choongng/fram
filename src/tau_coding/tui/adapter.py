@@ -6,6 +6,7 @@ from tau_agent.events import (
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
+    ProviderRetryEvent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolExecutionUpdateEvent,
@@ -163,6 +164,9 @@ class TuiEventAdapter:
                 self.state.items.pop()
             self.state.error = None
             self.state.add_item("status", f"… {event.error_message}")
+            return
+        if isinstance(event, ProviderRetryEvent):
+            self.state.add_item("status", f"… {event.message}")
             return
         if isinstance(event, PromptCacheMissEvent):
             self.state.add_item("status", f"… {event.status_text}")

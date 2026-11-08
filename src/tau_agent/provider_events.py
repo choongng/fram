@@ -90,6 +90,21 @@ class AssistantErrorEvent(WireModel):
     error: AssistantMessage
 
 
+class AssistantRetryEvent(WireModel):
+    """The provider adapter is retrying a transient request failure.
+
+    Carries no content: emitted while the response has not usefully started
+    (often before the first token), so `partial` would be empty anyway. The
+    agent loop turns it into `ProviderRetryEvent` for frontends to show.
+    """
+
+    type: Literal["assistant_retry"] = "assistant_retry"
+    attempt: int
+    max_attempts: int
+    delay_seconds: float
+    message: str
+
+
 type AssistantMessageEvent = Annotated[
     AssistantStartEvent
     | TextStartEvent
@@ -102,6 +117,7 @@ type AssistantMessageEvent = Annotated[
     | ToolCallDeltaEvent
     | ToolCallEndEvent
     | AssistantDoneEvent
-    | AssistantErrorEvent,
+    | AssistantErrorEvent
+    | AssistantRetryEvent,
     Field(discriminator="type"),
 ]

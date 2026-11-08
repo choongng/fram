@@ -39,6 +39,7 @@ AGENT_EVENT_TYPES: frozenset[str] = frozenset(
         "tool_execution_start",
         "tool_execution_update",
         "tool_execution_end",
+        "provider_retry",
         "compaction_start",
         "compaction_end",
         "entry_appended",
