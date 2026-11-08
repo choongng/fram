@@ -65,10 +65,6 @@ def test_update_is_refused_with_reinstall_advice(capsys: pytest.CaptureFixture[s
     assert "uv tool upgrade fram-agent" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(
-    ("tau_home", "expected"),
-    [(None, "home/.fram"), ("", "home/.fram"), ("/elsewhere", "/elsewhere")],
-)
 def test_help_lists_only_the_supported_update(monkeypatch: pytest.MonkeyPatch) -> None:
     from tau_coding.cli import app
 
@@ -79,6 +75,10 @@ def test_help_lists_only_the_supported_update(monkeypatch: pytest.MonkeyPatch) -
     assert "Upgrade" not in str(app.info.epilog)
 
 
+@pytest.mark.parametrize(
+    ("tau_home", "expected"),
+    [(None, "home/.fram"), ("", "home/.fram"), ("/elsewhere", "/elsewhere")],
+)
 def test_fram_home_defaults_to_dot_fram_unless_tau_home_is_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tau_home: str | None, expected: str
 ) -> None:
