@@ -10,6 +10,7 @@ from typing import Literal
 from xml.sax.saxutils import escape
 
 from tau_agent.tools import AgentTool
+from tau_coding.branding import BRANDING
 from tau_coding.self_docs import tau_docs_path, tau_examples_path, tau_readme_path
 from tau_coding.skills import Skill
 
@@ -94,10 +95,11 @@ def build_system_prompt_inspection(options: BuildSystemPromptOptions) -> SystemP
         sources.append(
             SystemPromptSource(
                 kind="default",
-                label="Tau default prompt",
+                label=f"{BRANDING.product_name} default prompt",
                 source="tau_coding.system_prompt",
                 content=(
-                    "You are an expert coding assistant operating inside Tau, a coding agent "
+                    "You are an expert coding assistant operating "
+                    f"inside {BRANDING.product_name}, a coding agent "
                     "harness. You help users by reading files, executing commands, editing code, "
                     "and writing new files."
                     f"\n\nAvailable tools:\n{format_available_tools(options.tools)}"
@@ -142,7 +144,7 @@ def build_system_prompt_inspection(options: BuildSystemPromptOptions) -> SystemP
             SystemPromptSource(
                 kind="runtime",
                 label="Current date",
-                source="Tau runtime",
+                source=f"{BRANDING.product_name} runtime",
                 content=f"\nCurrent date: {current_date.isoformat()}",
             ),
             SystemPromptSource(
@@ -192,21 +194,25 @@ def format_tau_documentation() -> str:
     docs_path = _format_path(tau_docs_path())
     examples_path = _format_path(tau_examples_path())
     return (
-        "Tau documentation (read only when the user asks about Tau itself, its SDK, "
+        f"{BRANDING.product_name} documentation (read only when the "
+        f"user asks about {BRANDING.product_name} itself, its SDK, "
         "extensions, skills, providers, models, commands, or TUI):\n"
         f"- Main documentation: {readme_path}\n"
         f"- Additional docs: {docs_path}\n"
         f"- Examples: {examples_path} (extensions and custom tools)\n"
-        "- When reading Tau docs or examples, resolve docs/... under Additional docs and "
+        f"- When reading {BRANDING.product_name} docs or "
+        "examples, resolve docs/... under Additional docs and "
         "examples/... under Examples, not the current working directory\n"
         "- When asked about: creating or modifying extensions (docs/extensions.md, "
         "examples/extensions/), skills and prompt templates (docs/skills.md), custom "
         "providers or adding built-in providers/models (docs/models.md), CLI and slash "
         "commands (docs/cli.md), TUI usage "
-        "(docs/tui.md), Tau architecture and packages (docs/architecture.md)\n"
-        "- When working on Tau topics, read the docs and examples, and follow .md "
+        f"(docs/tui.md), {BRANDING.product_name} architecture and packages (docs/architecture.md)\n"
+        f"- When working on {BRANDING.product_name} topics, "
+        "read the docs and examples, and follow .md "
         "cross-references before implementing\n"
-        "- Always read relevant Tau .md files completely and follow links to related docs"
+        f"- Always read relevant {BRANDING.product_name} .md files completely "
+        "and follow links to related docs"
     )
 
 

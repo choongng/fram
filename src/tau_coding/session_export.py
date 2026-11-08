@@ -42,6 +42,7 @@ from tau_agent.session import (
     path_to_entry,
 )
 from tau_agent.types import JSONValue
+from tau_coding.branding import BRANDING
 from tau_coding.session_usage import (
     USAGE_SCRIPT,
     USAGE_STYLES,
@@ -88,7 +89,7 @@ def export_session_html(
     entries: Sequence[SessionEntry],
     output_path: Path,
     *,
-    title: str = "Tau Session Export",
+    title: str = f"{BRANDING.product_name} Session Export",
     source: str | None = None,
     system_prompt: str | None = None,
 ) -> Path:
@@ -110,7 +111,7 @@ def export_session_artifact(
     entries: Sequence[SessionEntry],
     output_path: Path,
     *,
-    title: str = "Tau Session Export",
+    title: str = f"{BRANDING.product_name} Session Export",
     source: str | None = None,
     format: str | None = None,
     system_prompt: str | None = None,
@@ -177,7 +178,7 @@ def _export_theme_css(theme: TuiTheme) -> str:
 def render_session_html(
     entries: Sequence[SessionEntry],
     *,
-    title: str = "Tau Session Export",
+    title: str = f"{BRANDING.product_name} Session Export",
     source: str | None = None,
     system_prompt: str | None = None,
 ) -> str:
@@ -779,7 +780,7 @@ def render_session_html(
 <body>
   <header>
     <div class="header-top">
-      <p class="eyebrow">Tau session export</p>
+      <p class="eyebrow">{_escape(BRANDING.product_name)} session export</p>
       <button
         type="button"
         class="theme-toggle"

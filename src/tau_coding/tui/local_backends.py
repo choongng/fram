@@ -23,6 +23,7 @@ from textual.renderables.bar import Bar as BarRenderable
 from textual.screen import ModalScreen
 from textual.widgets import Input, Label, ListItem, ListView, ProgressBar, Select, Static
 
+from tau_coding.branding import BRANDING
 from tau_coding.local_backends import (
     LocalAction,
     LocalBackendRegistry,
@@ -450,7 +451,7 @@ class LocalBackendScreen(ModalScreen[None]):
     def _confirm_reset(self) -> None:
         if not self._is_idle():
             self._show_message(
-                "Tau must be idle before resetting local backend settings.",
+                f"{BRANDING.product_name} must be idle before resetting local backend settings.",
                 "warning",
             )
             return
@@ -471,7 +472,7 @@ class LocalBackendScreen(ModalScreen[None]):
     def _open_model_action(self, action: LocalAction) -> None:
         if not self._is_idle():
             self._show_message(
-                "Tau must be idle before changing local backend models.",
+                f"{BRANDING.product_name} must be idle before changing local backend models.",
                 "warning",
             )
             return
@@ -558,7 +559,7 @@ class LocalBackendScreen(ModalScreen[None]):
     ) -> None:
         if not self._is_idle():
             self._show_message(
-                "Tau must be idle before changing local backend settings.",
+                f"{BRANDING.product_name} must be idle before changing local backend settings.",
                 "warning",
             )
             return
@@ -753,7 +754,9 @@ class LocalBackendScreen(ModalScreen[None]):
 
     def _use_model(self, model_id: str) -> None:
         if not self._is_idle():
-            self._show_message("Tau must be idle before switching models.", "warning")
+            self._show_message(
+                f"{BRANDING.product_name} must be idle before switching models.", "warning"
+            )
             return
         if self._worker is not None and not self._worker.done():
             self._show_message("An operation is already in progress.", "warning")

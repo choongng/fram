@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import httpx
 
 from tau_ai.http import create_async_client
+from tau_coding.branding import BRANDING
 from tau_coding.credentials import OAuthCredential
 from tau_coding.oauth_types import (
     OAuthAuthInfo,
@@ -84,7 +85,9 @@ class OpenAICodexOAuthProvider:
 
     async def login(self, callbacks: OAuthLoginCallbacks) -> OAuthCredential:
         if callbacks.method == "device_code":
-            raise OAuthError("OpenAI Codex device-code login is not implemented in Tau yet")
+            raise OAuthError(
+                f"OpenAI Codex device-code login is not implemented in {BRANDING.product_name} yet"
+            )
         return await login_openai_codex(
             on_auth=callbacks.on_auth,
             on_prompt=callbacks.on_prompt,
@@ -524,4 +527,7 @@ def _oauth_html(message: str) -> str:
         .replace(">", "&gt;")
         .replace('"', "&quot;")
     )
-    return f'<!doctype html><meta charset="utf-8"><title>Tau OAuth</title><p>{escaped}</p>'
+    return (
+        f'<!doctype html><meta charset="utf-8"><title>{BRANDING.product_name} '
+        f"OAuth</title><p>{escaped}</p>"
+    )

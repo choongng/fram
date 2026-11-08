@@ -74,6 +74,7 @@ from tau_agent.provider_events import (
 )
 from tau_agent.tools import AgentTool
 from tau_agent.types import JSONValue
+from tau_coding.branding import BRANDING
 from tau_coding.catalog_loader import save_user_catalog_entries
 from tau_coding.commands import (
     LOGIN_PROVIDER_ALIASES,
@@ -3770,7 +3771,7 @@ def _collect_garbage_while_idle() -> None:
 class TauTuiApp(App[None]):
     """Interactive Textual frontend for a ``CodingSession``."""
 
-    TITLE = "Tau"
+    TITLE = BRANDING.product_name
     CSS = """
     Screen {
         layout: vertical;
@@ -4841,10 +4842,10 @@ class TauTuiApp(App[None]):
                 yield Container(id="above-prompt-slot")
                 yield Static("", id="queued-messages")
                 with Horizontal(id="prompt-row"):
-                    yield Static("τ", id="prompt-prefix")
+                    yield Static(BRANDING.mark, id="prompt-prefix")
                     yield PromptInput(
                         placeholder=(
-                            "Ask Tau…  Enter submits, "
+                            f"Ask {BRANDING.product_name}…  Enter submits, "
                             f"{_key_hint(self.tui_settings.keybindings.insert_newline)} "
                             "inserts a newline"
                         ),
@@ -6749,7 +6750,7 @@ class TauTuiApp(App[None]):
     def action_open_session_picker(self) -> None:
         """Open local sessions immediately, then load other projects."""
         if self.state.running:
-            self._notify("Tau is already working. Press Escape to cancel.")
+            self._notify(f"{BRANDING.product_name} is already working. Press Escape to cancel.")
             return
         if getattr(self.session, "session_manager", None) is None:
             self._notify("No sessions found.")
@@ -6904,7 +6905,7 @@ class TauTuiApp(App[None]):
 
     def _cycle_model(self, *, reverse: bool) -> None:
         if self.state.running:
-            self._notify("Tau is already working. Press Escape to cancel.")
+            self._notify(f"{BRANDING.product_name} is already working. Press Escape to cancel.")
             return
         preview = getattr(self.session, "preview_cycle_scoped_model", None)
         if preview is not None:
@@ -7489,7 +7490,8 @@ class TauTuiApp(App[None]):
     async def _use_local_model(self, provider_id: str, model_id: str) -> None:
         if self._is_agent_or_queue_active():
             self._notify(
-                "Tau is still working. Press Escape to interrupt before switching models.",
+                f"{BRANDING.product_name} is still working. Press "
+                "Escape to interrupt before switching models.",
                 severity="warning",
             )
             return
@@ -8007,7 +8009,7 @@ def _render_activity_indicator(
     if shell_mode and not running:
         return Text("$", style=f"bold {theme.role_styles['tool'].border}")
     if not running:
-        return Text("τ", style=f"bold {theme.accent}")
+        return Text(BRANDING.mark, style=f"bold {theme.accent}")
 
     glyph = ACTIVITY_SPINNER_FRAMES[frame % len(ACTIVITY_SPINNER_FRAMES)]
     half_cycle = ACTIVITY_COLOR_FADE_STEPS / 2

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Protocol
 
 from tau_agent.tools import AgentTool
+from tau_coding.branding import BRANDING
 from tau_coding.prompt_templates import PromptTemplate
 from tau_coding.provider_catalog import BUILTIN_PROVIDER_CATALOG, builtin_provider_entry
 from tau_coding.reload import CodingReloadSummary, ReloadCategorySummary
@@ -517,7 +518,7 @@ def _system_command(context: CommandContext) -> CommandResult:
                 SystemPromptSource(
                     kind="runtime",
                     label="Effective system prompt",
-                    source="active Tau session",
+                    source=f"active {BRANDING.product_name} session",
                     content=context.session.system_prompt,
                 ),
             ),
