@@ -10,6 +10,7 @@ the original chat-completions path unchanged.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import suppress
 from json import JSONDecodeError, dumps, loads
@@ -183,6 +184,8 @@ class OpenAICompatibleProvider:
             include_reasoning_effort_none=self._config.include_reasoning_effort_none,
             supports_images=self._config.supports_images,
             prompt_cache_key=cache_key,
+            cache_prompt=self._config.cache_prompt,
+            id_slot=llama_slot_for_session(session_id, self._config.id_slot_count),
         )
         return self._stream(
             model=model,
@@ -793,6 +796,21 @@ class _ResponsesToolCallBuilder:
         )
 
 
+def llama_slot_for_session(session_id: str | None, slot_count: int | None) -> int | None:
+    """Return a stable llama.cpp ``id_slot`` for a session, or ``None`` when unset.
+
+    llama-server keeps one cached prompt per slot. Hashing the session id keeps a
+    session on the same slot for every request, so its prefix stays cached while
+    other sessions use other slots (or, with one slot, at least ask for the one
+    that holds this session's prefix). The hash is stable across processes, so a
+    resumed session asks for the same slot it used before.
+    """
+    if not session_id or slot_count is None:
+        return None
+    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    return int(digest[:8], 16) % slot_count
+
+
 def _build_chat_payload(
     *,
     model: str,
@@ -807,6 +825,8 @@ def _build_chat_payload(
     include_reasoning_effort_none: bool = False,
     supports_images: bool = False,
     prompt_cache_key: str | None = None,
+    cache_prompt: bool = False,
+    id_slot: int | None = None,
 ) -> dict[str, JSONValue]:
     resolved_compat = dict(compat or {})
     supports_store = bool(resolved_compat.get("supportsStore", True))
@@ -825,6 +845,10 @@ def _build_chat_payload(
     }
     if prompt_cache_key is not None:
         payload["prompt_cache_key"] = prompt_cache_key
+    if cache_prompt:
+        payload["cache_prompt"] = True
+    if id_slot is not None:
+        payload["id_slot"] = id_slot
     if supports_usage:
         payload["stream_options"] = {"include_usage": True}
     if supports_store:

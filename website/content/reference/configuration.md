@@ -341,6 +341,11 @@ Provider preferences live in `~/.tau/providers.json`:
   records that contain a Hugging Face route but predate route-mode metadata are
   treated as fixed, preventing an upgrade from overriding a potentially explicit
   user selection.
+- OpenAI-compatible providers accept two opt-in options for llama.cpp servers,
+  both off by default: `cache_prompt` (boolean) sends `cache_prompt: true`, and
+  `id_slot_count` (integer ≥ 1) sends a per-session `id_slot` below that count.
+  Tau writes them back only when set. See
+  [Single-slot local servers]({{< relref "../guides/providers-and-models.md#single-slot-local-servers" >}}).
 - API keys and OAuth credentials are **not** stored here — they live in
   `~/.tau/credentials.json` (private but not encrypted). OAuth objects may contain
   provider metadata such as a GitHub Enterprise domain and are refreshed

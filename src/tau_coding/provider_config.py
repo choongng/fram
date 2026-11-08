@@ -135,6 +135,10 @@ class OpenAICompatibleProviderConfig:
     thinking_parameter: ThinkingParameter | None = None
     thinking_defaults: dict[str, ThinkingLevel] = field(default_factory=dict)
     inference_providers: dict[str, str] = field(default_factory=dict)
+    cache_prompt: bool = False
+    """Send llama.cpp's ``cache_prompt: true`` so the server reuses a cached prefix."""
+    id_slot_count: int | None = None
+    """Pin each session to one of this many llama.cpp slots through ``id_slot``."""
 
     def __post_init__(self) -> None:
         _validate_provider_numbers(
@@ -142,6 +146,10 @@ class OpenAICompatibleProviderConfig:
             max_retries=self.max_retries,
             max_retry_delay_seconds=self.max_retry_delay_seconds,
         )
+        if self.id_slot_count is not None and (
+            isinstance(self.id_slot_count, bool) or self.id_slot_count < 1
+        ):
+            raise ProviderConfigError("Provider id_slot_count must be 1 or greater")
         _validate_context_windows(self.context_windows)
         _validate_model_metadata(self.models, self.model_metadata)
         _validate_json_object(self.compat, "Provider compat")
@@ -182,6 +190,8 @@ class OpenAICompatibleProviderConfig:
             "thinking_parameter": self.thinking_parameter,
             "thinking_defaults": dict(self.thinking_defaults),
             "inference_providers": dict(self.inference_providers),
+            "cache_prompt": self.cache_prompt,
+            "id_slot_count": self.id_slot_count,
         }
 
 
@@ -983,6 +993,8 @@ def _merge_openai_compatible_provider(
         ),
         thinking_defaults=existing.thinking_defaults,
         inference_providers=existing.inference_providers,
+        cache_prompt=existing.cache_prompt,
+        id_slot_count=existing.id_slot_count,
     )
 
 
@@ -1097,8 +1109,15 @@ def _provider_preference_to_json(provider: ProviderConfig) -> dict[str, Any]:
         "max_retry_delay_seconds": provider.max_retry_delay_seconds,
         "thinking_defaults": dict(provider.thinking_defaults),
     }
-    if isinstance(provider, OpenAICompatibleProviderConfig) and provider.inference_providers:
-        preference["inference_providers"] = dict(provider.inference_providers)
+    if isinstance(provider, OpenAICompatibleProviderConfig):
+        if provider.inference_providers:
+            preference["inference_providers"] = dict(provider.inference_providers)
+        # Local-server options are opt-in; write them only once set so saved
+        # preferences for every other provider keep their existing shape.
+        if provider.cache_prompt:
+            preference["cache_prompt"] = True
+        if provider.id_slot_count is not None:
+            preference["id_slot_count"] = provider.id_slot_count
     return preference
 
 
@@ -1351,6 +1370,22 @@ def _apply_provider_preference(
             if "inference_providers" in value
             else provider.inference_providers
         )
+        cache_prompt = (
+            _optional_bool(
+                value.get("cache_prompt"), f"provider_preferences.{provider.name}.cache_prompt"
+            )
+            is True
+            if "cache_prompt" in value
+            else provider.cache_prompt
+        )
+        id_slot_count = (
+            _optional_positive_int(
+                value.get("id_slot_count"),
+                f"provider_preferences.{provider.name}.id_slot_count",
+            )
+            if "id_slot_count" in value
+            else provider.id_slot_count
+        )
         return replace(
             provider,
             default_model=default_model,
@@ -1360,6 +1395,8 @@ def _apply_provider_preference(
             max_retry_delay_seconds=max_retry_delay_seconds,
             thinking_defaults=thinking_defaults,
             inference_providers=inference_providers,
+            cache_prompt=cache_prompt,
+            id_slot_count=id_slot_count,
         )
     return replace(
         provider,
@@ -1780,6 +1817,8 @@ def openai_compatible_config_from_provider(
             model=selected_model,
             thinking_level=thinking_level,
         ),
+        cache_prompt=provider.cache_prompt,
+        id_slot_count=provider.id_slot_count,
     )
 
 
