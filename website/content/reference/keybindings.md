@@ -44,6 +44,7 @@ These are the default keys in the interactive [TUI](/guides/tui/). Run
 | Key | Action |
 | --- | --- |
 | `Ctrl+O` | Toggle exact tool commands and full output (vs. compact previews) |
+| `PgUp` / `PgDn` | Page the transcript, even while the prompt has focus |
 | `Ctrl+C` | Clear the prompt input |
 | `Ctrl+D` | Quit |
 

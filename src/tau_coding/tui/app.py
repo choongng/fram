@@ -540,6 +540,10 @@ class CompletionActionTarget(Protocol):
 
     def action_toggle_sidebar(self) -> None: ...
 
+    def action_page_transcript_up(self) -> None: ...
+
+    def action_page_transcript_down(self) -> None: ...
+
     def action_edit_queued_message(self) -> bool: ...
 
     async def action_submit_prompt(self) -> None: ...
@@ -569,6 +573,9 @@ class PromptInput(TextArea):
         Binding("alt+right,alt+f", "cursor_word_right", show=False),
         Binding("alt+shift+left", "cursor_word_left(True)", show=False),
         Binding("alt+shift+right", "cursor_word_right(True)", show=False),
+        # Page keys scroll the transcript, not the prompt's own lines.
+        Binding("pageup", "page_transcript_up", show=False),
+        Binding("pagedown", "page_transcript_down", show=False),
     ]
     shell_mode_style: str = ""
 
@@ -684,6 +691,14 @@ class PromptInput(TextArea):
     def action_toggle_sidebar(self) -> None:
         """Toggle app-level sidebar visibility."""
         self._completion_target().action_toggle_sidebar()
+
+    def action_page_transcript_up(self) -> None:
+        """Scroll the app-level transcript up one page."""
+        self._completion_target().action_page_transcript_up()
+
+    def action_page_transcript_down(self) -> None:
+        """Scroll the app-level transcript down one page."""
+        self._completion_target().action_page_transcript_down()
 
     def action_clear_prompt(self) -> None:
         """Clear the current prompt."""
@@ -6942,6 +6957,18 @@ class TauTuiApp(App[None]):
     def action_toggle_sidebar(self) -> None:
         """Toggle sidebar visibility for this session."""
         self._toggle_sidebar_visibility()
+
+    def action_page_transcript_up(self) -> None:
+        """Scroll the transcript up one page while the prompt keeps focus."""
+        transcript = self.query_one("#transcript", TranscriptView)
+        if transcript.display:
+            transcript.action_page_up()
+
+    def action_page_transcript_down(self) -> None:
+        """Scroll the transcript down one page while the prompt keeps focus."""
+        transcript = self.query_one("#transcript", TranscriptView)
+        if transcript.display:
+            transcript.action_page_down()
 
     def action_toggle_thinking(self) -> None:
         """Toggle thinking-token display in the transcript."""
