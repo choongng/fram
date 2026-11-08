@@ -64,6 +64,10 @@ class TuiKeybindings:
     toggle_thinking: str = "ctrl+t"
     toggle_tool_results: str = "ctrl+o"
     toggle_sidebar: str = "ctrl+b"
+    # ctrl+z suspends to the shell like any terminal program, so the prompt's
+    # undo (TextArea's ctrl+z) moves to readline's undo key, ctrl+_ / ctrl+/.
+    suspend: str = "ctrl+z"
+    undo: str = "ctrl+underscore,ctrl+slash"
     copy_message: str = "ctrl+c"
     quit: str = "ctrl+d"
 
@@ -84,6 +88,8 @@ class TuiKeybindings:
             "toggle_thinking": self.toggle_thinking,
             "toggle_tool_results": self.toggle_tool_results,
             "toggle_sidebar": self.toggle_sidebar,
+            "suspend": self.suspend,
+            "undo": self.undo,
             "copy_message": self.copy_message,
             "quit": self.quit,
         }
@@ -204,10 +210,11 @@ def _theme_name(value: object) -> TuiThemeName:
 
 def _reject_duplicate_keys(values: dict[str, str]) -> None:
     key_to_action: dict[str, str] = {}
-    for action, key in values.items():
-        previous_action = key_to_action.get(key)
-        if previous_action is not None:
-            raise TuiConfigError(
-                f"TUI keybinding {key!r} is assigned to both {previous_action!r} and {action!r}"
-            )
-        key_to_action[key] = action
+    for action, keys in values.items():
+        for key in (part.strip() for part in keys.split(",")):
+            previous_action = key_to_action.get(key)
+            if previous_action is not None:
+                raise TuiConfigError(
+                    f"TUI keybinding {key!r} is assigned to both {previous_action!r} and {action!r}"
+                )
+            key_to_action[key] = action

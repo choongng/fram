@@ -246,3 +246,8 @@ def test_tui_sidebar_position_rejects_invalid() -> None:
 
     with pytest.raises(TuiConfigError, match="sidebar_position"):
         tui_settings_from_json({"sidebar_position": 123})
+
+
+def test_tui_keybindings_reject_a_key_inside_a_comma_separated_default() -> None:
+    with pytest.raises(TuiConfigError, match="ctrl\\+slash"):
+        tui_settings_from_json({"keybindings": {"toggle_sidebar": "ctrl+slash"}})

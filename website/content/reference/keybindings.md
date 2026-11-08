@@ -47,6 +47,8 @@ These are the default keys in the interactive [TUI](/guides/tui/). Run
 | `PgUp` / `PgDn` | Page the transcript, even while the prompt has focus |
 | `Ctrl+C` | Clear the prompt input |
 | `Ctrl+D` | Quit |
+| `Ctrl+Z` | Suspend to the shell; `fg` resumes (not supported on Windows) |
+| `Ctrl+_` or `Ctrl+/` | Undo in the prompt and text editors (`Ctrl+Y` redoes) |
 
 > [!NOTE] Remapping
 > Keys use Textual's syntax (`ctrl+k`, `shift+tab`, `down`, `f2`, …). Tau rejects

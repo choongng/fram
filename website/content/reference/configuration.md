@@ -437,6 +437,8 @@ The built-in frontend reads optional settings from `~/.tau/tui.json`:
     "toggle_thinking": "ctrl+t",
     "toggle_tool_results": "ctrl+o",
     "toggle_sidebar": "ctrl+b",
+    "suspend": "ctrl+z",
+    "undo": "ctrl+underscore,ctrl+slash",
     "copy_message": "ctrl+c",
     "quit": "ctrl+d"
   }

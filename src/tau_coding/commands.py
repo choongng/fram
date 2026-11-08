@@ -546,6 +546,8 @@ def _hotkeys_command(context: CommandContext) -> CommandResult:
         "- PgUp/PgDn: page the transcript",
         "- Ctrl+B: show or hide the sidebar",
         "- Ctrl+C: clear prompt input",
+        "- Ctrl+Z: suspend to the shell (fg resumes it)",
+        "- Ctrl+_ or Ctrl+/: undo in the prompt and editors (Ctrl+Y redoes)",
         "- Ctrl+D: quit",
     ]
     return CommandResult(handled=True, message="\n".join(lines))
