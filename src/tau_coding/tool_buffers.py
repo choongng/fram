@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -26,6 +27,7 @@ from pathlib import Path
 from tau_agent.messages import ImageContent, TextContent
 from tau_agent.tools import AgentToolResult
 from tau_coding.context_window import CHARS_PER_TOKEN
+from tau_coding.line_anchors import row_line_number
 
 #: The inline limit is this fraction of the model's context window...
 INLINE_WINDOW_DIVISOR = 50
@@ -37,12 +39,42 @@ MIN_INLINE_TOKENS = 1_000
 MAX_INLINE_TOKENS = 4_000
 #: Set to a token count, this replaces the computed inline limit for the run.
 INLINE_TOKENS_ENV = "TAU_TOOL_RESULT_INLINE_TOKENS"
-#: Lines of an oversized result kept in the transcript.
+#: Lines of an oversized result kept in the transcript, for every tool but
+#: `read`: a read is windowed by size alone (`window_chars`), since a file's
+#: lines may be a few characters (code) or a few thousand (a paper converted to
+#: text), so a line count says nothing about how much a window holds.
 WINDOW_LINES = 60
 #: Tools whose oversized output is windowed from the head, not the tail. Test
 #: output, tracebacks and build logs end with the part that matters; a file
 #: read starts with it.
 HEAD_WINDOW_TOOLS = frozenset({"read"})
+#: A head-windowed result is followed by an outline of its def/class lines and
+#: document headings, so the model can jump to one with read offset/limit
+#: instead of paging. The outline is capped at this many entries and a quarter
+#: of the window's chars.
+OUTLINE_MAX_ENTRIES = 80
+OUTLINE_WINDOW_DIVISOR = 4
+#: A numbered section's title is short; a longer line is a numbered sentence.
+SECTION_TITLE_MAX_CHARS = 60
+#: An optional line-number prefix (`17\t`, `17: `, `17|`, read's `17#3fa| `).
+_PREFIX = r"^(?:\s*(?P<number>\d+)(?:#[0-9a-f]+\| ?|\t|[:|\u2502\u2192] ?))?"
+_DEFINITION = re.compile(
+    _PREFIX + r"(?P<indent>[ \t]*)(?P<kind>async\s+def|def|class)\s+(?P<name>\w+)"
+)
+#: A Markdown ATX heading: `#`..`######`, a space, then its text.
+_MARKDOWN_HEADING = re.compile(
+    _PREFIX + r" {0,3}(?P<hashes>#{1,6})[ \t]+(?P<title>[^#\s].*?)[ \t#]*$"
+)
+#: A numbered section line of a plain-text paper: `5`, `5.3` or `5.3.` then a title.
+_NUMBERED_SECTION = re.compile(
+    _PREFIX + r"[ \t]*(?P<section>\d{1,2}(?:\.\d{1,2})*)\.?[ \t]+(?P<title>[A-Z].*?)[ \t]*$"
+)
+#: A Markdown code fence; a heading-like line inside one is code.
+_FENCE = re.compile(_PREFIX + r" {0,3}(?:```|~~~)")
+#: A continuation row of a wrapped read line (`17.2| ...`): not a line start.
+_CONTINUATION_ROW = re.compile(r"^\s*\d+\.\d+\| ")
+#: The note the read tool appends when it stops at a limit; not a file line.
+_READ_TOOL_NOTE = re.compile(r"\n\n\[(?:Showing lines |\d+ more lines in file\. )[^\n]*\]\Z")
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,9 +153,15 @@ def buffer_tool_result(
     tool_name: str,
     buffer_dir: Path,
     limits: BufferLimits,
+    first_line: int = 1,
     output_name: str | None = None,
 ) -> AgentToolResult:
     """Return `result` unchanged if it fits inline, else a window plus a buffer path.
+
+    `first_line` is the file line the text starts at (a read's offset), so the
+    marker and outline of a head-windowed read name the file's own line numbers.
+    A read is cut by characters only, never by `window_lines`, and between file
+    lines where it can.
 
     With `output_name`, the full text is saved as that file in `buffer_dir`
     whatever its size, so every output stays on disk; without it, only an
@@ -147,21 +185,185 @@ def buffer_tool_result(
         except OSError as exc:
             failure = f"{type(exc).__name__}: {exc}"
     head = tool_name in HEAD_WINDOW_TOOLS
-    shown, shown_lines = _window(text, head=head, limits=limits, max_lines=limits.window_lines)
+    if head:
+        shown = _read_window(text, limits.window_chars)
+        shown_lines = shown.count("\n") + 1
+    else:
+        shown, shown_lines = _window(text, head=False, limits=limits, max_lines=limits.window_lines)
     total_lines = text.count("\n") + 1
     where = "first" if head else "last"
-    summary = (
-        f"[Output truncated: the {where} {shown_lines:,} of {total_lines:,} lines "
-        f"({len(shown):,} of {len(text):,} chars) are shown."
-    )
-    if location is not None:
+    if head:
+        marker = _read_marker(
+            text, shown, first_line=first_line, location=location, failure=failure
+        )
+    elif location is not None:
         marker = (
-            f"{summary} Full output: {location} — page it with read (offset/limit) or grep it.]"
+            f"[Output truncated: the {where} {shown_lines:,} of {total_lines:,} lines "
+            f"({len(shown):,} of {len(text):,} chars) are shown. Full output: {location}. "
+            "Page it with read (offset/limit) or grep it.]"
         )
     else:
-        marker = f"{summary} The full output could not be saved ({failure}).]"
+        marker = (
+            f"[Output truncated: the {where} {shown_lines:,} of {total_lines:,} lines "
+            f"({len(shown):,} of {len(text):,} chars) are shown. The full output could "
+            f"not be saved ({failure}).]"
+        )
+    if head:
+        outline = _outline(
+            text, first_line=first_line, max_chars=limits.window_chars // OUTLINE_WINDOW_DIVISOR
+        )
+        if outline:
+            marker = f"{marker}\n{outline}"
     images = [block for block in result.content if isinstance(block, ImageContent)]
     return result.model_copy(update={"content": [TextContent(text=f"{shown}\n{marker}"), *images]})
+
+
+def read_first_line(arguments: Mapping[str, object]) -> int:
+    """The file line a read with these arguments starts at (its offset, 1-indexed)."""
+    offset = arguments.get("offset")
+    if isinstance(offset, int) and not isinstance(offset, bool) and offset > 1:
+        return offset
+    return 1
+
+
+def _read_window(text: str, max_chars: int) -> str:
+    """The head of a read's `text` that fits `max_chars`, cut between file lines.
+
+    Rows (see `tau_coding.line_anchors`) are kept while they fit; the cut then
+    backs up to the end of the last whole file line, unless that would leave
+    nothing, in which case the rows of the first line that fit are kept. Text
+    without row prefixes is cut between lines the same way.
+    """
+    body = _READ_TOOL_NOTE.sub("", text)
+    rows = body.split("\n")
+    kept: list[str] = []
+    used = 0
+    for row in rows:
+        cost = len(row) + (1 if kept else 0)
+        if used + cost > max_chars:
+            break
+        kept.append(row)
+        used += cost
+    if not kept:
+        return text[:max_chars]
+    if len(kept) < len(rows):
+        whole = len(kept)
+        while whole > 0 and _continues(rows[whole]):
+            whole -= 1
+        if whole > 0:
+            kept = kept[:whole]
+    return "\n".join(kept)
+
+
+def _continues(row: str) -> bool:
+    """Whether `row` is a continuation row of a wrapped line."""
+    number = row_line_number(row)
+    return number is not None and not number[1]
+
+
+def _read_marker(
+    text: str, shown: str, *, first_line: int, location: str | None, failure: str
+) -> str:
+    """Which file lines a cut read shows, of those it returned, and where to go on."""
+    body = _READ_TOOL_NOTE.sub("", text).removesuffix("\n")
+    rows = body.split("\n")
+    numbers = [row_line_number(row) for row in rows]
+    if numbers and all(number is not None for number in numbers):
+        last_asked = max(number[0] for number in numbers if number is not None)
+        shown_rows = shown.count("\n") + 1
+        next_row = numbers[shown_rows] if shown_rows < len(numbers) else None
+        last_row = numbers[shown_rows - 1]
+        assert last_row is not None
+        whole_last = shown == "\n".join(rows[:shown_rows]) and (next_row is None or next_row[1])
+        last_shown = last_row[0] if whole_last else last_row[0] - 1
+    else:
+        last_asked = first_line + body.count("\n")
+        whole = shown.count("\n") + (1 if text[len(shown) : len(shown) + 1] in ("\n", "") else 0)
+        last_shown = min(first_line + whole - 1, last_asked)
+    if last_shown >= first_line:
+        shown_part = f"lines {first_line}-{last_shown} of the file are shown"
+    else:
+        shown_part = f"line {first_line} is too long to show whole"
+    marker = (
+        f"[Read cut: {shown_part} (of {first_line}-{last_asked} asked); "
+        f"continue with offset={last_shown + 1}."
+    )
+    if location is not None:
+        return f"{marker} Full output: {location}. Page it with read (offset/limit) or grep it.]"
+    return f"{marker} The full output could not be saved ({failure}).]"
+
+
+def _outline(text: str, *, first_line: int, max_chars: int) -> str:
+    """The def/class lines and document headings of `text` with their file line numbers."""
+    found: list[tuple[int, str, str]] = []
+    in_fence = False
+    for index, line in enumerate(text.split("\n")):
+        if _CONTINUATION_ROW.match(line):
+            continue
+        if _FENCE.match(line):
+            in_fence = not in_fence
+            continue
+        fallback = first_line + index
+        match = _DEFINITION.match(line)
+        if match is not None:
+            depth = len(match["indent"].expandtabs(4)) // 4
+            kind = " ".join(match["kind"].split())
+            label = f"{'  ' * depth}{kind} {match['name']}"
+            found.append((index, "fenced" if in_fence else "code", _entry(match, label, fallback)))
+            continue
+        if in_fence:
+            continue
+        match = _MARKDOWN_HEADING.match(line)
+        if match is not None:
+            label = f"{'  ' * (len(match['hashes']) - 1)}{match['hashes']} {match['title']}"
+            found.append((index, "heading", _entry(match, label, fallback)))
+            continue
+        match = _NUMBERED_SECTION.match(line)
+        if match is not None and _is_section_title(match["title"]):
+            label = f"{'  ' * match['section'].count('.')}{match['section']} {match['title']}"
+            found.append((index, "section", _entry(match, label, fallback)))
+    # Code is outlined by its definitions, so its `# comments` are not headings.
+    # A Markdown document marks its sections with headings, so its numbered
+    # lines are list items, as is any numbered line next to another one.
+    kinds = {kind for _, kind, _ in found}
+    numbered = {index for index, kind, _ in found if kind == "section"}
+    entries: list[str] = []
+    headings = 0
+    for index, kind, entry in found:
+        if kind == "heading" and "code" in kinds:
+            continue
+        if kind == "section" and (kinds & {"code", "heading"} or {index - 1, index + 1} & numbered):
+            continue
+        entries.append(entry)
+        headings += kind in ("heading", "section")
+    if not entries:
+        return ""
+    if headings:
+        header, noun = "Outline (jump with read offset=<line>):", "entries"
+    else:
+        header, noun = "Definitions (jump with read offset=<line>):", "definitions"
+    kept: list[str] = []
+    used = len(header)
+    for entry in entries[:OUTLINE_MAX_ENTRIES]:
+        if used + 1 + len(entry) > max_chars:
+            break
+        kept.append(entry)
+        used += 1 + len(entry)
+    left_out = len(entries) - len(kept)
+    tail = [f"  ... {left_out:,} more {noun} not listed"] if left_out else []
+    return "\n".join([header, *kept, *tail])
+
+
+def _entry(match: re.Match[str], label: str, fallback_line: int) -> str:
+    """An outline row: the row's own line number if it carries one, else its place."""
+    number = match["number"]
+    line_number = int(number) if number is not None else fallback_line
+    return f"  L{line_number} {label}"
+
+
+def _is_section_title(title: str) -> bool:
+    """A short title, not a numbered sentence of prose."""
+    return len(title) <= SECTION_TITLE_MAX_CHARS and not title.endswith((".", ",", ";", ":"))
 
 
 def _window(

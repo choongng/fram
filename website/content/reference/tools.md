@@ -29,7 +29,10 @@ Reads a file from disk.
 | `offset` | no | integer | 1-indexed start line (`0` = start of file). |
 | `limit` | no | integer | Maximum number of lines to return. |
 
-For text files, `read` returns UTF-8 content, applies `offset`/`limit`, and
+For text files, `read` shows each line as `N#hhh| text`, where `N` is its line
+number and `hhh` a short hash; a line over 180 characters continues on `N.2| `
+rows. These prefixes are not file content, and `edit` accepts old text copied
+with them. `read` applies `offset`/`limit` to file lines and
 truncates to at most 2,000 lines or 50 KB (whichever comes first), appending a
 hint like `[42 more lines in file. Use offset=101 to continue.]`. Supported
 images (JPEG, static PNG, GIF, WebP, and BMP) are detected from their file

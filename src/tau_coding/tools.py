@@ -37,6 +37,7 @@ from tau_coding.image_processing import (
     process_image,
     unsupported_image_reason,
 )
+from tau_coding.line_anchors import WRAP_WIDTH, line_rows, strip_row_prefixes
 
 DEFAULT_MAX_OUTPUT_BYTES = 50 * 1024
 DEFAULT_MAX_OUTPUT_LINES = 2_000
@@ -252,7 +253,9 @@ def create_read_tool_definition(
 
     The tool reads a file resolved relative to `cwd` unless an absolute path is
     supplied. Text files are decoded as UTF-8 and may be sliced with optional
-    1-indexed `offset` and positive integer `limit` arguments. Returned text is
+    1-indexed `offset` and positive integer `limit` arguments. Each line is
+    returned as anchored rows, `N#hhh| text` with long lines wrapped into
+    `N.k| ` rows (see `tau_coding.line_anchors`). Returned text is
     truncated to `DEFAULT_MAX_OUTPUT_LINES` lines or `DEFAULT_MAX_OUTPUT_BYTES`
     bytes, whichever comes first, and continuation hints are appended when more
     lines remain. Supported images (`jpg`, `png`, `gif`, `webp`, and `bmp`) are
@@ -361,6 +364,9 @@ def create_read_tool_definition(
 
         text = data.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
         all_lines = text.split("\n")
+        if len(all_lines) > 1 and all_lines[-1] == "":
+            # A final newline ends the last line; it does not start another.
+            all_lines.pop()
         start_line = 0 if offset is None or offset == 0 else offset - 1
         if start_line >= len(all_lines):
             raise ToolInputError(
@@ -370,13 +376,14 @@ def create_read_tool_definition(
         user_limited_lines: int | None = None
         if limit is not None:
             end_line = min(start_line + limit, len(all_lines))
-            selected = "\n".join(all_lines[start_line:end_line])
             user_limited_lines = end_line - start_line
         else:
-            selected = "\n".join(all_lines[start_line:])
+            end_line = len(all_lines)
 
-        truncation = truncate_head(selected)
         start_display = start_line + 1
+        truncation = truncate_anchored_rows(
+            all_lines[start_line:end_line] if text else [], first_line=start_display
+        )
         details: dict[str, JSONValue] = {"path": str(path), "truncation": truncation.to_json()}
 
         if truncation.first_line_exceeds_limit:
@@ -425,7 +432,11 @@ def create_read_tool_definition(
             "truncated to "
             f"{DEFAULT_MAX_OUTPUT_LINES} lines or {DEFAULT_MAX_OUTPUT_BYTES // 1024}KB "
             "(whichever is hit first). Use offset/limit for large files. When you need the "
-            "full file, continue with offset until complete."
+            "full file, continue with offset until complete. Each text line is shown as "
+            "`N#hhh| text`: N is its line number in the file and hhh a short hash of the "
+            "line, so `N#hhh` names the line. A line over "
+            f"{WRAP_WIDTH} characters is wrapped, its further rows numbered `N.2| `, `N.3| ` "
+            "and so on. These prefixes are not file content; offset and limit count file lines."
         ),
         prompt_snippet="Read file contents",
         prompt_guidelines=("Use read to examine files instead of cat or sed.",),
@@ -545,7 +556,9 @@ def create_edit_tool_definition(*, cwd: str | Path | None = None) -> ToolDefinit
     original file's dominant line ending is restored after replacement. UTF-8
     byte-order marks are preserved. The executor also accepts legacy top-level
     `oldText`/`newText` arguments and JSON-string `edits` values by normalizing
-    them into the canonical edits list.
+    them into the canonical edits list. An `oldText` that does not match but was
+    copied from `read` output with its row prefixes on every line is retried
+    without them (`_without_row_prefixes`).
 
     Successful results include the resolved path, edit count, an ndiff-style
     diff, a unified patch, and the first changed line in `data`.
@@ -871,49 +884,6 @@ async def _wait_for_cancel(signal: ToolCancellationToken) -> None:
         await asyncio.sleep(0.05)
 
 
-def truncate_head(
-    content: str,
-    *,
-    max_lines: int = DEFAULT_MAX_OUTPUT_LINES,
-    max_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
-) -> TruncationResult:
-    lines = _split_lines_for_counting(content)
-    total_lines = len(lines)
-    total_bytes = len(content.encode())
-    if total_lines <= max_lines and total_bytes <= max_bytes:
-        return _truncation_result(
-            content, False, None, total_lines, total_bytes, total_lines, total_bytes
-        )
-
-    first_line_bytes = len(lines[0].encode()) if lines else 0
-    if first_line_bytes > max_bytes:
-        return _truncation_result(
-            "", True, "bytes", total_lines, total_bytes, 0, 0, first_line=True
-        )
-
-    output_lines: list[str] = []
-    output_bytes = 0
-    truncated_by = "lines"
-    for index, line in enumerate(lines[:max_lines]):
-        line_bytes = len(line.encode()) + (1 if index > 0 else 0)
-        if output_bytes + line_bytes > max_bytes:
-            truncated_by = "bytes"
-            break
-        output_lines.append(line)
-        output_bytes += line_bytes
-
-    output = "\n".join(output_lines)
-    return _truncation_result(
-        output,
-        True,
-        truncated_by,
-        total_lines,
-        total_bytes,
-        len(output_lines),
-        len(output.encode()),
-    )
-
-
 def detect_line_ending(content: str) -> str:
     crlf_index = content.find("\r\n")
     lf_index = content.find("\n")
@@ -948,7 +918,12 @@ def apply_edits_to_normalized_content(
         old_text = edit["oldText"]
         occurrences = _count_occurrences(normalized_content, old_text)
         if occurrences == 0:
-            raise ToolInputError(_not_found_error(path, index, len(normalized_edits)))
+            stripped = _without_row_prefixes(edit, normalized_content)
+            if stripped is None:
+                raise ToolInputError(_not_found_error(path, index, len(normalized_edits)))
+            edit = stripped
+            old_text = edit["oldText"]
+            occurrences = _count_occurrences(normalized_content, old_text)
         if occurrences > 1:
             raise ToolInputError(_duplicate_error(path, index, len(normalized_edits), occurrences))
         start = normalized_content.index(old_text)
@@ -961,6 +936,23 @@ def apply_edits_to_normalized_content(
     if new_content == normalized_content:
         raise ToolInputError(_no_change_error(path, len(normalized_edits)))
     return normalized_content, new_content
+
+
+def _without_row_prefixes(edit: dict[str, str], content: str) -> dict[str, str] | None:
+    """`edit` with the `read` row prefixes taken off its old text, if that matches.
+
+    A model often copies an edit's old text from `read` output with the row
+    prefixes (`12#3fa| `, `12.2| `) still on. When every line of the old text
+    carries one and the text without them occurs in `content`, the edit is
+    retried without them; the new text loses its prefixes only when every one
+    of its lines carries one too, so new text that merely starts like a row is
+    written as given.
+    """
+    old_text = strip_row_prefixes(edit["oldText"])
+    if not old_text or _count_occurrences(content, old_text) == 0:
+        return None
+    new_text = strip_row_prefixes(edit["newText"]) if edit["newText"] else None
+    return {"oldText": old_text, "newText": edit["newText"] if new_text is None else new_text}
 
 
 def generate_diff_string(old: str, new: str) -> tuple[str, int | None]:
@@ -992,6 +984,53 @@ def generate_unified_patch(path: str, old: str, new: str) -> str:
     )
 
 
+def truncate_anchored_rows(
+    lines: list[str],
+    *,
+    first_line: int = 1,
+    max_lines: int = DEFAULT_MAX_OUTPUT_LINES,
+    max_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
+) -> TruncationResult:
+    """`lines` as anchored rows (see `tau_coding.line_anchors`), cut at a limit.
+
+    The cut always falls between file lines, never inside a wrapped one, so
+    `output_lines` and `total_lines` count file lines, not rows; `max_bytes`
+    counts the rows as shown, prefixes included.
+    """
+    rendered = ["\n".join(line_rows(number, line)) for number, line in enumerate(lines, first_line)]
+    total_lines = len(rendered)
+    content = "\n".join(rendered)
+    total_bytes = len(content.encode())
+    if total_lines <= max_lines and total_bytes <= max_bytes:
+        return _truncation_result(
+            content, False, None, total_lines, total_bytes, total_lines, total_bytes
+        )
+    if rendered and len(rendered[0].encode()) > max_bytes:
+        return _truncation_result(
+            "", True, "bytes", total_lines, total_bytes, 0, 0, first_line=True
+        )
+    output_lines: list[str] = []
+    output_bytes = 0
+    truncated_by = "lines"
+    for index, block in enumerate(rendered[:max_lines]):
+        block_bytes = len(block.encode()) + (1 if index > 0 else 0)
+        if output_bytes + block_bytes > max_bytes:
+            truncated_by = "bytes"
+            break
+        output_lines.append(block)
+        output_bytes += block_bytes
+    output = "\n".join(output_lines)
+    return _truncation_result(
+        output,
+        True,
+        truncated_by,
+        total_lines,
+        total_bytes,
+        len(output_lines),
+        len(output.encode()),
+    )
+
+
 def _truncation_result(
     content: str,
     truncated: bool,
@@ -1017,23 +1056,6 @@ def _truncation_result(
         max_lines=DEFAULT_MAX_OUTPUT_LINES,
         max_bytes=DEFAULT_MAX_OUTPUT_BYTES,
     )
-
-
-def _split_lines_for_counting(content: str) -> list[str]:
-    if not content:
-        return []
-    lines = content.split("\n")
-    if content.endswith("\n"):
-        lines.pop()
-    return lines
-
-
-def _truncate_string_to_bytes_from_end(text: str, max_bytes: int) -> str:
-    encoded = text.encode()
-    if len(encoded) <= max_bytes:
-        return text
-    clipped = encoded[-max_bytes:]
-    return clipped.decode(errors="ignore")
 
 
 def _str_arg(arguments: Mapping[str, JSONValue], name: str) -> str:

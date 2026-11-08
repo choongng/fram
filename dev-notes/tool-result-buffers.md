@@ -43,3 +43,33 @@ files or limits.
 ```bash
 uv run pytest tests/test_tool_buffers.py tests/test_tool_output_files.py -q
 ```
+
+## Reading a cut file
+
+`read` shows each line as an anchored row, defined in
+`src/tau_coding/line_anchors.py`:
+
+```text
+12#3fa| the line's text
+48#0b7| a line longer than 180 characters starts here
+48.2|  and continues on numbered rows
+```
+
+`12` is the file line and `3fa` is a short hash of the line. `offset`, `limit`
+and the 2,000-line cap all count file lines, not rows. A file's final newline no
+longer counts as an extra empty line. `edit` retries an `oldText` copied with
+its prefixes on, so a copied row still matches.
+
+An oversized `read` is windowed by size, because a line can be a few characters
+of code or a few thousand of converted prose. The cut falls between file lines
+and the `[Read cut: ...]` note names the lines shown and the offset to continue
+from. An outline of the file's definitions and headings follows, with line
+numbers a read offset can use, so a model can jump to a section it would
+otherwise page towards and may never reach.
+
+Pi's read tool pages with `offset` and `limit` too. The row format, cut note and
+outline are Tau additions, and they stay in the coding layer.
+
+```bash
+uv run pytest tests/test_read_anchors.py tests/test_reference_outline.py -q
+```

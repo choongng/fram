@@ -82,6 +82,7 @@ from tau_coding.extensions import (
     ProviderModel,
 )
 from tau_coding.extensions.runtime import InputHookOutcome
+from tau_coding.line_anchors import strip_row_prefixes
 from tau_coding.prompt_templates import PromptTemplate
 from tau_coding.provider_config import ProviderModelMetadata, provider_thinking_levels
 from tau_coding.session import (
@@ -3579,7 +3580,7 @@ async def test_session_skill_index_lets_agent_read_relevant_skill_file(tmp_path:
     assert tool_result.tool_call_id == "call-1"
     assert tool_result.tool_name == "read"
     assert tool_result.is_error is False
-    assert "# Testing\nRun pytest." in tool_result.text
+    assert "# Testing\nRun pytest." in (strip_row_prefixes(tool_result.text) or "")
     assert isinstance(tool_result.details, dict)
     assert tool_result.details["path"] == str(skill_path)
 
@@ -7413,7 +7414,7 @@ async def test_terminal_command_output_is_buffered_like_a_tool_result(tmp_path: 
     [buffer] = list((tmp_path / "session.outputs").iterdir())
     assert buffer.read_text().splitlines()[-1] == "100000"
     assert result.output.rstrip().endswith(
-        f"Full output: {buffer} — page it with read (offset/limit) or grep it.]"
+        f"Full output: {buffer}. Page it with read (offset/limit) or grep it.]"
     )
     assert "\n99999\n100000\n" in result.output and "\n1\n2\n" not in result.output
     assert len((tmp_path / "session.jsonl").read_text()) < 100_000

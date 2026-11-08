@@ -177,6 +177,7 @@ from tau_coding.tool_buffers import (
     buffer_tool_result,
     default_buffer_dir,
     output_file_name,
+    read_first_line,
     session_outputs_dir,
 )
 from tau_coding.tools import ImageSupportState, create_bash_tool, create_coding_tools
@@ -1354,13 +1355,21 @@ class CodingSession:
         """Save a tool call's output and keep an oversized one out of the transcript."""
         return (
             self._buffer_result(
-                result, tool_name=call.name, output_name=output_file_name(call.name, call.id)
+                result,
+                tool_name=call.name,
+                first_line=read_first_line(call.arguments),
+                output_name=output_file_name(call.name, call.id),
             ),
             is_error,
         )
 
     def _buffer_result(
-        self, result: AgentToolResult, *, tool_name: str, output_name: str | None = None
+        self,
+        result: AgentToolResult,
+        *,
+        tool_name: str,
+        first_line: int = 1,
+        output_name: str | None = None,
     ) -> AgentToolResult:
         """Save a tool call's output beside the session file; window it if oversized.
 
@@ -1376,6 +1385,7 @@ class CodingSession:
             limits=BufferLimits.for_context_window(
                 self.context_window_tokens, self._config.tool_result_inline_tokens
             ),
+            first_line=first_line,
             output_name=output_name if buffer_dir is not None else None,
         )
 

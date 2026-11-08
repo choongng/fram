@@ -76,7 +76,8 @@ terminal error. The error becomes visible only if recovery cannot complete.
 A tool result larger than the inline limit does not go into context whole. Tau
 saves the full text to a file beside the session
 (`<session>.outputs/<tool>-<call-id>.txt`) and the model sees a window of it (the
-last 60 lines, or the first 60 for `read`) plus the file's path, which it can page
+last 60 lines; for `read`, as many whole lines from the start as fit half the
+limit) plus the file's path, which it can page
 through with `read` or search with `grep`.
 
 The limit is 1/50 of the model's context window, between 1,000 and 4,000 tokens
