@@ -8,11 +8,12 @@ from collections.abc import Callable, Mapping
 from contextlib import suppress
 from typing import Literal, TextIO, cast
 
+from tau_coding.branding import BRANDING
 from tau_coding.tui.config import TurnNotificationMode
 from tau_coding.tui.terminal_title import sanitize_terminal_title
 
 OSC_TERMINATOR = "\a"
-TURN_FINISHED_MESSAGE = "Tau turn finished"
+TURN_FINISHED_MESSAGE = f"{BRANDING.product_name} turn finished"
 type DesktopNotificationProtocol = Literal["osc9", "osc99"]
 
 

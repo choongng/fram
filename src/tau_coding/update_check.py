@@ -13,6 +13,7 @@ from typing import Any
 from packaging.version import InvalidVersion, Version
 
 from tau_ai.http import get_json
+from tau_coding.branding import BRANDING
 from tau_coding.paths import TauPaths
 
 PYPI_PACKAGE_NAME = "tau-ai"
@@ -97,7 +98,7 @@ class ReleaseNotesNotice:
             body = "\n\n".join(version_blocks)
         else:
             body = "- See the changelog for details."
-        return f"Tau updated to {self.current_version}\n\n{body}"
+        return f"{BRANDING.product_name} updated to {self.current_version}\n\n{body}"
 
     def _format_entry(self, entry: ReleaseNotesEntry) -> str:
         section_blocks: list[str] = []

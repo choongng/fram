@@ -27,6 +27,7 @@ from tau_ai.env import (
     OpenAICompatibleConfig,
 )
 from tau_ai.openai_codex import DEFAULT_OPENAI_CODEX_BASE_URL
+from tau_coding.branding import BRANDING
 from tau_coding.catalog_loader import effective_catalog, save_user_catalog_entries
 from tau_coding.credentials import FileCredentialStore, credentials_path
 from tau_coding.oauth_registry import get_oauth_provider
@@ -1510,7 +1511,8 @@ def provider_thinking_unavailable_reason(
             return None
         if isinstance(provider, OpenAICodexProviderConfig):
             return (
-                "OpenAI Codex subscription can stream reasoning output, but Tau does "
+                "OpenAI Codex subscription can stream reasoning "
+                f"output, but {BRANDING.product_name} does "
                 "not have a validated Codex transport mapping for changing reasoning "
                 "effort yet"
             )

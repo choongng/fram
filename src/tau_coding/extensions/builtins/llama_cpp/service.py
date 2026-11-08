@@ -27,6 +27,7 @@ from tau_agent.types import JSONValue
 from tau_ai.env import DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_SECONDS, OpenAICompatibleConfig
 from tau_ai.http import create_async_client
 from tau_ai.openai_compatible import OpenAICompatibleProvider
+from tau_coding.branding import BRANDING
 from tau_coding.credentials import CredentialStore, FileCredentialStore, credentials_path
 from tau_coding.extensions.providers import (
     DynamicProvider,
@@ -490,7 +491,8 @@ class LlamaCppService:
                 "unconfigured",
                 diagnostics=(
                     LocalDiagnostic(
-                        "Tau will check the offered default endpoint when this backend opens. "
+                        f"{BRANDING.product_name} will check the offered "
+                        "default endpoint when this backend opens. "
                         "Use Configure for a different server URL.",
                         "info",
                         "configuration",
@@ -833,7 +835,7 @@ class LlamaCppService:
                 diagnostic=(
                     "Gated repository: accept access on huggingface.co and ensure the "
                     "independent llama.cpp server process has its own authorized HF_TOKEN. "
-                    "Tau's search token is never forwarded."
+                    f"{BRANDING.product_name}'s search token is never forwarded."
                     if repository.gated
                     else None
                 ),
@@ -949,7 +951,8 @@ class LlamaCppService:
                 diagnostics=(
                     LocalDiagnostic(
                         "Cancellation was requested, but reconciliation lost the connection. "
-                        "Refresh before retrying; Tau will not replay the mutation.",
+                        f"Refresh before retrying; {BRANDING.product_name} "
+                        "will not replay the mutation.",
                         "warning",
                         "reconciliation",
                     ),
@@ -988,7 +991,8 @@ class LlamaCppService:
                 diagnostics=(
                     LocalDiagnostic(
                         "The connection was lost and state could not be reconciled. Refresh before "
-                        "retrying; Tau will not replay the interrupted mutation.",
+                        f"retrying; {BRANDING.product_name} will "
+                        "not replay the interrupted mutation.",
                         "error",
                         "reconciliation",
                     ),

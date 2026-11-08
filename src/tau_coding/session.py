@@ -47,6 +47,7 @@ from tau_agent.types import JSONValue
 from tau_ai.model_catalog import ModelCatalogProvider, RuntimeModel, RuntimeModelCatalog
 from tau_ai.model_limits import ModelLimitsProvider, RuntimeModelLimits
 from tau_coding.branch_summary import summarize_branch_messages_with_model
+from tau_coding.branding import BRANDING
 from tau_coding.codex_model_store import (
     cached_codex_model_catalog,
     save_codex_model_catalog,
@@ -174,7 +175,9 @@ SESSION_NAME_SYSTEM_PROMPT = (
     "You write concise coding-agent session names. Reply with only a short title, "
     "maximum four words, no quotes, no punctuation-only output."
 )
-TREE_RUNNING_MESSAGE = "Tau is still working. Press Escape to interrupt before using /tree."
+TREE_RUNNING_MESSAGE = (
+    f"{BRANDING.product_name} is still working. Press Escape to interrupt before using /tree."
+)
 
 
 async def _await_cleanup_completion[CleanupResult](
@@ -1281,7 +1284,7 @@ class CodingSession:
                 SystemPromptSource(
                     kind="runtime",
                     label="Effective system prompt",
-                    source="active Tau session (runtime-composed)",
+                    source=f"active {BRANDING.product_name} session (runtime-composed)",
                     content=self.system_prompt,
                 ),
             ),
@@ -1504,7 +1507,7 @@ class CodingSession:
         """Reject replacement-like operations until an active turn is drained."""
         if self._harness.is_running:
             raise RuntimeError(
-                f"Cannot {operation} while Tau is working. "
+                f"Cannot {operation} while {BRANDING.product_name} is working. "
                 "Press Escape to interrupt and wait for it to finish."
             )
 
@@ -1621,7 +1624,8 @@ class CodingSession:
         """
         if self._harness.is_running:
             raise RuntimeError(
-                "Tau is still working. Press Escape to interrupt before switching models."
+                f"{BRANDING.product_name} is still working. Press "
+                "Escape to interrupt before switching models."
             )
         if choice.provider_name == self.provider_name and choice.model == self.model:
             return ModelSelectionResult(choice, changed=False)
@@ -1850,7 +1854,7 @@ class CodingSession:
     def preview_model_choice(self, choice: ModelChoice) -> None:
         """Select a model for the next turn without constructing or persisting a provider."""
         if self._harness.is_running:
-            raise RuntimeError("Cannot switch models while Tau is working")
+            raise RuntimeError(f"Cannot switch models while {BRANDING.product_name} is working")
         if choice not in self.available_model_choices:
             raise ProviderConfigError(
                 f"Model is not available: {choice.provider_name}:{choice.model}"
@@ -4522,7 +4526,11 @@ def _session_export_title(session: CodingSession) -> str:
         record = manager.get_session(session_id)
         if record is not None and record.title:
             return record.title
-    return f"Tau session {session_id}" if session_id is not None else "Tau Session Export"
+    return (
+        f"{BRANDING.product_name} session {session_id}"
+        if session_id is not None
+        else f"{BRANDING.product_name} Session Export"
+    )
 
 
 @dataclass(frozen=True, slots=True)

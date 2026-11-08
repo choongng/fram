@@ -23,6 +23,8 @@ User-facing documentation lives in `website/content/` and is published at
   hardening and feature notes). Each answers: what was added, why it exists, how
   later phases use it.
 - `adr/` — architecture decision records.
+- `branding.md` — the seam a redistribution uses to change the product name and
+  marks Tau shows.
 - `catalog-model-safety.md` — checklist for adding providers and models to the built-in catalog safely.
 - `google-stream-completion.md` — why native Google streams require an explicit
   `finishReason` before Tau reports successful completion.

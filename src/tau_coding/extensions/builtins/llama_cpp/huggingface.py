@@ -9,6 +9,8 @@ from pathlib import Path
 
 import httpx
 
+from tau_coding.branding import BRANDING
+
 HF_API_ROOT = "https://huggingface.co/api"
 HF_TOKEN_ENV = "HF_TOKEN"
 _QUANTIZATION = re.compile(
@@ -178,7 +180,8 @@ def _raise_http(response: httpx.Response, operation: str) -> None:
     if response.status_code in {401, 403}:
         raise HuggingFaceSearchError(
             "Hugging Face denied access. Accept the repository terms and provide HF_TOKEN "
-            "for Tau search; the independent llama.cpp server also needs its own HF_TOKEN "
+            f"for {BRANDING.product_name} search; the independent "
+            "llama.cpp server also needs its own HF_TOKEN "
             "for gated downloads."
         )
     if response.status_code == 429:

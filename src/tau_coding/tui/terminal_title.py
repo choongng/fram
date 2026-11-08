@@ -9,9 +9,11 @@ from collections.abc import Callable, Mapping
 from contextlib import suppress
 from typing import TextIO, cast
 
+from tau_coding.branding import BRANDING
+
 MAX_TERMINAL_TITLE_LENGTH = 120
 OSC_TERMINATOR = "\a"
-TAU_TITLE_MARK = "τ"
+TAU_TITLE_MARK = BRANDING.mark
 RUNNING_TITLE_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
