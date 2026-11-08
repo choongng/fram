@@ -166,6 +166,7 @@ def setup(tau):
     tau.register_command("name", handler, description="...")
     tau.add_prompt_guideline("Never commit directly to main")
     tau.add_prompt_section("Review procedure", "Read the diff, then run tests.")
+    tau.register_skill_dir(Path(__file__).parent / "skills")  # load skills from disk
     tau.on("event_name", handler)            # or @tau.on("event_name")
 
     # message rendering (register in setup; send once running)
@@ -187,6 +188,7 @@ def setup(tau):
     tau.context.inference_provider_mode        # "automatic" or "fixed"
     tau.context.session_id, tau.context.session_name
     tau.context.thinking_level, tau.context.system_prompt
+    tau.context.available_thinking_levels       # modes the active model supports; () if none
     tau.context.paths                 # resolved TauPaths snapshot
     tau.context.project_trusted       # bool: were this cwd's project inputs approved?
     tau.context.project_trust_resolution  # full ProjectTrustResolution, or None
@@ -431,6 +433,30 @@ Sections compose in extension load and registration order. Empty bodies and
 multi-line titles are ignored with a resource diagnostic. Registrations are
 source-owned, so failed setup, `/reload`, and generation retirement remove them
 along with the extension's other contributions.
+
+### Skill directories
+
+`register_skill_dir(path)` tells Tau to read Agent Skills from another directory
+on disk, in place. `path` must be a skills directory: a directory whose
+subdirectories each contain a `SKILL.md` file, such as a plugin's `skills/`
+tree. This is how a plugin that ships skills (for example a Claude Code
+marketplace plugin) is reused without editing its layout.
+
+```python
+from pathlib import Path
+
+
+def setup(tau):
+    tau.register_skill_dir(Path(__file__).parent / "skills")
+```
+
+Contributed skills load at the lowest precedence, so a skill in `~/.tau/skills/`
+or the project's `.tau/skills/` overrides a same-named skill from a plugin. The
+path must exist when `setup` runs; a missing or non-directory path is ignored
+with a diagnostic. Contributions are de-duplicated by resolved path and owned by
+the registering extension, so failed setup, `/reload`, and generation retirement
+drop them. Skills become available to `/skill:<name>` and the
+`<available_skills>` index on the next load or `/reload`.
 
 ### Commands
 
@@ -714,6 +740,25 @@ Lifecycle and intercepting hooks:
 
 All other handler failures are contained: they are recorded as diagnostics
 (visible in `/session`) and never crash the session.
+
+### Extension-to-extension events
+
+`tau.events` is a bus shared by every loaded extension (Pi's `pi.events`), for
+one extension to tell another something without importing it:
+
+```python
+def setup(tau):
+    unsubscribe = tau.events.on("my-ext:job_done", lambda data: tau.notify(str(data)))
+    ...
+    tau.events.emit("my-ext:job_done", {"id": "job-1"})
+```
+
+Channels are plain strings, prefixed by convention with the emitting extension's
+name. `emit` is synchronous and fire-and-forget: handlers run in subscription
+order, an async handler is scheduled on the running loop, and a failing handler
+is recorded as a diagnostic without stopping the rest. `on` returns a call that
+unsubscribes; every subscription also ends when its extension is reloaded or
+retired.
 
 ### Messages and persistence
 

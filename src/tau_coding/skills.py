@@ -42,17 +42,25 @@ class SkillInvocation:
     additional_instructions: str | None = None
 
 
-def load_skills(paths: TauResourcePaths | None = None) -> list[Skill]:
+def load_skills(
+    paths: TauResourcePaths | None = None,
+    *,
+    extra_skill_dirs: Sequence[Path] = (),
+) -> list[Skill]:
     """Load markdown skills from Tau and `.agents` resource directories.
 
     Resource directories are loaded in increasing precedence order, so project
     resources override user resources with the same skill name. Duplicate names
     within the same directory remain invalid.
+
+    ``extra_skill_dirs`` are skills directories contributed by extensions; see
+    ``ExtensionAPI.register_skill_dir``. They load first, so the built-in
+    directories win.
     """
     resource_paths = paths or TauResourcePaths()
     skills_by_name: dict[str, Skill] = {}
 
-    for skills_dir in resource_paths.skills_dirs:
+    for skills_dir in _ordered_skill_dirs(resource_paths, extra_skill_dirs):
         for skill in _load_skills_from_dir(skills_dir):
             skills_by_name[skill.name] = skill
 
@@ -61,18 +69,21 @@ def load_skills(paths: TauResourcePaths | None = None) -> list[Skill]:
 
 def load_skills_with_diagnostics(
     paths: TauResourcePaths | None = None,
+    *,
+    extra_skill_dirs: Sequence[Path] = (),
 ) -> tuple[list[Skill], list[ResourceDiagnostic]]:
     """Load skills and return non-fatal discovery diagnostics.
 
     Resource directories are loaded in increasing precedence order. Higher
     precedence resources replace lower precedence resources with the same name,
-    and that replacement is reported as a diagnostic.
+    and that replacement is reported as a diagnostic. ``extra_skill_dirs`` load
+    first (lowest precedence); see :func:`load_skills`.
     """
     resource_paths = paths or TauResourcePaths()
     skills_by_name: dict[str, Skill] = {}
     diagnostics: list[ResourceDiagnostic] = []
 
-    for skills_dir in resource_paths.skills_dirs:
+    for skills_dir in _ordered_skill_dirs(resource_paths, extra_skill_dirs):
         skills, directory_diagnostics = _load_skills_from_dir_with_diagnostics(skills_dir)
         diagnostics.extend(directory_diagnostics)
         for skill in skills:
@@ -156,6 +167,32 @@ def build_skill_index(skills: Sequence[Skill]) -> str:
         description = skill.description or "No description"
         lines.append(f"- {skill.name}: {description}")
     return "\n".join(lines)
+
+
+def _ordered_skill_dirs(
+    resource_paths: TauResourcePaths,
+    extra_skill_dirs: Sequence[Path],
+) -> list[Path]:
+    """Return skill directories in increasing precedence order.
+
+    ``extra_skill_dirs`` (for example skills contributed by an extension that
+    loads a plugin tree) are placed first so the built-in user and project
+    ``skills_dirs`` override same-named skills from a plugin. Duplicate
+    directories collapse to their first occurrence.
+    """
+    directories: list[Path] = []
+    seen: set[Path] = set()
+    for path in (*extra_skill_dirs, *resource_paths.skills_dirs):
+        expanded = path.expanduser()
+        try:
+            key = expanded.resolve()
+        except OSError:
+            key = expanded
+        if key in seen:
+            continue
+        seen.add(key)
+        directories.append(expanded)
+    return directories
 
 
 def _load_skills_from_dir(skills_dir: Path) -> list[Skill]:

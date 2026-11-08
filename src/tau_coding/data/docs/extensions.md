@@ -46,6 +46,22 @@ registration order. Empty bodies and multi-line titles are ignored with
 diagnostics. Prompt registrations are source-owned and disappear on failed setup, reload, or runtime
 retirement. See `examples/extensions/prompt_section.py`.
 
+## Skill-directory registrations
+
+`tau.register_skill_dir(path)` adds a directory of Agent Skills, read in place.
+`path` must be a skills directory: a directory whose subdirectories each contain
+a `SKILL.md` file, such as a plugin's `skills/` tree. This lets a plugin that
+ships skills (for example a Claude Code marketplace plugin) load without editing
+its layout.
+
+Contributed skills load at the lowest precedence, so a user or project skill
+overrides a same-named skill from a plugin. The directory must exist when
+`setup` runs; a missing or non-directory path is ignored with a warning
+diagnostic. Contributions are de-duplicated by resolved path and source-owned,
+so failed setup, reload, and runtime retirement remove them. Skills surface in
+the `<available_skills>` index and `/skill:<name>` on the next load or
+`/reload`.
+
 ## Installing extensions
 
 Install a trusted local or Git extension for future runs with:
@@ -108,6 +124,16 @@ The snapshot belongs to the extension generation. After `/reload` (and other
 fresh-generation replacement flows), a context captured from the outgoing
 generation is stale: even reading `context.paths` raises `ExtensionError`. Read
 `context.paths` again from the new generation's context.
+
+## Extension-to-extension events
+
+`tau.events.on(channel, handler)` and `tau.events.emit(channel, data)` form a
+bus shared by every loaded extension (Pi's `pi.events`). Prefix channels with
+the emitting extension's name. `emit` is synchronous and fire-and-forget; async
+handlers are scheduled, failures become diagnostics, and subscriptions end with
+their extension on reload. `on` returns an unsubscribe call. An emitter that
+must still load on older Tau builds can guard with
+`getattr(tau, "events", None)`.
 
 ## Building child sessions
 
