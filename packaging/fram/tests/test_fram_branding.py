@@ -19,28 +19,34 @@ import pytest
 SRC = Path(__file__).resolve().parents[3] / "src"
 
 # Tau's name, ``tau <word>`` or a bare ``tau`` as a command, or the τ mark.
-TAU_NAME = re.compile(r"\bTau\b|(?<![\w./-])tau(?=[ `'\"]|$)(?![_-])|τ")
+# Closing punctuation counts only at a word's end, so ``tau.compaction`` and
+# ``tau://`` stay identifiers.
+TAU_NAME = re.compile(r"\bTau\b|(?<![\w./-])tau(?=[.,:;!?)\]]*(?:[\s`'\"]|$))|τ")
 
 # Files whose every mention is identity or accurate about Tau itself.
 KEPT_FILES = {
     "tau_coding/branding.py",  # Tau's own defaults
-    "tau_coding/credentials.py",  # errors about the shared ~/.tau credentials format
     "tau_coding/updater.py",  # updates tau-ai from PyPI; fram refuses `update`
 }
 KEPT_DIRS = ("tau_ai/",)  # provider layer: Codex originator and User-Agent
 
-# Individual keeps, as (file, start of the literal).
-KEPT_STRINGS = {
-    ("tau_coding/extensions/api.py", "extension instance is stale after reload"),  # API object
+# Literals kept whole: a short name must not excuse new text that begins with it.
+KEPT_EXACT = {
     ("tau_coding/extensions/loader.py", "tau"),  # the extension API's `tau` name
+    ("tau_coding/extensions/loader.py", "(tau)` entry point"),  # the extension signature
     ("tau_coding/oauth.py", "tau"),  # OAuth originator
     ("tau_coding/rpc.py", "tau"),  # RPC source identifier
+    ("tau_coding/update_check.py", "Tau "),  # tau-ai PyPI notice; fram turns it off
+    ("tau_coding/update_check.py", "). Run `tau update` to upgrade."),
+}
+
+# Long literals kept by how they begin, as (file, start of the literal).
+KEPT_PREFIXES = {
+    ("tau_coding/extensions/api.py", "extension instance is stale after reload"),  # API object
     ("tau_coding/rpc.py", "Unhandled Tau session entry"),  # internal assertion
     ("tau_coding/rpc.py", "abort_bash is not supported by Tau"),  # RPC protocol error
     ("tau_coding/session_usage.py", "\n    (function () {"),  # a JS comment
     ("tau_coding/tui/app.py", "\n    Screen {"),  # CSS: $tau-* variables and a comment
-    ("tau_coding/update_check.py", "Tau "),  # tau-ai PyPI notice; fram turns it off
-    ("tau_coding/update_check.py", "). Run `tau update` to upgrade."),
 }
 
 
@@ -77,8 +83,8 @@ def unbranded_strings() -> list[tuple[str, int, str]]:
                 continue
             if id(node) in docstrings or not TAU_NAME.search(node.value):
                 continue
-            if any(
-                relative == file and node.value.startswith(start) for file, start in KEPT_STRINGS
+            if (relative, node.value) in KEPT_EXACT or any(
+                relative == file and node.value.startswith(start) for file, start in KEPT_PREFIXES
             ):
                 continue
             found.append((relative, node.lineno, node.value[:80]))
@@ -95,12 +101,15 @@ def test_the_scan_finds_a_hard_coded_name(tmp_path: Path, monkeypatch: pytest.Mo
     module.write_text(
         '"""Mentions Tau in a docstring, which is fine."""\n'
         'MESSAGE = "Tau is ready."\n'
-        'USAGE = f"Usage: tau run {1}"\n',
+        'USAGE = f"Usage: tau run {1}"\n'
+        'HINT = "Set the key, then run tau."\n'
+        'SOURCE = "tau.compaction"\n',
         encoding="utf-8",
     )
     monkeypatch.setattr(sys.modules[__name__], "SRC", tmp_path)
 
-    assert [(file, line) for file, line, _ in unbranded_strings()] == [
+    assert sorted((file, line) for file, line, _ in unbranded_strings()) == [
         ("tau_coding/new_screen.py", 2),
         ("tau_coding/new_screen.py", 3),
+        ("tau_coding/new_screen.py", 4),
     ]
