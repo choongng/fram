@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from time import monotonic_ns
 
+from tau_agent.cache_hints import long_lived_conversation
 from tau_agent.events import (
     AgentEndEvent,
     AgentEvent,
@@ -69,8 +70,14 @@ async def run_agent_loop(
     get_follow_up_messages: Callable[[], Sequence[AgentMessage]] | None = None,
     before_tool_call: BeforeToolCall | None = None,
     after_tool_call: AfterToolCall | None = None,
+    long_lived: bool = False,
 ) -> AsyncIterator[AgentEvent]:
-    """Run the provider/tool loop and emit Pi-compatible agent events."""
+    """Run the provider/tool loop and emit Pi-compatible agent events.
+
+    `long_lived` marks every request as from a long-lived conversation (an
+    interactive session that waits on its user), so a provider with a longer
+    prompt-cache lifetime uses it; see :mod:`tau_agent.cache_hints`.
+    """
     new_messages = list(prompts)
     if prompts:
         messages.extend(prompts)
@@ -140,20 +147,23 @@ async def run_agent_loop(
             # normal await cleanly, so consume the assistant sub-generator and
             # retain its final message through the terminal event.
             assistant = None
-            async for event in _assistant_events(
-                provider=provider,
-                model=model,
-                system=system,
-                messages=_provider_context(messages),
-                tools=tools,
-                signal=signal,
-                session_id=session_id,
-            ):
-                yield event
-                if isinstance(event, MessageEndEvent) and isinstance(
-                    event.message, AssistantMessage
+            # Set on every request, not inherited: a sub-agent's loop runs in a
+            # task copied from its parent's context and has its own lifetime.
+            with long_lived_conversation(long_lived):
+                async for event in _assistant_events(
+                    provider=provider,
+                    model=model,
+                    system=system,
+                    messages=_provider_context(messages),
+                    tools=tools,
+                    signal=signal,
+                    session_id=session_id,
                 ):
-                    assistant = event.message
+                    yield event
+                    if isinstance(event, MessageEndEvent) and isinstance(
+                        event.message, AssistantMessage
+                    ):
+                        assistant = event.message
 
             if assistant is None:  # defensive: _assistant_events always terminates
                 assistant = _error_message(model, "Provider produced no assistant message")

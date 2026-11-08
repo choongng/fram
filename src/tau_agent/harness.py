@@ -46,6 +46,8 @@ class AgentHarnessConfig:
     session_id: str | None = None
     before_tool_call: BeforeToolCall | None = None
     after_tool_call: AfterToolCall | None = None
+    long_lived: bool = False
+    """An interactive conversation that waits on its user: prefer a long prompt cache."""
 
 
 class SimpleCancellationToken:
@@ -186,6 +188,7 @@ class AgentHarness:
                 get_follow_up_messages=self._drain_follow_up_messages,
                 before_tool_call=self._config.before_tool_call,
                 after_tool_call=self._config.after_tool_call,
+                long_lived=self._config.long_lived,
             ):
                 await self._notify(event)
                 yield event

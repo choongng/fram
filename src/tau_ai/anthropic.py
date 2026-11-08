@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import httpx
 
+from tau_agent.cache_hints import conversation_long_lived
 from tau_agent.messages import (
     AgentMessage,
     AssistantMessage,
@@ -18,6 +19,7 @@ from tau_agent.messages import (
     Usage,
     UserMessage,
     assistant_content,
+    current_timestamp_ms,
     message_to_user,
 )
 from tau_agent.tools import AgentTool, ToolCall
@@ -60,6 +62,10 @@ from tau_ai.tool_call_ids import portable_tool_call_id
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MAX_TOKENS = 4096
 CACHE_TTL_LONG = "1h"
+CACHE_TTL_DEFAULT = "5m"
+#: How long a default (5-minute) cache entry lives after the request that last
+#: read or wrote it started. A conversation idle longer than this has lost it.
+SHORT_CACHE_LIFETIME_MS = 5 * 60 * 1000
 
 # Anthropic rejects a request carrying more than four cache breakpoints, so the
 # budget is spent where it buys the most: the tool schemas, the system prompt, and
@@ -107,11 +113,25 @@ class AnthropicProvider:
         tools: list[AgentTool],
         signal: CancellationToken | None = None,
         session_id: str | None = None,
+        long_lived: bool | None = None,
     ) -> AsyncIterator[AssistantMessageEvent]:
-        """Stream one response as Pi-compatible assistant message events."""
+        """Stream one response as Pi-compatible assistant message events.
+
+        ``long_lived`` says the conversation is a long-lived one (an interactive
+        main session), so the cache breakpoints ask for the 1-hour TTL instead of
+        the default five minutes. ``None`` reads the agent loop's hint
+        (:func:`tau_agent.cache_hints.conversation_long_lived`).
+        """
         del session_id
+        if long_lived is None:
+            long_lived = conversation_long_lived()
         raw = self._stream_provider_events(
-            model=model, system=system, messages=messages, tools=tools, signal=signal
+            model=model,
+            system=system,
+            messages=messages,
+            tools=tools,
+            signal=signal,
+            long_lived=long_lived,
         )
         return canonicalize_provider_stream(
             raw, api="anthropic-messages", provider="anthropic", model=model
@@ -125,8 +145,17 @@ class AnthropicProvider:
         messages: list[AgentMessage],
         tools: list[AgentTool],
         signal: CancellationToken | None = None,
+        long_lived: bool = False,
     ) -> AsyncIterator[ProviderEvent]:
         """Stream one Anthropic response as provider-neutral events."""
+        cache_ttl = _cache_ttl(
+            self._config.cache_retention,
+            long_lived=long_lived,
+            supports_long=self._config.supports_long_cache_retention,
+            messages=messages,
+            now_ms=current_timestamp_ms(),
+            model=model,
+        )
 
         if messages and isinstance(messages[-1], UserMessage):
             self._thinking_replay_disabled = False
@@ -158,6 +187,7 @@ class AnthropicProvider:
                 cache_retention=self._config.cache_retention,
                 cache_control_on_tools=self._config.cache_control_on_tools,
                 thinking_disabled=self._thinking_replay_disabled,
+                cache_ttl=cache_ttl,
             )
             headers = {
                 "anthropic-version": ANTHROPIC_VERSION,
@@ -215,6 +245,7 @@ class AnthropicProvider:
                                     cache_retention=self._config.cache_retention,
                                     cache_control_on_tools=self._config.cache_control_on_tools,
                                     thinking_disabled=True,
+                                    cache_ttl=cache_ttl,
                                 )
                                 continue
                             if self._should_retry(attempt, status_code=response.status_code):
@@ -376,10 +407,12 @@ class AnthropicProvider:
                                     thinking_signature=thinking_signature,
                                 ),
                             )
+                        usage = usage or Usage()
+                        usage.cache_ttl = cache_ttl
                         yield ProviderResponseEndEvent(
                             message=AssistantMessage(
                                 content=content,
-                                usage=usage or Usage(),
+                                usage=usage,
                             ),
                             finish_reason=finish_reason,
                         )
@@ -480,11 +513,12 @@ def _build_messages_payload(
     cache_retention: CacheRetention = CACHE_RETENTION_SHORT,
     cache_control_on_tools: bool = True,
     thinking_disabled: bool = False,
+    cache_ttl: str | None = None,
 ) -> dict[str, JSONValue]:
     resolved_max_tokens = max_tokens or DEFAULT_MAX_TOKENS
     if thinking_budget_tokens is not None:
         resolved_max_tokens = max(resolved_max_tokens, thinking_budget_tokens + 1024)
-    cache_control = _cache_control(cache_retention)
+    cache_control = _cache_control(cache_retention, cache_ttl)
     payload_messages = []
     for message in messages:
         converted = _anthropic_message(message, supports_images=supports_images)
@@ -537,14 +571,69 @@ def _build_messages_payload(
     return payload
 
 
-def _cache_control(cache_retention: CacheRetention) -> dict[str, JSONValue] | None:
-    """Return the cache_control marker for a retention preference, if enabled.
+def _cache_ttl(
+    cache_retention: CacheRetention,
+    *,
+    long_lived: bool,
+    supports_long: bool = True,
+    messages: list[AgentMessage] | None = None,
+    now_ms: int | None = None,
+    model: str | None = None,
+) -> str | None:
+    """Return the TTL one request's breakpoints ask for, or None when uncached.
 
-    Attach sites copy the result, so no two breakpoints share one dict.
+    Anthropic serves a 5-minute request from a prefix written at either TTL,
+    but a 1-hour request only from one written at 1 hour, so a warm
+    conversation that flips from 5m to 1h rewrites everything it cached. The
+    TTL therefore only moves to 1h when that costs no extra rewrite, and then
+    stays there:
+
+    - a long retention preference or a long-lived conversation (an interactive
+      session waiting on its user) asks for 1h from the first request;
+    - a conversation whose history already used 1h on this model keeps it, so
+      a resumed conversation reads what it wrote and a switch to another model,
+      whose cache starts empty, does not inherit it;
+    - a conversation idle longer than a 5-minute entry lives (a run waiting on
+      background work, a resumed session) has lost its short cache anyway, so
+      the rewrite it pays now is written at 1h and later waits hit.
+
+    None of it applies where the model cannot keep a 1-hour cache.
     """
     if cache_retention == CACHE_RETENTION_NONE:
         return None
-    if cache_retention == CACHE_RETENTION_LONG:
+    if not supports_long:
+        return CACHE_TTL_DEFAULT
+    if cache_retention == CACHE_RETENTION_LONG or long_lived:
+        return CACHE_TTL_LONG
+    last_request_ms: int | None = None
+    for message in messages or ():
+        if isinstance(message, AssistantMessage) and message.api == "anthropic-messages":
+            if message.usage.cache_ttl == CACHE_TTL_LONG and model in (None, message.model):
+                return CACHE_TTL_LONG
+            last_request_ms = message.timestamp
+    if (
+        last_request_ms is not None
+        and now_ms is not None
+        and now_ms - last_request_ms > SHORT_CACHE_LIFETIME_MS
+    ):
+        return CACHE_TTL_LONG
+    return CACHE_TTL_DEFAULT
+
+
+def _cache_control(
+    cache_retention: CacheRetention, cache_ttl: str | None = None
+) -> dict[str, JSONValue] | None:
+    """Return the cache_control marker for a retention preference, if enabled.
+
+    Attach sites copy the result, so no two breakpoints share one dict. The
+    default TTL is left implicit, so a short-cache request carries the plain
+    ``{"type": "ephemeral"}`` marker; only the change of TTL alters the payload.
+    """
+    if cache_ttl is None:
+        cache_ttl = _cache_ttl(cache_retention, long_lived=False)
+    if cache_retention == CACHE_RETENTION_NONE or cache_ttl is None:
+        return None
+    if cache_ttl == CACHE_TTL_LONG:
         return {"type": "ephemeral", "ttl": CACHE_TTL_LONG}
     return {"type": "ephemeral"}
 

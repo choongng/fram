@@ -370,6 +370,13 @@ class CodingSessionConfig:
     owns_initial_provider: bool = False
     auto_compact_token_threshold: int | None = None
     auto_compact_enabled: bool = True
+    long_lived: bool = False
+    """An interactive session that waits on its user and on background work.
+
+    Its requests ask for the provider's longer prompt-cache lifetime (Anthropic's
+    1-hour TTL) on every request; workers such as sub-agents and print-mode runs
+    keep the short default. See :mod:`tau_agent.cache_hints`.
+    """
     thinking_level: ThinkingLevel = DEFAULT_THINKING_LEVEL
     thinking_level_override: ThinkingLevel | None = None
     """One-shot startup override (e.g. ``--thinking``) for the session's level.
@@ -764,6 +771,7 @@ class CodingSession:
                 system=system,
                 tools=tools,
                 session_id=config.session_id,
+                long_lived=config.long_lived,
             ),
             messages=state.messages,
         )
@@ -2865,6 +2873,7 @@ class CodingSession:
                 session_id=record.id,
                 session_manager=manager,
                 command_registry=self._config.command_registry,
+                long_lived=self._config.long_lived,
                 provider_name=provider_name,
                 inference_provider=None if dynamic_resume else record.inference_provider,
                 inference_provider_mode=record.inference_provider_mode,

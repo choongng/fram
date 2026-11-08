@@ -86,8 +86,16 @@ reprocessed. Which retention Tau asks for depends on how you authenticated:
   not billed per token, and the five-minute default is shorter than a build, a
   test run, or the time it takes to read a diff — any of which would otherwise
   expire the cache mid-session.
-- **An Anthropic API key** uses the five-minute default, because one-hour cache
-  writes cost more per token and that should be a deliberate choice.
+- **An Anthropic API key** uses the five-minute default for work that runs
+  straight through, such as sub-agents and print mode, because one-hour cache
+  writes cost more per token.
+
+The interactive session asks for the one-hour cache on every request with either
+kind of auth, because it spends most of its time waiting for you. Other
+conversations move to it when a request comes more than five minutes after the
+previous one, since the short cache has already expired by then, and keep it
+from that point. A model marked `supportsLongCacheRetention = false` stays at
+five minutes throughout.
 
 Providers that speak the Anthropic protocol through a gateway rather than being
 Anthropic itself — `minimax`, `minimax-cn`, `fireworks`, and `vercel-ai-gateway` —

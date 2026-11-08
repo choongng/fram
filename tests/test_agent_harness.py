@@ -356,3 +356,54 @@ async def test_entry_path_repair_is_pushed_to_listeners() -> None:
         if isinstance(event, MessageEndEvent) and isinstance(event.message, ToolResultMessage)
     ]
     assert consumer_ends == ["call-1"]
+
+
+class _HintRecordingProvider(FakeProvider):
+    """Records the long-lived cache hint each request was made under."""
+
+    def __init__(self, streams: list[list[object]]) -> None:
+        super().__init__(streams)  # type: ignore[arg-type]
+        self.long_lived: list[bool] = []
+
+    def stream_response(self, **kwargs: object):  # type: ignore[no-untyped-def,override]
+        from tau_agent.cache_hints import conversation_long_lived
+
+        self.long_lived.append(conversation_long_lived())
+        return super().stream_response(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("long_lived", [True, False])
+async def test_every_request_carries_the_conversation_long_lived_hint(long_lived: bool) -> None:
+    call = ToolCall(id="call-1", name="noop", arguments={})
+
+    async def noop(
+        tool_call_id: str, arguments: Mapping[str, JSONValue], *_: object
+    ) -> AgentToolResult:
+        return AgentToolResult(content=[TextContent(text="ok")])
+
+    provider = _HintRecordingProvider(
+        [
+            [
+                assistant_start(),
+                tool_call_end(call),
+                assistant_done(AssistantMessage(content=[call])),
+            ],
+            [assistant_start(), assistant_done(AssistantMessage(content="done"))],
+        ]
+    )
+    harness = AgentHarness(
+        AgentHarnessConfig(
+            provider=provider,
+            model="fake",
+            system="You are Tau.",
+            tools=[
+                AgentTool(name="noop", label="noop", description="", parameters={}, execute_fn=noop)
+            ],
+            long_lived=long_lived,
+        )
+    )
+
+    [event async for event in harness.prompt("Hi")]
+
+    assert provider.long_lived == [long_lived, long_lived]

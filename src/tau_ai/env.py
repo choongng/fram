@@ -93,6 +93,8 @@ class AnthropicConfig:
     provider_name: str = "Anthropic"
     oauth_system_prompt: str | None = None
     cache_retention: CacheRetention = CACHE_RETENTION_SHORT
+    supports_long_cache_retention: bool = True
+    """Whether the backend keeps a 1-hour cache; False holds every request at 5m."""
     cache_control_on_tools: bool = True
     credential_resolver: RuntimeProviderAuthResolver | None = None
 

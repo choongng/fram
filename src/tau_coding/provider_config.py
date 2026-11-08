@@ -1863,6 +1863,7 @@ def anthropic_config_from_provider(
         provider_name=provider.name,
         base_url=base_url,
         cache_retention=cache_retention,
+        supports_long_cache_retention=anthropic_supports_long_cache(provider, selected_model),
         cache_control_on_tools=cache_control_on_tools,
         headers=_model_headers(provider, selected_model),
         timeout_seconds=provider.timeout_seconds,
@@ -2080,6 +2081,16 @@ def anthropic_cache_settings(
     if retention == CACHE_RETENTION_LONG and compat.get("supportsLongCacheRetention") is False:
         retention = CACHE_RETENTION_SHORT
     return retention, compat.get("supportsCacheControlOnTools") is not False
+
+
+def anthropic_supports_long_cache(provider: ProviderConfig, model: str | None = None) -> bool:
+    """Return whether an Anthropic-protocol model can keep a 1-hour prompt cache.
+
+    A long-lived conversation asks for the 1-hour TTL whatever the auth mode,
+    so this capability caps the request itself, not only the retention
+    preference.
+    """
+    return _model_compat(provider, model).get("supportsLongCacheRetention") is not False
 
 
 def _provider_from_json(data: object) -> ProviderConfig:

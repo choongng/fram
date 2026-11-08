@@ -53,6 +53,7 @@ from tau_coding.provider_config import (
     ProviderConfigError,
     anthropic_cache_settings,
     anthropic_config_from_provider,
+    anthropic_supports_long_cache,
     openai_compatible_config_from_provider,
     provider_model_max_tokens,
     provider_model_supports_images,
@@ -368,6 +369,7 @@ def _create_model_provider(
                 # Resolved from compat like the first-party path, so a gateway
                 # proxying real Claude can opt back in per provider or per model.
                 cache_retention=gateway_retention,
+                supports_long_cache_retention=anthropic_supports_long_cache(provider, model),
                 cache_control_on_tools=gateway_cache_control_on_tools,
             )
             return AnthropicProvider(anthropic_config)
