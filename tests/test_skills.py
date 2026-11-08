@@ -379,3 +379,67 @@ def test_build_skill_index_excludes_disabled_skills(tmp_path: Path) -> None:
     assert "hidden" not in index
 
     assert build_skill_index([hidden]) == "Available skills: none"
+
+
+def _write_skill(root: Path, name: str, body: str) -> Path:
+    skill_dir = root / name
+    skill_dir.mkdir(parents=True)
+    path = skill_dir / "SKILL.md"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_load_skills_includes_extra_skill_dirs(tmp_path: Path) -> None:
+    """Extension-contributed skill directories load alongside built-in dirs."""
+    plugin = tmp_path / "plugin" / "skills"
+    _write_skill(plugin, "release-notes", "# Release notes\nWrite the release notes.")
+    paths = TauResourcePaths(root=tmp_path / "home", agents_root=None)
+
+    skills = load_skills(paths, extra_skill_dirs=(plugin,))
+
+    notes = next(skill for skill in skills if skill.name == "release-notes")
+    assert notes.path == plugin / "release-notes" / "SKILL.md"
+    assert notes.description == "Release notes"
+
+
+def test_project_skill_overrides_same_named_extra_skill(tmp_path: Path) -> None:
+    """A project skill beats a plugin skill with the same name, with a diagnostic."""
+    plugin = tmp_path / "plugin" / "skills"
+    _write_skill(plugin, "review", "# Plugin Review")
+    cwd = tmp_path / "project"
+    _write_skill(cwd / ".tau" / "skills", "review", "# Project Review")
+    paths = TauResourcePaths(root=tmp_path / "home", agents_root=None, cwd=cwd)
+
+    skills, diagnostics = load_skills_with_diagnostics(paths, extra_skill_dirs=(plugin,))
+
+    review = next(skill for skill in skills if skill.name == "review")
+    assert review.path == cwd / ".tau" / "skills" / "review" / "SKILL.md"
+    assert review.description == "Project Review"
+    override = [d for d in diagnostics if "overrides lower-precedence" in d.message]
+    assert len(override) == 1
+    assert override[0].name == "review"
+
+
+def test_extra_skill_dir_collapsing_does_not_double_load(tmp_path: Path) -> None:
+    """Passing an already-scanned directory must not double-load or warn."""
+    plugin = tmp_path / "home" / "skills"
+    _write_skill(plugin, "solo", "# Solo")
+    paths = TauResourcePaths(root=tmp_path / "home", agents_root=None)
+
+    skills, diagnostics = load_skills_with_diagnostics(paths, extra_skill_dirs=(plugin,))
+
+    assert [skill.name for skill in skills] == ["solo"]
+    assert [d for d in diagnostics if "overrides lower-precedence" in d.message] == []
+
+
+def test_extra_skill_dir_symlink_does_not_double_load(tmp_path: Path) -> None:
+    home_skills = tmp_path / "home" / "skills"
+    _write_skill(home_skills, "solo", "# Solo")
+    alias = tmp_path / "alias"
+    alias.symlink_to(home_skills, target_is_directory=True)
+    paths = TauResourcePaths(root=tmp_path / "home", agents_root=None)
+
+    skills, diagnostics = load_skills_with_diagnostics(paths, extra_skill_dirs=(alias,))
+
+    assert [skill.name for skill in skills] == ["solo"]
+    assert [d for d in diagnostics if "overrides lower-precedence" in d.message] == []

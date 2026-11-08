@@ -31,6 +31,7 @@ from tau_coding import (
     SessionManager,
     TauPaths,
     TauResourcePaths,
+    load_skills,
 )
 from tau_coding.extensions import (
     CustomMessageView,
@@ -135,6 +136,7 @@ class RecordingSession:
         self.session_id = "session-1"
         self.session_name: str | None = "Test session"
         self.thinking_level = "medium"
+        self.available_thinking_levels: tuple[str, ...] = ("off", "low", "medium", "high")
         self.system_prompt = "You are Tau."
         self.project_trust_resolution: ProjectTrustResolution | None = ProjectTrustResolution(
             trusted=True, source="saved"
@@ -1599,6 +1601,17 @@ def test_context_exposes_available_provider_and_model_ids(tmp_path: Path) -> Non
         ("other", "other-model"),
     ]
     assert all(isinstance(choice, ModelChoice) for choice in api.context.available_model_choices)
+
+
+def test_context_exposes_available_thinking_levels(tmp_path: Path) -> None:
+    runtime = ExtensionRuntime()
+    api = _register_inline_extension(runtime, "reader")
+    session = RecordingSession(tmp_path)
+    runtime.bind(session)
+
+    assert api.context.available_thinking_levels == ("off", "low", "medium", "high")
+    session.available_thinking_levels = ()  # a model with no thinking modes
+    assert api.context.available_thinking_levels == ()
 
 
 def test_transcript_exposes_prior_messages_in_order(tmp_path: Path) -> None:
@@ -3539,3 +3552,292 @@ def _loaded_extension_module(name: str) -> object:
     ]
     assert candidates, f"extension module {name} not loaded"
     return candidates[-1]
+
+
+# -- skill-directory contributions -------------------------------------------
+
+
+def _skill_plugin(tmp_path: Path, name: str = "release-notes") -> Path:
+    plugin = tmp_path / "plugin" / "skills"
+    skill_dir = plugin / name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\ndescription: {name}\n---\n# {name}\nDo the thing.", encoding="utf-8"
+    )
+    return plugin
+
+
+def test_register_skill_dir_contributes_directory(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    plugin = _skill_plugin(tmp_path)
+    _write_extension(
+        _user_extensions_dir(paths),
+        "skill_plugin",
+        f"def setup(tau):\n    tau.register_skill_dir({str(plugin)!r})\n",
+    )
+
+    runtime = _runtime_with(paths)
+
+    assert runtime.skill_dirs == (plugin,)
+
+
+def test_registered_skill_dir_yields_loadable_skills(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    plugin = _skill_plugin(tmp_path)
+    _write_extension(
+        _user_extensions_dir(paths),
+        "skill_plugin",
+        f"def setup(tau):\n    tau.register_skill_dir({str(plugin)!r})\n",
+    )
+
+    runtime = _runtime_with(paths)
+    skills = load_skills(paths, extra_skill_dirs=runtime.skill_dirs)
+
+    assert "release-notes" in {skill.name for skill in skills}
+
+
+def test_register_skill_dir_ignores_missing_path(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    missing = tmp_path / "does-not-exist" / "skills"
+    _write_extension(
+        _user_extensions_dir(paths),
+        "bad_skill",
+        f"def setup(tau):\n    tau.register_skill_dir({str(missing)!r})\n",
+    )
+
+    runtime = _runtime_with(paths)
+
+    assert runtime.skill_dirs == ()
+    assert any("skill directory is missing" in d.message for d in runtime.diagnostics)
+
+
+def test_register_skill_dir_dedupes_by_path(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    plugin = _skill_plugin(tmp_path)
+    body = f"def setup(tau):\n    tau.register_skill_dir({str(plugin)!r})\n"
+    _write_extension(_user_extensions_dir(paths), "dedupe_a", body)
+    _write_extension(_user_extensions_dir(paths), "dedupe_b", body)
+
+    runtime = _runtime_with(paths)
+
+    assert runtime.skill_dirs == (plugin,)
+
+
+def test_register_skill_dir_rolls_back_on_failed_setup(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    plugin = _skill_plugin(tmp_path)
+    _write_extension(
+        _user_extensions_dir(paths),
+        "half_skill",
+        "def setup(tau):\n"
+        f"    tau.register_skill_dir({str(plugin)!r})\n"
+        "    raise RuntimeError('boom')\n",
+    )
+
+    runtime = _runtime_with(paths)
+
+    assert runtime.skill_dirs == ()
+
+
+def test_retire_clears_skill_dirs(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    plugin = _skill_plugin(tmp_path)
+    _write_extension(
+        _user_extensions_dir(paths),
+        "skill_plugin",
+        f"def setup(tau):\n    tau.register_skill_dir({str(plugin)!r})\n",
+    )
+    runtime = _runtime_with(paths)
+    assert runtime.skill_dirs == (plugin,)
+
+    runtime.retire()
+
+    assert runtime.skill_dirs == ()
+
+
+async def test_session_loads_skills_from_extension_skill_dir(tmp_path: Path) -> None:
+    plugin = _skill_plugin(tmp_path)
+    session = await CodingSession.load(
+        _session_config(
+            tmp_path,
+            FakeProvider([]),
+            extension_body=f"def setup(tau):\n    tau.register_skill_dir({str(plugin)!r})\n",
+        )
+    )
+
+    assert "release-notes" in {skill.name for skill in session.skills}
+    await session.aclose()
+
+
+async def test_session_reload_keeps_extension_skill_dir(tmp_path: Path) -> None:
+    plugin = _skill_plugin(tmp_path)
+    session = await CodingSession.load(
+        _session_config(
+            tmp_path,
+            FakeProvider([]),
+            extension_body=f"def setup(tau):\n    tau.register_skill_dir({str(plugin)!r})\n",
+        )
+    )
+    assert "release-notes" in {skill.name for skill in session.skills}
+
+    await session.reload()
+
+    assert "release-notes" in {skill.name for skill in session.skills}
+    await session.aclose()
+
+
+async def test_session_loads_skills_from_project_extension(tmp_path: Path) -> None:
+    plugin = _skill_plugin(tmp_path)
+    config = _session_config(tmp_path, FakeProvider([]))
+    assert config.resource_paths is not None and config.resource_paths.cwd is not None
+    _write_extension(
+        config.resource_paths.cwd / ".tau" / "extensions",
+        "project_skills",
+        f"def setup(tau):\n    tau.register_skill_dir({str(plugin)!r})\n",
+    )
+    session = await CodingSession.load(
+        replace(config, trust_override="approve", project_extensions_enabled=True)
+    )
+    assert "release-notes" in {skill.name for skill in session.skills}
+
+    await session.reload()
+
+    assert "release-notes" in {skill.name for skill in session.skills}
+    await session.aclose()
+
+
+def test_compaction_instructions_end_with_their_extension(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    _write_extension(
+        _user_extensions_dir(paths),
+        "broken",
+        "def setup(tau):\n"
+        "    tau.add_compaction_instructions('Lost.')\n"
+        "    raise RuntimeError('boom')\n",
+    )
+    _write_extension(
+        _user_extensions_dir(paths),
+        "focus",
+        "def setup(tau):\n    tau.add_compaction_instructions('Kept.')\n",
+    )
+    runtime = _runtime_with(paths)
+    assert runtime.compaction_instructions == ("Kept.",)
+
+    runtime.retire()
+
+    assert runtime.compaction_instructions == ()
+
+
+async def test_compaction_instructions_reach_the_summarizer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import tau_coding.session as coding_session_module
+
+    monkeypatch.setattr(coding_session_module, "DEFAULT_COMPACTION_KEEP_RECENT_TOKENS", 1)
+    provider = FakeProvider(
+        [
+            [assistant_start(model="fake"), assistant_done(message=AssistantMessage(content="A"))],
+            [assistant_start(model="fake"), assistant_done(message=AssistantMessage(content="B"))],
+            [
+                assistant_start(model="fake"),
+                assistant_done(message=AssistantMessage(content="Summary")),
+            ],
+        ]
+    )
+    body = "def setup(tau):\n    tau.add_compaction_instructions('Keep file paths exact.')"
+    session = await CodingSession.load(_session_config(tmp_path, provider, extension_body=body))
+    _ = [event async for event in session.prompt("Explain.")]
+    _ = [event async for event in session.prompt("Go on.")]
+
+    await session.compact("Keep the open question.")
+
+    # The summarizer request is the last one the provider saw.
+    ask = provider.calls[2][2][-1].text
+    assert "Additional focus: Keep the open question.\n\nKeep file paths exact." in ask
+
+
+async def test_events_bus_carries_data_between_extensions() -> None:
+    runtime = ExtensionRuntime()
+    sender = cast(ExtensionAPI, _register_inline_extension(runtime, "sender"))
+    receiver = cast(ExtensionAPI, _register_inline_extension(runtime, "receiver"))
+    seen: list[object] = []
+    later: list[object] = []
+
+    async def slow(data: object) -> None:
+        later.append(data)
+
+    receiver.events.on("sender:ping", seen.append)
+    receiver.events.on("sender:ping", slow)
+    receiver.events.on("sender:other", lambda data: seen.append(("other", data)))
+
+    sender.events.emit("sender:ping", {"n": 1})
+
+    assert seen == [{"n": 1}]
+    await asyncio.sleep(0)
+    assert later == [{"n": 1}]
+
+
+async def test_events_bus_isolates_a_failing_handler_and_unsubscribes() -> None:
+    runtime = ExtensionRuntime()
+    api = cast(ExtensionAPI, _register_inline_extension(runtime, "ext"))
+    seen: list[object] = []
+
+    def broken(data: object) -> None:
+        raise ValueError("boom")
+
+    async def broken_later(data: object) -> None:
+        raise KeyError("late")
+
+    api.events.on("ch", broken)
+    api.events.on("ch", broken_later)
+    unsubscribe = api.events.on("ch", seen.append)
+
+    api.events.emit("ch", 1)
+    await asyncio.sleep(0)
+    unsubscribe()
+    api.events.emit("ch", 2)
+    for _ in range(3):  # the task runs, then its done callback
+        await asyncio.sleep(0)
+
+    assert seen == [1]
+    messages = [d.message for d in runtime.diagnostics if d.name == "ext"]
+    assert sum("events:ch" in m and "boom" in m for m in messages) == 2
+    assert sum("events:ch" in m and "late" in m for m in messages) == 2
+
+
+def test_events_bus_drops_subscriptions_on_reload() -> None:
+    runtime = ExtensionRuntime()
+    old = cast(ExtensionAPI, _register_inline_extension(runtime, "old"))
+    seen: list[object] = []
+    old.events.on("ch", seen.append)
+
+    runtime.reset_for_reload()
+    fresh = cast(ExtensionAPI, _register_inline_extension(runtime, "fresh"))
+    fresh.events.emit("ch", 1)
+
+    assert seen == []
+    with pytest.raises(ExtensionError, match="stale after reload"):
+        old.events.emit("ch", 2)
+
+
+async def test_events_bus_cancels_async_handlers_on_reload() -> None:
+    runtime = ExtensionRuntime()
+    api = cast(ExtensionAPI, _register_inline_extension(runtime, "ext"))
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def waits(data: object) -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    api.events.on("ch", waits)
+    api.events.emit("ch")
+    await started.wait()
+
+    runtime.reset_for_reload()
+
+    await asyncio.wait_for(cancelled.wait(), timeout=1)

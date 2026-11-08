@@ -954,6 +954,12 @@ class ExtensionContext:
         return self._runtime.session_view.thinking_level
 
     @property
+    def available_thinking_levels(self) -> tuple[str, ...]:
+        """Return the thinking modes the active model supports; empty when it has none."""
+        self._generation.assert_active()
+        return tuple(self._runtime.session_view.available_thinking_levels)
+
+    @property
     def system_prompt(self) -> str:
         """Return the active system prompt."""
         self._generation.assert_active()
@@ -1025,6 +1031,41 @@ class ExtensionContext:
         return self._ui
 
 
+BusHandler = Callable[[object], object]
+
+
+class ExtensionEvents:
+    """Event bus shared by all loaded extensions (Pi's ``pi.events``).
+
+    Channels are plain strings; by convention they are prefixed with the
+    emitting extension's name (``myext:worker_start``). ``emit`` is synchronous
+    and fire-and-forget: each handler on the channel runs in subscription order,
+    one that returns an awaitable is scheduled on the running loop, and one that
+    raises is recorded as a diagnostic without stopping the rest. A subscription
+    belongs to the extension that made it and ends with it on reload.
+    """
+
+    def __init__(
+        self,
+        runtime: ExtensionRuntime,
+        source_id: str,
+        generation: ExtensionGeneration,
+    ) -> None:
+        self._runtime = runtime
+        self._source_id = source_id
+        self._generation = generation
+
+    def emit(self, channel: str, data: object = None) -> None:
+        """Hand ``data`` to every handler subscribed to ``channel``."""
+        self._generation.assert_active()
+        self._runtime.bus_emit(channel, data)
+
+    def on(self, channel: str, handler: BusHandler) -> Callable[[], None]:
+        """Subscribe ``handler(data)`` to ``channel``; returns a call that unsubscribes."""
+        self._generation.assert_active()
+        return self._runtime.bus_on(self._source_id, channel, handler)
+
+
 class ExtensionAPI:
     """The object handed to each extension's `setup(tau)` entry point.
 
@@ -1052,6 +1093,7 @@ class ExtensionAPI:
             self._generation,
             extension_name=extension_name,
         )
+        self._events = ExtensionEvents(runtime, self._source_id, self._generation)
 
     @property
     def name(self) -> str:
@@ -1064,6 +1106,12 @@ class ExtensionAPI:
         """Return read-only session context."""
         self._generation.assert_active()
         return self._context
+
+    @property
+    def events(self) -> ExtensionEvents:
+        """Return the event bus shared by every loaded extension."""
+        self._generation.assert_active()
+        return self._events
 
     def set_inference_provider(self, route: str | None) -> str:
         """Select or reset the active Hugging Face session route."""
@@ -1135,6 +1183,32 @@ class ExtensionAPI:
             title,
             body,
         )
+
+    def add_compaction_instructions(self, instructions: str) -> None:
+        """Add focus for the summarizer that writes compaction summaries.
+
+        The text joins any instructions a manual `/compact` gives. Use it for
+        state the summary must carry or must not invent, such as which records
+        are authoritative. Branch summaries do not use it.
+        """
+        self._generation.assert_active()
+        self._runtime.register_compaction_instruction(
+            self._source_id, self._extension_name, instructions
+        )
+
+    def register_skill_dir(self, path: str | Path) -> None:
+        """Contribute a directory of skills, loaded from disk without copying.
+
+        ``path`` must be a skills directory: a directory whose subdirectories
+        each contain a ``SKILL.md`` file (the Agent Skills layout), such as a
+        plugin's ``skills/`` tree. Contributed skills load at the lowest
+        precedence, so a user or project skill overrides a same-named skill from
+        a plugin. Missing or non-directory paths are ignored with a
+        diagnostic. The contribution is owned by this extension and dropped on
+        failed setup, reload, and runtime retirement.
+        """
+        self._generation.assert_active()
+        self._runtime.register_skill_dir(self._source_id, self._extension_name, path)
 
     def on(
         self,

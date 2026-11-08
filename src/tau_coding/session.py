@@ -596,12 +596,22 @@ class CodingSession:
             project_trust_coordinator=coordinator,
             extension_runtime=extension_runtime,
         )
+        # Before skills are scanned: an extension can contribute a skill directory.
+        if trust_resolution.trusted and config.project_extensions_enabled:
+            extension_runtime.load(
+                resource_paths,
+                include_resource_dirs=True,
+                include_project_dir=True,
+                include_user_dir=False,
+            )
+
         resources = _load_session_resources(
             resource_paths,
             config.context_files,
             skills_enabled=config.skills_enabled,
             system_prompt_enabled=config.system is None,
             custom_system_prompt_explicit=config.custom_system_prompt is not None,
+            extra_skill_dirs=extension_runtime.skill_dirs,
         )
         if summary.categories:
             resources = replace(
@@ -614,14 +624,6 @@ class CodingSession:
                         severity="info" if trust_resolution.trusted else "warning",
                     ),
                 ),
-            )
-
-        if trust_resolution.trusted and config.project_extensions_enabled:
-            extension_runtime.load(
-                resource_paths,
-                include_resource_dirs=True,
-                include_project_dir=True,
-                include_user_dir=False,
             )
 
         runtime_model_catalogs = dict(config.runtime_model_catalogs)
@@ -2494,12 +2496,26 @@ class CodingSession:
                 trusted=staged_resolution.trusted,
             )
 
+        # Before skills are scanned: an extension can contribute a skill directory.
+        if (
+            staged_resolution is not None
+            and staged_resolution.trusted
+            and self._config.project_extensions_enabled
+        ):
+            staged_runtime.load(
+                staged_paths,
+                include_resource_dirs=True,
+                include_project_dir=True,
+                include_user_dir=False,
+            )
+
         resources = _load_session_resources(
             staged_paths,
             self._config.context_files,
             skills_enabled=self._config.skills_enabled,
             system_prompt_enabled=self._config.system is None,
             custom_system_prompt_explicit=self._config.custom_system_prompt is not None,
+            extra_skill_dirs=staged_runtime.skill_dirs,
         )
         if trust_summary is not None and trust_summary.categories:
             assert staged_resolution is not None
@@ -2514,18 +2530,6 @@ class CodingSession:
                     ),
                 ),
             )
-        if (
-            staged_resolution is not None
-            and staged_resolution.trusted
-            and self._config.project_extensions_enabled
-        ):
-            staged_runtime.load(
-                staged_paths,
-                include_resource_dirs=True,
-                include_project_dir=True,
-                include_user_dir=False,
-            )
-
         base_tools = (
             self._config.tools
             if self._config.tools is not None
@@ -4058,9 +4062,14 @@ class CodingSession:
         *,
         custom_instructions: str | None = None,
     ) -> _GeneratedSummary:
+        focus = [
+            text
+            for text in (custom_instructions, *self._extension_runtime.compaction_instructions)
+            if text is not None and text.strip()
+        ]
         prompt = build_compaction_summary_prompt(
             messages,
-            custom_instructions=custom_instructions,
+            custom_instructions="\n\n".join(focus) or None,
         )
         text_parts: list[str] = []
         final_text: str | None = None
@@ -5191,11 +5200,14 @@ def _load_session_resources(
     skills_enabled: bool = True,
     system_prompt_enabled: bool = True,
     custom_system_prompt_explicit: bool = False,
+    extra_skill_dirs: Sequence[Path] = (),
 ) -> SessionResources:
     loaded_skills: list[Skill]
     skill_diagnostics: list[ResourceDiagnostic]
     if skills_enabled:
-        loaded_skills, skill_diagnostics = load_skills_with_diagnostics(resource_paths)
+        loaded_skills, skill_diagnostics = load_skills_with_diagnostics(
+            resource_paths, extra_skill_dirs=extra_skill_dirs
+        )
     else:
         loaded_skills, skill_diagnostics = [], []
     loaded_prompt_templates, prompt_diagnostics = load_prompt_templates_with_diagnostics(

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from inspect import isawaitable
 from pathlib import Path
 from time import time_ns
@@ -38,6 +40,7 @@ from tau_coding.extensions.api import (
     AGENT_EVENT_TYPES,
     AGENT_EVENT_WILDCARD,
     LIFECYCLE_EVENT_TYPES,
+    BusHandler,
     CustomMessageView,
     ExtensionAPI,
     ExtensionCommandContext,
@@ -134,6 +137,9 @@ class BoundSession(Protocol):
 
     @property
     def thinking_level(self) -> str: ...
+
+    @property
+    def available_thinking_levels(self) -> tuple[str, ...]: ...
 
     @property
     def system_prompt(self) -> str: ...
@@ -269,8 +275,14 @@ class ExtensionRuntime:
         self._commands: dict[str, ExtensionCommand] = {}
         self._prompt_guidelines: list[tuple[str, str, str]] = []
         self._prompt_sections: list[tuple[str, str, PromptSection]] = []
+        self._compaction_instructions: list[tuple[str, str, str]] = []
+        self._skill_dirs: list[tuple[str, str, Path]] = []
         self._message_renderers: dict[str, tuple[str, str, MessageRenderer]] = {}
         self._renderer_failures_reported: set[str] = set()
+        # The shared event bus (``tau.events``): (owner, channel, handler), in
+        # subscription order, and the tasks its async handlers are running.
+        self._bus_handlers: list[tuple[str, str, BusHandler]] = []
+        self._bus_tasks: set[asyncio.Task[object]] = set()
         self._load_diagnostics: list[ResourceDiagnostic] = []
         self._runtime_diagnostics: list[ResourceDiagnostic] = []
         # Keep constructor-provided paths visible until ``load`` installs the
@@ -362,8 +374,12 @@ class ExtensionRuntime:
         self._commands.clear()
         self._prompt_guidelines.clear()
         self._prompt_sections.clear()
+        self._compaction_instructions.clear()
+        self._skill_dirs.clear()
         self._message_renderers.clear()
         self._renderer_failures_reported.clear()
+        self._bus_handlers.clear()
+        self._cancel_bus_tasks()
         self._turn_requested = None
         self._session = None
 
@@ -437,8 +453,12 @@ class ExtensionRuntime:
         self._commands.clear()
         self._prompt_guidelines.clear()
         self._prompt_sections.clear()
+        self._compaction_instructions.clear()
+        self._skill_dirs.clear()
         self._message_renderers.clear()
         self._renderer_failures_reported.clear()
+        self._bus_handlers.clear()
+        self._cancel_bus_tasks()
         self._load_diagnostics.clear()
         self._runtime_diagnostics.clear()
         unload_extension_modules()
@@ -510,11 +530,22 @@ class ExtensionRuntime:
             for owner, extension, section in self._prompt_sections
             if owner != source_id
         ]
+        self._compaction_instructions = [
+            (owner, extension, text)
+            for owner, extension, text in self._compaction_instructions
+            if owner != source_id
+        ]
+        self._skill_dirs = [
+            (owner, extension, skill_dir)
+            for owner, extension, skill_dir in self._skill_dirs
+            if owner != source_id
+        ]
         self._message_renderers = {
             custom_type: registration
             for custom_type, registration in self._message_renderers.items()
             if registration[0] != source_id
         }
+        self._bus_handlers = [entry for entry in self._bus_handlers if entry[0] != source_id]
         self._provider_registry.unregister_source(source_id)
         self._local_backend_registry.unregister_source(source_id)
 
@@ -621,6 +652,63 @@ class ExtensionRuntime:
             )
             return
         self._message_renderers[normalized] = (source_id, extension_name, renderer)
+
+    def bus_on(self, source_id: str, channel: str, handler: BusHandler) -> Callable[[], None]:
+        """Subscribe ``handler`` to ``channel`` on the shared bus; returns its unsubscribe."""
+        entry = (source_id, channel, handler)
+        self._bus_handlers.append(entry)
+
+        def unsubscribe() -> None:
+            for index, existing in enumerate(self._bus_handlers):
+                if existing is entry:
+                    del self._bus_handlers[index]
+                    return
+
+        return unsubscribe
+
+    def bus_emit(self, channel: str, data: object) -> None:
+        """Hand ``data`` to every handler on ``channel``, in subscription order.
+
+        Fire-and-forget, as Pi's ``events.emit``: a handler that returns an
+        awaitable is scheduled on the running loop, and one that raises, at once
+        or later, is recorded as a runtime diagnostic without stopping the rest.
+        """
+        event = f"events:{channel}"
+        for source_id, subscribed, handler in tuple(self._bus_handlers):
+            if subscribed != channel:
+                continue
+            name = self._extension_display_name(source_id)
+            try:
+                result = handler(data)
+            except Exception as exc:  # noqa: BLE001 - extensions are an isolation boundary
+                self._record_runtime_failure(name, event, exc)
+                continue
+            if not isawaitable(result):
+                continue
+            try:
+                task = asyncio.ensure_future(result)
+            except RuntimeError as exc:  # no running loop to schedule it on
+                if asyncio.iscoroutine(result):
+                    result.close()
+                self._record_runtime_failure(name, event, exc)
+                continue
+            self._bus_tasks.add(task)
+            task.add_done_callback(partial(self._bus_task_done, name, event))
+
+    def _cancel_bus_tasks(self) -> None:
+        """Stop async bus handlers, which must not outlive their extension."""
+        for task in tuple(self._bus_tasks):
+            with contextlib.suppress(RuntimeError):  # its event loop has already closed
+                task.cancel()
+        self._bus_tasks.clear()
+
+    def _bus_task_done(self, name: str, event: str, task: asyncio.Task[object]) -> None:
+        self._bus_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if isinstance(exc, Exception):
+            self._record_runtime_failure(name, event, exc)
 
     def render_custom_message(
         self,
@@ -777,6 +865,51 @@ class ExtensionRuntime:
                 PromptSection(title=normalized_title, body=normalized_body),
             )
         )
+
+    def register_compaction_instruction(
+        self, source_id: str, extension_name: str, instruction: str
+    ) -> None:
+        """Register extra focus for the compaction summarizer."""
+        normalized = instruction.strip()
+        if normalized:
+            self._compaction_instructions.append((source_id, extension_name, normalized))
+
+    def register_skill_dir(self, source_id: str, extension_name: str, path: str | Path) -> None:
+        """Register a skills directory contributed by an extension.
+
+        See ``ExtensionAPI.register_skill_dir`` for what ``path`` holds and how
+        its skills rank. Contributions are deduplicated by resolved path and
+        owned by the registering source so failed setup and retirement clean
+        them up.
+        """
+        candidate = Path(path).expanduser()
+        try:
+            exists_as_dir = candidate.is_dir()
+        except OSError:
+            exists_as_dir = False
+        if not exists_as_dir:
+            self._load_diagnostics.append(
+                ResourceDiagnostic(
+                    kind="extension",
+                    name=extension_name,
+                    path=candidate,
+                    message=f"skill directory is missing or not a directory: {candidate}",
+                    severity="warning",
+                )
+            )
+            return
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            resolved = candidate
+        for _owner, _extension, existing in self._skill_dirs:
+            try:
+                existing_resolved = existing.resolve()
+            except OSError:
+                existing_resolved = existing
+            if existing_resolved == resolved:
+                return
+        self._skill_dirs.append((source_id, extension_name, candidate))
 
     def subscribe(self, source_id: str, event: str, handler: ExtensionHandler) -> None:
         """Subscribe an extension handler to a named event."""
@@ -946,6 +1079,11 @@ class ExtensionRuntime:
         return tuple(section for _, _, section in self._prompt_sections)
 
     @property
+    def compaction_instructions(self) -> tuple[str, ...]:
+        """Return extension focus for the compaction summarizer, in registration order."""
+        return tuple(text for _, _, text in self._compaction_instructions)
+
+    @property
     def sourced_prompt_sections(self) -> tuple[PromptSection, ...]:
         """Return prompt sections annotated with their owning extension."""
         return tuple(
@@ -956,6 +1094,11 @@ class ExtensionRuntime:
             )
             for _owner, extension, section in self._prompt_sections
         )
+
+    @property
+    def skill_dirs(self) -> tuple[Path, ...]:
+        """Return extension-contributed skill directories in registration order."""
+        return tuple(skill_dir for _, _, skill_dir in self._skill_dirs)
 
     # -- actions (called through ExtensionAPI) --------------------------------
 
