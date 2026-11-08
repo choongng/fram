@@ -74,6 +74,28 @@ class AutoRetryEndEvent(WireModel):
     final_error: str | None = Field(None)
 
 
+class PromptCacheMissEvent(WireModel):
+    """A large prompt was fully reprocessed by a provider that usually caches it.
+
+    Emitted after the assistant message whose usage reported no cache read,
+    once that provider and model have reported a cache hit earlier in the
+    session. See `tau_coding.prompt_cache`.
+    """
+
+    type: Literal["prompt_cache_miss"] = "prompt_cache_miss"
+    provider: str
+    model: str
+    prompt_tokens: int
+
+    @property
+    def status_text(self) -> str:
+        """One-line status message frontends show for this miss."""
+        return (
+            f"Prompt cache miss: {self.prompt_tokens:,} prompt tokens reprocessed "
+            f"(earlier {self.provider} turns were served from cache)"
+        )
+
+
 type SessionOwnEvent = Annotated[
     SessionAgentEndEvent
     | AgentSettledEvent
@@ -84,7 +106,8 @@ type SessionOwnEvent = Annotated[
     | SessionInfoChangedEvent
     | ThinkingLevelChangedEvent
     | AutoRetryStartEvent
-    | AutoRetryEndEvent,
+    | AutoRetryEndEvent
+    | PromptCacheMissEvent,
     Field(discriminator="type"),
 ]
 type CodingSessionEvent = AgentEvent | SessionOwnEvent

@@ -46,6 +46,7 @@ AGENT_EVENT_TYPES: frozenset[str] = frozenset(
         "thinking_level_changed",
         "auto_retry_start",
         "auto_retry_end",
+        "prompt_cache_miss",
     }
 )
 AGENT_EVENT_WILDCARD = "agent_event"

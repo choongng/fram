@@ -17,6 +17,7 @@ from tau_coding.events import (
     CodingSessionEvent,
     CompactionEndEvent,
     CompactionStartEvent,
+    PromptCacheMissEvent,
     QueueUpdateEvent,
     SessionAgentEndEvent,
 )
@@ -162,6 +163,9 @@ class TuiEventAdapter:
                 self.state.items.pop()
             self.state.error = None
             self.state.add_item("status", f"… {event.error_message}")
+            return
+        if isinstance(event, PromptCacheMissEvent):
+            self.state.add_item("status", f"… {event.status_text}")
 
     def _discard_pending_tool_tracking(self) -> None:
         """Drop per-call bookkeeping for calls that never started executing.

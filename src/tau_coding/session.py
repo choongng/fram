@@ -99,6 +99,7 @@ from tau_coding.project_trust import (
     TrustPrompt,
     format_trust_diagnostic,
 )
+from tau_coding.prompt_cache import PromptCacheMissDetector
 from tau_coding.prompt_templates import (
     PromptTemplate,
     expand_prompt_template_command,
@@ -507,6 +508,7 @@ class CodingSession:
         self._persisted_message_ids: set[int] = set()
         self._ended_message_ids: set[int] = set()
         self._pending_message_writes: dict[int, _PendingMessageWrite] = {}
+        self._prompt_cache_misses = PromptCacheMissDetector()
         self._attach_persistence_listener()
 
     @classmethod
@@ -1582,6 +1584,14 @@ class CodingSession:
         message = self._harness.pop_latest_steering()
         return None if message is None else message_text(message)
 
+    async def _signals_after(self, event: AgentEvent) -> AsyncIterator[CodingSessionEvent]:
+        """Yield session diagnostics that one agent event gives rise to."""
+        if isinstance(event, MessageEndEvent) and isinstance(event.message, AssistantMessage):
+            cache_miss = self._prompt_cache_misses.observe(event.message)
+            if cache_miss is not None:
+                await self._extension_runtime.emit_event(cache_miss)
+                yield cache_miss
+
     def set_model(self, model: str) -> None:
         """Switch the active model for future turns and make it the default."""
         provider = self._active_provider_config()
@@ -2322,6 +2332,8 @@ class CodingSession:
                     )
                 else:
                     yield retry_event
+                async for signal in self._signals_after(retry_event):
+                    yield signal
         finally:
             aclose = getattr(retry_events, "aclose", None)
             if aclose is not None:
@@ -3079,6 +3091,7 @@ class CodingSession:
         self._harness = replacement._harness
         self._preview_model = None
         self._preview_thinking = None
+        self._prompt_cache_misses = replacement._prompt_cache_misses
         # Detach the replacement's persistence listener so writes advance
         # this session's parent pointers, not the discarded replacement's.
         if replacement._persistence_unsubscribe is not None:
@@ -3423,6 +3436,8 @@ class CodingSession:
                     )
                 else:
                     yield event
+                async for signal in self._signals_after(event):
+                    yield signal
                 # Frontends have rendered the confirmed, expanded prompt. Name
                 # the session alongside the agent's reply instead of delaying
                 # the reply's request behind the naming request.
@@ -3486,6 +3501,8 @@ class CodingSession:
                             )
                         else:
                             yield retry_event
+                        async for signal in self._signals_after(retry_event):
+                            yield signal
                     session_event_4 = AutoRetryEndEvent(
                         success=overflow_retry_error is None,
                         attempt=1,
@@ -3554,6 +3571,8 @@ class CodingSession:
                     )
                 else:
                     yield event
+                async for signal in self._signals_after(event):
+                    yield signal
             if route_failure_message is not None:
                 async for failover_event in self._run_huggingface_route_failover(context=context):
                     yield failover_event
@@ -4071,6 +4090,9 @@ class CodingSession:
             messages,
             custom_instructions="\n\n".join(focus) or None,
         )
+        # The summary request has its own prompt, so on a single-slot server it
+        # displaces the conversation's cached prefix.
+        self._prompt_cache_misses.expect_miss()
         text_parts: list[str] = []
         final_text: str | None = None
         response_usages: list[Usage] = []

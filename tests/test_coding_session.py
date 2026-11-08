@@ -70,7 +70,12 @@ from tau_coding import (
 )
 from tau_coding import session as coding_session_module
 from tau_coding.codex_model_store import cached_codex_model_catalog, save_codex_model_catalog
-from tau_coding.events import AgentSettledEvent, QueueUpdateEvent, SessionAgentEndEvent
+from tau_coding.events import (
+    AgentSettledEvent,
+    PromptCacheMissEvent,
+    QueueUpdateEvent,
+    SessionAgentEndEvent,
+)
 from tau_coding.extensions import (
     DynamicProvider,
     OpenAICompatibleTransport,
@@ -7240,3 +7245,56 @@ async def test_dynamic_provider_rejects_unsupported_thinking_override(
         await CodingSession.load(
             _dynamic_thinking_override_config(tmp_path, thinking_level_override="max")
         )
+
+
+@pytest.mark.anyio
+async def test_session_reports_a_prompt_cache_miss_after_earlier_cache_hits(
+    tmp_path: Path,
+) -> None:
+    def reply(text: str, usage: Usage) -> list[AssistantMessageEvent]:
+        message = AssistantMessage(content=text, provider="llama", model="fake", usage=usage)
+        return [assistant_start(model="fake"), assistant_done(message=message)]
+
+    provider = FakeProvider(
+        [
+            reply("warm", Usage(input=20_000)),
+            reply("hit", Usage(input=300, cache_read=20_000)),
+            reply("miss", Usage(input=20_600)),
+        ]
+    )
+    session = await CodingSession.load(
+        _config(tmp_path, provider, JsonlSessionStorage(tmp_path / "session.jsonl"))
+    )
+
+    quiet = [
+        *(await _collect_session_events(session.prompt("one"))),
+        *(await _collect_session_events(session.prompt("two"))),
+    ]
+    third = await _collect_session_events(session.prompt("three"))
+
+    assert not any(isinstance(event, PromptCacheMissEvent) for event in quiet)
+    misses = [event for event in third if isinstance(event, PromptCacheMissEvent)]
+    assert misses == [PromptCacheMissEvent(provider="llama", model="fake", prompt_tokens=20_600)]
+
+
+@pytest.mark.anyio
+async def test_session_switch_does_not_inherit_prompt_cache_history(tmp_path: Path) -> None:
+    def reply(text: str, usage: Usage) -> list[AssistantMessageEvent]:
+        message = AssistantMessage(content=text, provider="llama", model="fake", usage=usage)
+        return [assistant_start(model="fake"), assistant_done(message=message)]
+
+    provider = FakeProvider(
+        [reply("hit", Usage(input=100, cache_read=20_000)), reply("cold", Usage(input=20_600))]
+    )
+    session = await CodingSession.load(
+        _config(tmp_path, provider, JsonlSessionStorage(tmp_path / "session.jsonl"))
+    )
+    await _collect_session_events(session.prompt("one"))
+
+    replacement = await CodingSession.load(
+        _config(tmp_path, provider, JsonlSessionStorage(tmp_path / "other.jsonl"))
+    )
+    await session._adopt_replacement(replacement, reason="branch")  # noqa: SLF001
+    events = await _collect_session_events(session.prompt("two"))
+
+    assert not any(isinstance(event, PromptCacheMissEvent) for event in events)

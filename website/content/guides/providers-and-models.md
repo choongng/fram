@@ -612,6 +612,29 @@ llama.cpp or servers that accept its fields. The built-in `llama.cpp` backend
 configured through `/local` is managed separately and does not read these
 preferences.
 
+## Prompt-cache misses
+
+Tau watches the `cache_read` count that providers report with each response.
+Once a provider and model have served part of a prompt from cache in the current
+session, a later response that reports no cache read for a prompt of at least
+8,192 tokens shows a status line such as:
+
+```text
+… Prompt cache miss: 41,250 prompt tokens reprocessed (earlier llama turns were served from cache)
+```
+
+On a hosted API this usually means the cache expired between turns and the
+prompt was billed at the full input price. On a local server with one slot, it
+usually means another request (a subagent, another Tau process, or another
+client) used the slot and evicted this session's cached prefix, so the turn ran
+as slowly as a cold start. The same signal reaches extensions and RPC clients as
+the `prompt_cache_miss` event. Providers that never report cache reads never
+show it.
+
+A compaction's own request can displace the cached prefix, so the turn after it
+is not judged, and a new or resumed session is not judged until it has seen a
+cache hit of its own.
+
 ## How credentials are resolved
 
 For a given provider, Tau uses, in order: a stored credential in

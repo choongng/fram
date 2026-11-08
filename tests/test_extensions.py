@@ -3841,3 +3841,17 @@ async def test_events_bus_cancels_async_handlers_on_reload() -> None:
     runtime.reset_for_reload()
 
     await asyncio.wait_for(cancelled.wait(), timeout=1)
+
+
+@pytest.mark.anyio
+async def test_extension_subscribes_to_prompt_cache_miss_by_name() -> None:
+    from tau_coding.events import PromptCacheMissEvent
+
+    runtime = ExtensionRuntime()
+    api = _register_inline_extension(runtime, "observer")
+    seen: list[object] = []
+    api.on("prompt_cache_miss", lambda event, context: seen.append(event))
+
+    await runtime.emit_event(PromptCacheMissEvent(provider="p", model="m", prompt_tokens=9_000))
+
+    assert len(seen) == 1
