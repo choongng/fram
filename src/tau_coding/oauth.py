@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import html
 import secrets
 import threading
 import time
@@ -528,6 +529,6 @@ def _oauth_html(message: str) -> str:
         .replace('"', "&quot;")
     )
     return (
-        f'<!doctype html><meta charset="utf-8"><title>{BRANDING.product_name} '
+        f'<!doctype html><meta charset="utf-8"><title>{html.escape(BRANDING.product_name)} '
         f"OAuth</title><p>{escaped}</p>"
     )
