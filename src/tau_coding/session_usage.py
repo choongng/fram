@@ -547,7 +547,7 @@ def render_usage_dashboard(usage: SessionUsage) -> str:
 
     return (
         f'<div class="usage-cards">{cards_html}</div>'
-        f'<p class="usage-note">Costs use {BRANDING.product_name}\'s '
+        f'<p class="usage-note">Costs use {html.escape(BRANDING.product_name)}\'s '
         "provider catalog rates. OAuth subscription "
         "estimates are API-rate equivalents, not actual subscription charges. Hover a request "
         "for exact values, select a legend item to hide a series, and use PNG to save a "

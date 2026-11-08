@@ -4,7 +4,7 @@ from collections.abc import Callable
 
 import pytest
 
-from tau_coding import branding
+from tau_coding import branding, oauth
 from tau_coding.branding import ENTRY_POINT_GROUP, Branding, load_branding
 
 
@@ -62,3 +62,9 @@ def test_entry_points_are_tried_in_name_order(monkeypatch: pytest.MonkeyPatch) -
     )
 
     assert load_branding().product_name == "Alpha"
+
+
+def test_oauth_page_escapes_the_product_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(oauth, "BRANDING", Branding(product_name="A<b>&C"))
+
+    assert "<title>A&lt;b&gt;&amp;C OAuth</title>" in oauth._oauth_html("done")

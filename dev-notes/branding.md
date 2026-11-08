@@ -14,9 +14,9 @@ without editing every message.
 | `mark` | `τ` | One-cell glyph: the prompt prefix and the terminal title |
 | `logo` | `τ = 2π` | The sidebar logo, before the version |
 
-`BRANDING` is the instance in effect. Display text in 18 `tau_coding` files
-reads it instead of spelling out "Tau". With Tau's defaults every string
-renders as before.
+`BRANDING` is the instance in effect. Display text across `tau_coding` reads it
+instead of spelling out "Tau". With Tau's defaults every string renders as
+before.
 
 ## How a distribution rebrands
 
@@ -43,13 +43,14 @@ The lookup scans installed distributions' metadata, about 19 ms including the
 ## What is not branding
 
 Names that other tools, files or services rely on stay Tau's, so by default a
-rebranded build shares configuration, sessions and extensions with Tau:
+rebranded build shares configuration, sessions and extensions with Tau. A
+distribution that wants its own home can set `TAU_HOME` before importing
+`tau_coding`:
 
 - `~/.tau`, `TAU_HOME` and the other `TAU_*` variables
 - `.tau` project folders and `[tool.tau]` extension metadata
 - OAuth originators and the Codex `User-Agent` (`tau_ai`)
 - the extension API's `tau` object, RPC source identifiers and protocol errors
-- the credentials file's error messages, which describe Tau's file format
 - `updater.py` and the update-check notice, which are about `tau-ai` on PyPI (a
   redistribution should turn these off)
 
