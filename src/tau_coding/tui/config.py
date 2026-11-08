@@ -54,7 +54,7 @@ class TuiKeybindings:
     command_palette: str = "ctrl+k"
     session_picker: str = "ctrl+r"
     queue_follow_up: str = "alt+enter"
-    insert_newline: str = "shift+enter"
+    insert_newline: str = "ctrl+j"
     accept_completion: str = "tab"
     completion_next: str = "down"
     completion_previous: str = "up"
