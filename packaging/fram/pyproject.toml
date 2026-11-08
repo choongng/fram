@@ -33,6 +33,11 @@ dependencies = [
 [project.scripts]
 fram = "fram.cli:main"
 
+# Tau reads its display name, command and marks from this (see
+# src/tau_coding/branding.py).
+[project.entry-points."tau_coding.branding"]
+fram = "fram.branding:BRANDING"
+
 [tool.hatch.version]
 path = "src/fram/__init__.py"
 
