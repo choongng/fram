@@ -23,6 +23,7 @@ from tau_coding import (
     create_write_tool,
 )
 from tau_coding.image_processing import DEFAULT_MAX_SOURCE_IMAGE_BYTES
+from tau_coding.line_anchors import anchor_hash
 from tau_coding.tools import (
     BASH_TIMEOUT_ENV_VAR,
     DEFAULT_BASH_TIMEOUT_SECONDS,
@@ -115,7 +116,10 @@ async def test_read_tool_reads_file_with_offset_and_limit(tmp_path: Path) -> Non
     result = await tool.execute("test-call", {"path": "notes.txt", "offset": 2, "limit": 1})
 
     assert result.text
-    assert result.text == "two\n\n[2 more lines in file. Use offset=3 to continue.]"
+    # Three lines: the final newline ends "three" and starts no fourth.
+    assert result.text == (
+        f"2#{anchor_hash('two')}| two\n\n[1 more lines in file. Use offset=3 to continue.]"
+    )
     assert result.details is not None
     assert result.details["path"] == str(path)
     assert isinstance(result.details["truncation"], dict)
@@ -278,7 +282,7 @@ async def test_read_tool_still_reads_large_text_files(tmp_path: Path) -> None:
 
     result = await tool.execute("test-call", {"path": "large.txt"})
 
-    assert result.text == "large text"
+    assert result.text == f"1#{anchor_hash('large text')}| large text"
 
 
 @pytest.mark.anyio
@@ -292,7 +296,7 @@ async def test_read_tool_uses_pluggable_read_operations(tmp_path: Path) -> None:
 
     result = await tool.execute("test-call", {"path": "not-local.txt"})
 
-    assert result.text == "remote text"
+    assert result.text == f"1#{anchor_hash('remote text')}| remote text"
     assert reads == [tmp_path / "not-local.txt"]
 
 
@@ -305,7 +309,9 @@ async def test_read_tool_treats_zero_offset_as_start_of_file(tmp_path: Path) -> 
     result = await tool.execute("test-call", {"path": "notes.txt", "offset": 0, "limit": 1})
 
     assert result.text
-    assert result.text == "one\n\n[3 more lines in file. Use offset=2 to continue.]"
+    assert result.text == (
+        f"1#{anchor_hash('one')}| one\n\n[2 more lines in file. Use offset=2 to continue.]"
+    )
 
 
 @pytest.mark.anyio
