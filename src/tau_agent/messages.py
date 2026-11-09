@@ -153,6 +153,11 @@ class AssistantMessageDiagnostic(WireModel):
     details: dict[str, JSONValue] | None = None
 
 
+#: The diagnostic on a turn ended at the output limit because the arguments of
+#: the tool call it was writing had started repeating one block of text.
+TOOL_CALL_LOOP_CUT = "tool_call_loop_cut"
+
+
 StopReason = Literal["stop", "length", "toolUse", "error", "aborted"]
 
 
@@ -317,3 +322,11 @@ def message_text(message: AgentMessage) -> str:
     if isinstance(message, BashExecutionMessage):
         return message.output
     return ""
+
+
+def tool_call_loop_cut(message: AssistantMessage) -> bool:
+    """Whether this turn was ended at the output limit because the arguments of
+    its tool call had started repeating."""
+    return message.stop_reason == "length" and any(
+        diagnostic.type == TOOL_CALL_LOOP_CUT for diagnostic in message.diagnostics or []
+    )

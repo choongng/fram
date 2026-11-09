@@ -30,6 +30,7 @@ from tau_agent.messages import (
     ToolCall,
     ToolResultMessage,
     UserMessage,
+    tool_call_loop_cut,
 )
 from tau_agent.provider import CancellationToken, ModelProvider
 from tau_agent.provider_events import (
@@ -212,7 +213,7 @@ async def run_agent_loop(
                     cut_note=(
                         TURN_CAP_REFUSAL
                         if final_report
-                        else _cut_tool_call_note(call)
+                        else _cut_tool_call_note(assistant, call)
                         if call is cut
                         else None
                     ),
@@ -520,19 +521,31 @@ async def _run_tool(
 RAW_ARGUMENTS = "_raw_arguments"
 
 
-def _cut_tool_call_note(call: ToolCall) -> str:
-    """The answer to `call`, the last call of a reply that ended at the output
-    limit while writing it.
+def _cut_tool_call_note(message: AssistantMessage, call: ToolCall) -> str:
+    """The answer to `call`, the last call of `message`, a reply that ended at
+    the output limit while writing it.
 
     A cut call is not run: its arguments end where the limit fell, so even ones
     that parse may be incomplete. The model is told so and how to send less.
     """
     raw = call.arguments.get(RAW_ARGUMENTS) if set(call.arguments) == {RAW_ARGUMENTS} else None
     chars = len(raw) if isinstance(raw, str) else len(json.dumps(call.arguments))
+    if tool_call_loop_cut(message):
+        what = (
+            "its arguments started repeating the same text over and over, so the reply "
+            f"was stopped after {chars} characters"
+        )
+        step = (
+            "If the file really holds this much repeated text, generate it with a "
+            "short script instead of writing it out. Otherwise send it again without "
+            "the repetition, and send less in one call"
+        )
+    else:
+        what = f"the reply reached the output limit after {chars} characters of its arguments"
+        step = "Send less in one call"
     return (
-        f"This {call.name} call was cut off: the reply reached the output limit after "
-        f"{chars} characters of its arguments. It did not run, and nothing it would have "
-        "done was done. Send less in one call: to write or edit a file, write it in "
+        f"This {call.name} call was cut off: {what}. It did not run, and nothing it "
+        f"would have done was done. {step}: to write or edit a file, write it in "
         "smaller parts, one call per part."
     )
 
