@@ -32,11 +32,30 @@ class BaseSessionEntry(BaseModel):
     timestamp: float = Field(default_factory=current_timestamp)
 
 
+MessageDelivery = Literal["prompt", "steer", "follow_up"]
+"""How a user-side message entered the run.
+
+``prompt`` started a run; ``steer`` was queued while a run was going and
+delivered after the current turn; ``follow_up`` was queued to run once the
+agent would otherwise have stopped.
+"""
+
+MessageSource = Literal["interactive", "extension"]
+"""Who wrote a user-side message: the person at the host, or an extension."""
+
+
 class MessageEntry(BaseSessionEntry):
-    """A transcript message entry."""
+    """A transcript message entry.
+
+    ``delivery`` and ``source`` record the origin of user messages written by
+    hosts that track it. Both are absent on assistant and tool-result entries
+    and on entries from older transcripts.
+    """
 
     type: Literal["message"] = "message"
     message: AgentMessage
+    delivery: MessageDelivery | None = None
+    source: MessageSource | None = None
 
 
 class CustomMessageEntry(BaseSessionEntry):
@@ -47,6 +66,8 @@ class CustomMessageEntry(BaseSessionEntry):
     content: UserContent
     display: bool = True
     details: JSONValue = None
+    delivery: MessageDelivery | None = None
+    source: MessageSource | None = None
 
 
 class ModelChangeEntry(BaseSessionEntry):

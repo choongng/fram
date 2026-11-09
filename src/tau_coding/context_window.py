@@ -22,6 +22,7 @@ DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000
 DEFAULT_COMPACTION_RESERVE_TOKENS = 16_384
 DEFAULT_COMPACTION_KEEP_RECENT_TOKENS = 20_000
 COMPACTION_SUMMARY_PREFIX = "Previous conversation summary:\n"
+OPEN_QUESTION_HEADING = "## Open Question to User"
 
 SUMMARIZATION_SYSTEM_PROMPT = (
     "You are a context summarization assistant. Your task is to read a conversation "
@@ -55,6 +56,10 @@ SUMMARIZATION_PROMPT = (
     "## Critical Context\n"
     "- [Any data, examples, or references needed to continue]\n"
     '- [Or "(none)" if not applicable]\n\n'
+    "The conversation is in chronological order. When a later message corrects, "
+    "reverses, or replaces something said earlier (a changed requirement, a retracted "
+    "plan, a revised decision, a fixed error), the later message wins: record only the "
+    "current version and do not present superseded information as still true.\n\n"
     "Keep each section concise. Preserve exact file paths, function names, and error "
     "messages."
 )
@@ -63,7 +68,11 @@ UPDATE_SUMMARIZATION_PROMPT = (
     "The messages above are NEW conversation messages to incorporate into the existing "
     "summary provided in <previous-summary> tags.\n\n"
     "Update the existing structured summary with new information. RULES:\n"
-    "- PRESERVE all existing information from the previous summary\n"
+    "- PRESERVE existing information from the previous summary unless the new messages "
+    "supersede it\n"
+    "- The new messages are later than the previous summary, and later messages win: "
+    "when they correct, reverse, or replace something in the summary, replace the old "
+    "information instead of keeping both\n"
     "- ADD new progress, decisions, and context from the new messages\n"
     '- UPDATE the Progress section: move items from "In Progress" to "Done" when '
     "completed\n"
@@ -271,6 +280,37 @@ def summarize_messages_for_compaction(messages: tuple[AgentMessage, ...]) -> str
         role = "tool" if isinstance(message, ToolResultMessage) else message.role
         lines.append(f"{index}. {role}: {_message_text(message)}")
     return "\n".join(lines)
+
+
+def unanswered_assistant_question(messages: tuple[AgentMessage, ...]) -> int | None:
+    """Return the index of an assistant question the user has not answered yet.
+
+    The question is the last assistant message whose text ends with "?", provided
+    no ``UserMessage`` follows it. Callers pass only the messages that count as a
+    reply from the person, so extension-injected turns in between do not hide
+    the question.
+    """
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if isinstance(message, UserMessage):
+            return None
+        if isinstance(message, AssistantMessage) and message.text.rstrip().endswith("?"):
+            return index
+    return None
+
+
+def with_open_question(summary: str, question: str) -> str:
+    """Append an unanswered assistant question verbatim to a compaction summary.
+
+    A summarizer paraphrases or drops the question the user is about to answer,
+    and the user's reply then arrives without the text it answers. Carrying it
+    through deterministically keeps the reply interpretable.
+    """
+    return (
+        f"{summary.rstrip()}\n\n{OPEN_QUESTION_HEADING}\n"
+        "The assistant asked this and the user has not answered yet (verbatim):\n\n"
+        f"{question.strip()}"
+    )
 
 
 def build_compaction_summary_prompt(

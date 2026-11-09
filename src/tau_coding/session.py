@@ -45,7 +45,7 @@ from tau_agent.session import (
     SessionStorage,
     ThinkingLevelChangeEntry,
 )
-from tau_agent.session.entries import SessionEntry
+from tau_agent.session.entries import MessageDelivery, MessageSource, SessionEntry
 from tau_agent.session.jsonl import entry_to_json_line
 from tau_agent.session.tree import SessionTreeError, path_to_entry
 from tau_agent.tool_history import ToolHistoryRepair, repair_tool_history
@@ -62,15 +62,19 @@ from tau_coding.codex_model_store import (
 from tau_coding.commands import CommandRegistry, CommandResult, create_default_command_registry
 from tau_coding.context import discover_project_context_with_diagnostics
 from tau_coding.context_window import (
+    COMPACTION_SUMMARY_PREFIX,
     DEFAULT_COMPACTION_KEEP_RECENT_TOKENS,
     DEFAULT_CONTEXT_WINDOW_TOKENS,
     SUMMARIZATION_SYSTEM_PROMPT,
     ContextUsageEstimate,
     auto_compaction_threshold_for_context_window,
     build_compaction_summary_prompt,
+    estimate_context_tokens,
     estimate_context_usage,
     estimate_message_tokens,
     summarize_messages_for_compaction,
+    unanswered_assistant_question,
+    with_open_question,
 )
 from tau_coding.credentials import FileCredentialStore, credentials_path
 from tau_coding.diagnostics import (
@@ -194,6 +198,12 @@ SESSION_NAME_SYSTEM_PROMPT = (
     "You write concise coding-agent session names. Reply with only a short title, "
     "maximum four words, no quotes, no punctuation-only output."
 )
+#: Characters a compaction summary is held to. The cut reserves this much for
+#: the summary before it is written, so a long summary cannot push the
+#: compacted context past the headroom the cut left.
+COMPACTION_SUMMARY_MAX_CHARS = 8_000
+COMPACTION_SUMMARY_TRUNCATED = "\n\n[Summary truncated to fit the compaction budget.]"
+COMPACTION_SUMMARY_CUT_OFF = "\n\n[Summary cut off at the output limit.]"
 TREE_RUNNING_MESSAGE = (
     f"{BRANDING.product_name} is still working. Press Escape to interrupt before using /tree."
 )
@@ -534,6 +544,7 @@ class CodingSession:
         self._ended_message_ids: set[int] = set()
         self._pending_message_writes: dict[int, _PendingMessageWrite] = {}
         self._prompt_cache_misses = PromptCacheMissDetector()
+        self._message_origins: dict[int, tuple[AgentMessage, MessageDelivery, MessageSource]] = {}
         self._attach_persistence_listener()
         self._stop_observing_queued_requests = observe_queued_requests(self._report_queued_request)
 
@@ -1536,6 +1547,7 @@ class CodingSession:
             if custom_type is not None
             else UserMessage(content=content)
         )
+        self._record_message_origin(message, delivery="steer", source="extension")
         self._harness.steer_message(message)
 
     def queue_follow_up_message(
@@ -1551,6 +1563,7 @@ class CodingSession:
             if custom_type is not None
             else UserMessage(content=content)
         )
+        self._record_message_origin(message, delivery="follow_up", source="extension")
         self._harness.follow_up_message(message)
 
     async def append_custom_entry(self, namespace: str, data: dict[str, JSONValue]) -> None:
@@ -1649,17 +1662,26 @@ class CodingSession:
 
     def clear_queued_messages(self) -> QueuedMessages:
         """Clear queued steering and follow-up messages."""
-        return self._harness.clear_queues()
+        cleared = self._harness.clear_queues()
+        for message in (*cleared.steering, *cleared.follow_up):
+            self._message_origins.pop(id(message), None)
+        return cleared
 
     def pop_latest_follow_up_message(self) -> str | None:
         """Remove and return the most recently queued follow-up message."""
         message = self._harness.pop_latest_follow_up()
-        return None if message is None else message_text(message)
+        if message is None:
+            return None
+        self._message_origins.pop(id(message), None)
+        return message_text(message)
 
     def pop_latest_steering_message(self) -> str | None:
         """Remove and return the most recently queued steering message."""
         message = self._harness.pop_latest_steering()
-        return None if message is None else message_text(message)
+        if message is None:
+            return None
+        self._message_origins.pop(id(message), None)
+        return message_text(message)
 
     async def _signals_after(self, event: AgentEvent) -> AsyncIterator[CodingSessionEvent]:
         """Yield session diagnostics that one agent event gives rise to."""
@@ -1705,6 +1727,17 @@ class CodingSession:
         )
         await self._extension_runtime.emit_event(end)
         yield end
+
+    def _record_message_origin(
+        self, message: AgentMessage, *, delivery: MessageDelivery, source: MessageSource
+    ) -> None:
+        """Remember how a user-side message entered the run until it is persisted.
+
+        The harness queues bare messages, so origin rides beside them keyed by
+        object identity. The entry keeps the message alive, which keeps its
+        id() from being reused while the record exists.
+        """
+        self._message_origins[id(message)] = (message, delivery, source)
 
     def set_model(self, model: str) -> None:
         """Switch the active model for future turns and make it the default."""
@@ -3275,7 +3308,7 @@ class CodingSession:
             plan.messages_to_summarize,
             custom_instructions=instructions,
         )
-        await self._append_compaction(
+        compaction = await self._append_compaction(
             generated.text,
             first_kept_entry_id=plan.first_kept_entry_id,
             tokens_before=tokens_before,
@@ -3285,7 +3318,7 @@ class CodingSession:
             response_provider=generated.response_provider,
         )
         return ManualCompactionResult(
-            summary=generated.text,
+            summary=compaction.summary,
             first_kept_entry_id=plan.first_kept_entry_id,
             tokens_before=tokens_before,
             estimated_tokens_after=self.context_token_estimate,
@@ -3494,13 +3527,17 @@ class CodingSession:
 
         if self._harness.is_running:
             if streaming_behavior == "steer":
-                self._harness.steer(expanded_content)
+                steer_message = UserMessage(content=expanded_content)
+                self._record_message_origin(steer_message, delivery="steer", source=source)
+                self._harness.steer_message(steer_message)
                 session_event_0 = self.queue_update_event()
                 await self._extension_runtime.emit_event(session_event_0)
                 yield session_event_0
                 return
             if streaming_behavior == "follow_up":
-                self._harness.follow_up(expanded_content)
+                follow_up_message = UserMessage(content=expanded_content)
+                self._record_message_origin(follow_up_message, delivery="follow_up", source=source)
+                self._harness.follow_up_message(follow_up_message)
                 session_event_0 = self.queue_update_event()
                 await self._extension_runtime.emit_event(session_event_0)
                 yield session_event_0
@@ -3533,6 +3570,7 @@ class CodingSession:
                 )
             else:
                 prompt_message = UserMessage(content=expanded_content)
+            self._record_message_origin(prompt_message, delivery="prompt", source=source)
             events = self._harness.prompt_message(prompt_message)
             self._invalidate_context_usage_cache()
             async for event in events:
@@ -3839,7 +3877,13 @@ class CodingSession:
         pending = self._pending_message_writes.get(message_id)
         is_retry = pending is not None
         if pending is None:
-            entry = _session_entry_for_message(parent_id=self._last_parent_id, message=message)
+            origin = self._message_origins.pop(message_id, None)
+            entry = _session_entry_for_message(
+                parent_id=self._last_parent_id,
+                message=message,
+                delivery=None if origin is None else origin[1],
+                source=None if origin is None else origin[2],
+            )
             pending = _PendingMessageWrite(message=message, entry=entry)
             self._pending_message_writes[message_id] = pending
 
@@ -4235,11 +4279,13 @@ class CodingSession:
             messages,
             custom_instructions="\n\n".join(focus) or None,
         )
+        prompt += f"\n\nKeep the whole summary under {COMPACTION_SUMMARY_MAX_CHARS} characters."
         # The summary request has its own prompt, so on a single-slot server it
         # displaces the conversation's cached prefix.
         self._prompt_cache_misses.expect_miss()
         text_parts: list[str] = []
         final_text: str | None = None
+        stop_reason: str | None = None
         response_usages: list[Usage] = []
         response_provider: str | None = None
         summary_messages: list[AgentMessage] = [UserMessage(content=prompt)]
@@ -4253,6 +4299,7 @@ class CodingSession:
                 text_parts.append(event.delta)
             elif isinstance(event, AssistantDoneEvent):
                 final_text = event.message.text
+                stop_reason = event.message.stop_reason
                 response_usages.append(event.message.usage)
                 response_provider = event.message.response_provider
             elif isinstance(event, AssistantErrorEvent):
@@ -4263,8 +4310,10 @@ class CodingSession:
         summary = (final_text if final_text is not None else "".join(text_parts)).strip()
         if not summary:
             raise RuntimeError("Compaction summarization returned an empty summary")
+        if stop_reason == "length":
+            summary += COMPACTION_SUMMARY_CUT_OFF
         return _GeneratedSummary(
-            text=summary,
+            text=_hold_summary_to_budget(summary),
             usage=sum_usage(response_usages) if response_usages else None,
             provider=self.provider_name,
             model=self.model,
@@ -4309,7 +4358,7 @@ class CodingSession:
 
         first_kept_index = _first_recent_context_index(
             rows,
-            keep_recent_tokens=DEFAULT_COMPACTION_KEEP_RECENT_TOKENS,
+            keep_recent_tokens=_keep_recent_tokens(self.auto_compact_token_threshold),
         )
         if first_kept_index <= 0:
             return None
@@ -4317,12 +4366,59 @@ class CodingSession:
         if first_kept_index >= len(rows):
             return None
 
+        first_kept_index = self._cut_for_half_threshold(rows, first_kept_index)
         replaced = rows[:first_kept_index]
         return CompactionPlan(
             first_kept_entry_id=rows[first_kept_index][0],
             replaced_entry_count=len(replaced),
             messages_to_summarize=tuple(message for _entry_id, message in replaced),
         )
+
+    def _cut_for_half_threshold(
+        self,
+        rows: tuple[tuple[str, AgentMessage], ...],
+        first_kept_index: int,
+    ) -> int:
+        """Move the cut forward until the compacted context fits half the threshold.
+
+        The kept tail alone is sized by `_keep_recent_tokens`, but the system
+        prompt, tools and summary come on top of it, so a small window could be
+        left close to the threshold and compact again a few turns later. The
+        summary does not exist yet, so it is counted at the size it is held to,
+        plus the open question carried after it for that cut. A cut only lands
+        on a message that is not a tool result, and never past the last
+        exchange: the last such message, with the user message it answers when
+        it is a reply.
+        """
+        threshold = self.auto_compact_token_threshold
+        if threshold is None or threshold <= 0:
+            return first_kept_index
+        target = threshold // 2
+        reserved = "x" * COMPACTION_SUMMARY_MAX_CHARS
+        system = self._harness.config.system
+        tools = tuple(self._harness.config.tools)
+        cuts = [
+            candidate
+            for candidate in range(first_kept_index, len(rows))
+            if rows[candidate][1].role != "toolResult"
+        ]
+        if (
+            len(cuts) >= 2
+            and rows[cuts[-1]][1].role == "assistant"
+            and rows[cuts[-1] - 1][1].role == "user"
+        ):
+            cuts.pop()
+        for index in cuts:
+            kept = tuple(message for _entry_id, message in rows[index:])
+            question = self._open_question_before(rows[index][0])
+            summary = UserMessage(
+                content=COMPACTION_SUMMARY_PREFIX
+                + (reserved if question is None else with_open_question(reserved, question))
+            )
+            total = estimate_context_tokens(system=system, messages=(summary, *kept), tools=tools)
+            if total <= target:
+                return index
+        return cuts[-1] if cuts else first_kept_index
 
     def _active_context_rows(self) -> tuple[tuple[str, AgentMessage], ...]:
         return tuple(zip(self._state.context_entry_ids, self._state.messages, strict=True))
@@ -4341,6 +4437,9 @@ class CodingSession:
         if first_kept_entry_id not in self._state.context_entry_ids:
             raise ValueError("First kept entry is not in the active context")
 
+        open_question = self._open_question_before(first_kept_entry_id)
+        if open_question is not None:
+            summary = with_open_question(summary, open_question)
         compaction = CompactionEntry(
             parent_id=self._last_parent_id,
             summary=summary,
@@ -4358,6 +4457,56 @@ class CodingSession:
         self._harness.replace_messages(self._state.messages)
         self._invalidate_context_usage_cache()
         return compaction
+
+    def _open_question_before(self, first_kept_entry_id: str) -> str | None:
+        """Return the unanswered assistant question a compaction would summarize away.
+
+        Only messages typed by the person count as an answer; custom messages
+        and user messages an extension sent are skipped. A question at or after
+        the kept boundary stays in context verbatim and needs no carrying.
+        """
+        entries_by_id = {entry.id: entry for entry in self._state.entries}
+        rows: list[tuple[int, AgentMessage]] = []
+        for index, (entry_id, message) in enumerate(self._active_context_rows()):
+            entry = entries_by_id.get(entry_id)
+            if isinstance(message, CustomMessage):
+                continue
+            if isinstance(entry, MessageEntry) and entry.source == "extension":
+                continue
+            rows.append((index, message))
+        found = unanswered_assistant_question(tuple(message for _index, message in rows))
+        if found is None:
+            return None
+        context_index, question = rows[found]
+        if context_index >= self._state.context_entry_ids.index(first_kept_entry_id):
+            return None
+        return message_text(question)
+
+
+def _keep_recent_tokens(threshold: int | None) -> int:
+    """How much recent context a compaction keeps verbatim.
+
+    A fixed amount does not fit a small window: with a 34k threshold, 20k kept
+    plus the system prompt, tools and summary is already over it, so every turn
+    would compact again and summarize only the last few messages. A quarter of the
+    threshold leaves room for the run to go on before the next compaction; the
+    floor still keeps the latest exchange.
+    """
+    if threshold is None or threshold <= 0:
+        return DEFAULT_COMPACTION_KEEP_RECENT_TOKENS
+    return min(DEFAULT_COMPACTION_KEEP_RECENT_TOKENS, max(2_000, threshold // 4))
+
+
+def _hold_summary_to_budget(summary: str) -> str:
+    """Cut a summary longer than the budget back at a line break, marked as cut."""
+    if len(summary) <= COMPACTION_SUMMARY_MAX_CHARS:
+        return summary
+    room = COMPACTION_SUMMARY_MAX_CHARS - len(COMPACTION_SUMMARY_TRUNCATED)
+    head = summary[:room]
+    line_end = head.rfind("\n")
+    if line_end > room // 2:
+        head = head[:line_end]
+    return head.rstrip() + COMPACTION_SUMMARY_TRUNCATED
 
 
 def _first_recent_context_index(
@@ -4443,7 +4592,11 @@ def is_retryable_huggingface_route_error(message: AssistantMessage) -> bool:
 
 
 def _session_entry_for_message(
-    *, parent_id: str | None, message: AgentMessage
+    *,
+    parent_id: str | None,
+    message: AgentMessage,
+    delivery: MessageDelivery | None = None,
+    source: MessageSource | None = None,
 ) -> MessageEntry | CustomMessageEntry:
     """Build the canonical persisted entry for one completed runtime message."""
     if isinstance(message, CustomMessage):
@@ -4454,8 +4607,10 @@ def _session_entry_for_message(
             content=message.content,
             display=message.display,
             details=message.details,
+            delivery=delivery,
+            source=source,
         )
-    return MessageEntry(parent_id=parent_id, message=message)
+    return MessageEntry(parent_id=parent_id, message=message, delivery=delivery, source=source)
 
 
 def _detach_missing_parents(entries: list[SessionEntry]) -> list[SessionEntry]:
