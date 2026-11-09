@@ -278,14 +278,15 @@ def provider_context(messages: list[AgentMessage]) -> list[AgentMessage]:
 
     Providers cannot consistently accept an assistant turn with no content. Tau
     persists terminal failures for diagnostics, but an empty failed or aborted
-    turn is not model context and must not poison the next request.
+    turn, or one cut off at the output limit, is not model context and must not
+    poison the next request.
     """
     replayable = tuple(
         message
         for message in messages
         if not (
             isinstance(message, AssistantMessage)
-            and message.stop_reason in {"error", "aborted"}
+            and message.stop_reason in {"error", "aborted", "length"}
             and not message.content
         )
     )

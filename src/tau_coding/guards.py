@@ -15,7 +15,7 @@ from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass
 
 from tau_agent.loop import RAW_ARGUMENTS
-from tau_agent.messages import AssistantMessage, TextContent, ToolCall
+from tau_agent.messages import AgentMessage, AssistantMessage, TextContent, ToolCall, UserMessage
 from tau_agent.tools import AgentTool, AgentToolResult
 from tau_agent.types import JSONValue
 from tau_coding.tools import NO_OUTPUT
@@ -79,6 +79,20 @@ MAX_TEXT_TOOL_CALL_FOLLOW_UPS_PER_RUN = 4
 TEXT_TOOL_CALL_NUDGE = (
     "Your last reply wrote a tool call as text, so it did not run. Make the call "
     "as a tool call, or answer without the markup."
+)
+
+#: A reply cut off at the output limit before it acted would end the run with
+#: nothing done, so the session asks once more. Bounded in a row, so a model that
+#: never acts stops, and per run over the asks whose reply made no tool call, so
+#: one that acts just enough in between stops too.
+MAX_OUTPUT_LIMIT_CONTINUATIONS = 2
+MAX_OUTPUT_LIMIT_CONTINUATIONS_PER_RUN = 6
+#: The follow-up to a cut-off reply. It doesn't say the reasoning is still there:
+#: a reply can be empty, a server can drop it on replay, and compaction can run.
+OUTPUT_LIMIT_NUDGE = (
+    "Your last reply hit the output limit before you acted. Do not start your "
+    "reasoning over or work the rest out in your head. Take the next concrete "
+    "step now with a tool call, or answer briefly."
 )
 
 #: Words that run in a shell without being a program on PATH.
@@ -210,6 +224,62 @@ class TemplateLeak:
             f"The call to send is this same call with `{self.path}` ending before "
             f"`{self.token}`, as `{quote}`."
         )
+
+
+class OutputLimitNudges:
+    """Decides when a reply cut off at the output limit gets a follow-up.
+
+    The session passes `queued`, its pending follow-ups. A steering message
+    queued beside a nudge goes first and takes the request, so the nudge's reply
+    is the turn after the loop sends it (`sent`), not the next to end; and a
+    cut-off while a nudge still waits queues no second one.
+    """
+
+    def __init__(self, queued: Callable[[], Sequence[AgentMessage]]) -> None:
+        self._queued = queued
+        self._in_a_row = 0
+        self._unanswered_this_run = 0
+        self._nudge: UserMessage | None = None
+        self._awaiting_reply = False
+
+    def reset(self) -> None:
+        """Forget the last run's counts."""
+        self._in_a_row = self._unanswered_this_run = 0
+        self._nudge = None
+        self._awaiting_reply = False
+
+    def sent(self, message: AgentMessage) -> None:
+        """Note that the loop delivered `message`."""
+        if message is self._nudge:
+            self._nudge = None
+            self._awaiting_reply = True
+
+    def after_turn(self, message: AssistantMessage) -> UserMessage | None:
+        """The follow-up to queue after `message`, if it needs one."""
+        if self._awaiting_reply:
+            self._awaiting_reply = False
+            if not message.tool_calls:
+                self._unanswered_this_run += 1
+        if message.stop_reason != "length" or message.tool_calls:
+            self._in_a_row = 0
+            return None
+        if (
+            self._waiting()
+            or self._in_a_row >= MAX_OUTPUT_LIMIT_CONTINUATIONS
+            or self._unanswered_this_run >= MAX_OUTPUT_LIMIT_CONTINUATIONS_PER_RUN
+        ):
+            return None
+        self._in_a_row += 1
+        self._nudge = UserMessage(content=OUTPUT_LIMIT_NUDGE)
+        return self._nudge
+
+    def undelivered(self) -> UserMessage | None:
+        """Take the nudge still waiting, if any, for the session to withdraw."""
+        nudge, self._nudge = self._nudge, None
+        return nudge
+
+    def _waiting(self) -> bool:
+        return self._nudge is not None and any(message is self._nudge for message in self._queued())
 
 
 class ToolCallGuards:

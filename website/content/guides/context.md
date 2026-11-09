@@ -159,6 +159,13 @@ A refusal is an ordinary tool result, so it does not invalidate the provider's
 prompt cache.
 
 
+## Replies cut off at the output limit
+
+A reply that hits the output limit before making a tool call would end the run
+with nothing done. Tau asks the model to act on its reasoning so far, up to
+twice in a row. Replies that don't act on the request count toward a limit of
+six per run.
+
 ## Malformed tool calls
 
 Some models run a chat template's control tokens, such as `<|tool_call>`, into a
