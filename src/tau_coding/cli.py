@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from functools import partial
 from os import environ
 from pathlib import Path
@@ -51,7 +51,7 @@ from tau_coding.provider_config import (
 )
 from tau_coding.provider_runtime import ClosableModelProvider, create_model_provider
 from tau_coding.rendering import PrintOutputMode, create_event_renderer
-from tau_coding.resources import TauResourcePaths
+from tau_coding.resources import ResourceDiagnostic, TauResourcePaths
 from tau_coding.rpc import RpcServer
 from tau_coding.session import (
     CodingSession,
@@ -1111,6 +1111,21 @@ async def run_openai_rpc_mode(
         await provider.aclose()
 
 
+def print_mode_diagnostic_lines(diagnostics: Iterable[ResourceDiagnostic]) -> list[str]:
+    """Return the startup diagnostics a print-mode run writes to stderr.
+
+    Project-trust notes, and any extension that failed to load: a print run
+    has no UI to show it in, and a run that silently lost an extension looks
+    like a model that ignored its tools.
+    """
+    return [
+        diagnostic.format()
+        for diagnostic in diagnostics
+        if diagnostic.kind == "project-trust"
+        or (diagnostic.kind == "extension" and diagnostic.severity == "error")
+    ]
+
+
 async def run_openai_print_mode(
     prompt: str,
     model: str | None,
@@ -1406,9 +1421,8 @@ async def run_print_mode(
     if startup_model_override:
         await session.apply_startup_model_override(model)
     session.extension_runtime.set_ui_bridge(StderrUiBridge())
-    for diagnostic in session.resource_diagnostics:
-        if diagnostic.kind == "project-trust":
-            typer.echo(diagnostic.format(), err=True)
+    for line in print_mode_diagnostic_lines(session.resource_diagnostics):
+        typer.echo(line, err=True)
     if session.thinking_config_warning is not None:
         typer.echo(f"warning thinking: {session.thinking_config_warning}", err=True)
     await session.emit_pending_session_start()
