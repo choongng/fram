@@ -1658,6 +1658,11 @@ def _model_base_url(provider: ProviderConfig, model: str | None = None) -> str:
     return metadata.base_url if metadata is not None and metadata.base_url else provider.base_url
 
 
+def provider_model_endpoint(provider: ProviderConfig, model: str | None = None) -> str:
+    """The base URL a model is served from, as a model profile's endpoint."""
+    return _model_base_url(provider, model).rstrip("/")
+
+
 def _model_headers(provider: ProviderConfig, model: str | None = None) -> dict[str, str]:
     selected_model = model or provider.default_model
     metadata = _metadata_for_model(provider, selected_model)

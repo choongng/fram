@@ -227,6 +227,15 @@ streams but does not emit the probe tool receives a compatibility warning rather
 than a connectivity failure. Use a tool-capable instruct model and the server's
 required chat-template options when tool calls are unavailable.
 
+## Model profiles
+
+Local models vary widely in speed and in how many characters they write per
+token. Run `tau probe --provider <name> --model <model>` once after you start a
+server. It measures decode and prefill speed and checks whether the server
+honours `max_tokens`. Tau then refines the profile after every response. View it
+with `tau profile show`, or as JSON with `tau profile show --json`. See [Model
+profiles](/reference/cli/#model-profiles).
+
 ## Reset
 
 Reset removes only Tau's llama.cpp integration settings and safe snapshot. It

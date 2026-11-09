@@ -57,6 +57,7 @@ from tau_agent.tools import AgentTool, AgentToolResult
 from tau_agent.types import JSONValue
 from tau_ai.model_catalog import ModelCatalogProvider, RuntimeModel, RuntimeModelCatalog
 from tau_ai.model_limits import ModelLimitsProvider, RuntimeModelLimits
+from tau_ai.model_profile import ModelProfile, ProfileKey
 from tau_coding.branch_summary import summarize_branch_messages_with_model
 from tau_coding.branding import BRANDING
 from tau_coding.codex_model_store import (
@@ -66,6 +67,7 @@ from tau_coding.codex_model_store import (
 from tau_coding.commands import CommandRegistry, CommandResult, create_default_command_registry
 from tau_coding.context import discover_project_context_with_diagnostics
 from tau_coding.context_window import (
+    CHARS_PER_TOKEN,
     COMPACTION_SUMMARY_PREFIX,
     DEFAULT_AUTO_COMPACT_TOKEN_CAP,
     DEFAULT_COMPACTION_KEEP_RECENT_TOKENS,
@@ -115,6 +117,7 @@ from tau_coding.history_index import (
     render_index,
     uncaptioned,
 )
+from tau_coding.model_profiles import ModelProfileStore, context_chars_per_token
 from tau_coding.models_dev_store import ModelsDevRefreshResult, refresh_models_dev_catalog
 from tau_coding.oauth import account_id_from_access_token
 from tau_coding.paths import TauPaths
@@ -144,6 +147,7 @@ from tau_coding.provider_config import (
     load_provider_settings,
     provider_default_thinking_level,
     provider_has_usable_credentials,
+    provider_model_endpoint,
     provider_model_supports_images,
     provider_thinking_config_warning,
     provider_thinking_levels,
@@ -559,6 +563,7 @@ class CodingSession:
             default=_default_thinking_level_for_active_model(self),
         )
         self._context_usage_cache: ContextUsageEstimate | None = None
+        self._model_profile_cache: ModelProfile | None = None
         self._session_stats_cache: tuple[SessionState, CodingSessionConfig, SessionStats] | None = (
             None
         )
@@ -1333,6 +1338,7 @@ class CodingSession:
                 system=self._harness.config.system,
                 messages=self._harness.messages,
                 tools=tuple(self._harness.config.tools),
+                chars_per_token=self._context_chars_per_token(),
             )
         return self._context_usage_cache
 
@@ -1840,6 +1846,43 @@ class CodingSession:
             self._harness.discard_follow_up(message)
             self._message_origins.pop(id(message), None)
 
+    def _record_model_profile(self, message: AssistantMessage) -> None:
+        """Fold one finished response into the served model's stored profile.
+
+        The profile is an estimate kept on the side: a failure to read or
+        write it never reaches the turn.
+        """
+        try:
+            key, paths = self._served_profile_key()
+            updated = ModelProfileStore.at(paths).record_response(key, message)
+        except Exception:
+            return
+        if updated is not None:
+            self._model_profile_cache = updated
+
+    def _served_profile_key(self) -> tuple[ProfileKey, TauPaths]:
+        model = self._harness.config.model
+        provider = self._active_provider_config()
+        endpoint = provider_model_endpoint(provider, model) if provider is not None else ""
+        paths = self._resource_paths.paths or TauPaths(home=self._resource_paths.root)
+        return ProfileKey(provider=self._provider_name, endpoint=endpoint, model=model), paths
+
+    def _served_model_profile(self) -> ModelProfile | None:
+        """The served model's stored profile, None when it cannot be read."""
+        try:
+            key, paths = self._served_profile_key()
+            cached = self._model_profile_cache
+            if cached is not None and cached.key == key:
+                return cached
+            self._model_profile_cache = ModelProfileStore.at(paths).get(key)
+        except Exception:
+            return None
+        return self._model_profile_cache
+
+    def _context_chars_per_token(self) -> float:
+        """Characters a token for this session's context estimates."""
+        return context_chars_per_token(self._served_model_profile())
+
     async def _signals_after(self, event: AgentEvent) -> AsyncIterator[CodingSessionEvent]:
         """Yield session diagnostics that one agent event gives rise to."""
         if isinstance(event, AgentStartEvent):
@@ -1850,6 +1893,7 @@ class CodingSession:
         if isinstance(event, AgentEndEvent):
             self._drop_undelivered_nudge()
         if isinstance(event, MessageEndEvent) and isinstance(event.message, AssistantMessage):
+            self._record_model_profile(event.message)
             cache_miss = self._prompt_cache_misses.observe(event.message)
             if cache_miss is not None:
                 await self._extension_runtime.emit_event(cache_miss)
@@ -4567,6 +4611,7 @@ class CodingSession:
                 system=system,
                 messages=tuple(candidate),
                 tools=tuple(tools),
+                chars_per_token=self._context_chars_per_token(),
             )
             if needed + CONTINUATION_SUMMARY_OUTPUT_TOKENS <= self.context_window_tokens:
                 messages = candidate
@@ -4711,6 +4756,7 @@ class CodingSession:
         first_kept_index = _first_recent_context_index(
             rows,
             keep_recent_tokens=_keep_recent_tokens(self.auto_compact_token_threshold),
+            chars_per_token=self._context_chars_per_token(),
         )
         if first_kept_index <= 0:
             return None
@@ -4767,7 +4813,12 @@ class CodingSession:
                 content=COMPACTION_SUMMARY_PREFIX
                 + (reserved if question is None else with_open_question(reserved, question))
             )
-            total = estimate_context_tokens(system=system, messages=(summary, *kept), tools=tools)
+            total = estimate_context_tokens(
+                system=system,
+                messages=(summary, *kept),
+                tools=tools,
+                chars_per_token=self._context_chars_per_token(),
+            )
             if total <= target:
                 return index
         return cuts[-1] if cuts else first_kept_index
@@ -4959,6 +5010,7 @@ def _first_recent_context_index(
     rows: tuple[tuple[str, AgentMessage], ...],
     *,
     keep_recent_tokens: int,
+    chars_per_token: float = CHARS_PER_TOKEN,
 ) -> int:
     if keep_recent_tokens <= 0:
         return len(rows)
@@ -4967,7 +5019,7 @@ def _first_recent_context_index(
     candidate_index: int | None = None
     for index in range(len(rows) - 1, -1, -1):
         _entry_id, message = rows[index]
-        accumulated_tokens += estimate_message_tokens(message)
+        accumulated_tokens += estimate_message_tokens(message, chars_per_token)
         if accumulated_tokens >= keep_recent_tokens:
             candidate_index = index
             break
