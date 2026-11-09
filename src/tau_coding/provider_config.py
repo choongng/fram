@@ -43,6 +43,7 @@ from tau_coding.provider_catalog import (
 from tau_coding.thinking import (
     DEFAULT_THINKING_LEVEL,
     THINKING_LEVELS,
+    UPSTREAM_THINKING_LEVEL,
     ThinkingLevel,
     ThinkingParameter,
     anthropic_thinking_budget_for_level,
@@ -1529,7 +1530,39 @@ def provider_thinking_levels(
     *,
     model: str | None = None,
 ) -> tuple[ThinkingLevel, ...]:
-    """Return thinking levels supported by a provider/model pair."""
+    """Return thinking levels supported by a provider/model pair.
+
+    Every model with levels also offers ``default`` first, which defers the
+    choice upstream (see :func:`resolve_upstream_thinking_level`).
+    """
+    levels = _concrete_thinking_levels(provider, model=model)
+    return (UPSTREAM_THINKING_LEVEL, *levels) if levels else ()
+
+
+def resolve_upstream_thinking_level(
+    provider: ProviderConfig,
+    *,
+    model: str | None,
+    thinking_level: ThinkingLevel | None,
+) -> ThinkingLevel | None:
+    """Resolve ``default`` to the provider catalog's ``thinking_default``.
+
+    Returns ``None`` when the catalog names no default the model supports,
+    meaning the request carries no thinking setting and the server decides.
+    Any other level passes through unchanged.
+    """
+    if thinking_level != UPSTREAM_THINKING_LEVEL:
+        return thinking_level
+    if provider.thinking_default in _concrete_thinking_levels(provider, model=model):
+        return provider.thinking_default
+    return None
+
+
+def _concrete_thinking_levels(
+    provider: ProviderConfig,
+    *,
+    model: str | None = None,
+) -> tuple[ThinkingLevel, ...]:
     selected_model = model or provider.default_model
     metadata = _metadata_for_model(provider, selected_model)
     if metadata is not None and metadata.reasoning is False:
@@ -1747,7 +1780,7 @@ def provider_default_thinking_level(
     model: str | None = None,
 ) -> ThinkingLevel | None:
     """Return the preferred thinking level for a provider/model pair."""
-    levels = provider_thinking_levels(provider, model=model)
+    levels = _concrete_thinking_levels(provider, model=model)
     if not levels:
         return None
     if provider.thinking_default in levels:
@@ -1777,9 +1810,14 @@ def resolve_startup_thinking_level(
     the model does not support raises :class:`ProviderConfigError` instead of
     silently falling back.
 
+    ``default`` never raises: it sends no thinking setting, which every model
+    accepts.
+
     Returns ``None`` when the model has no configurable thinking levels.
     """
     levels = provider_thinking_levels(provider, model=model)
+    if cli_override == UPSTREAM_THINKING_LEVEL and not levels:
+        return None
     if cli_override is not None:
         if not levels:
             raise ProviderConfigError(f"Thinking modes are unavailable for {provider.name}:{model}")
@@ -1813,6 +1851,10 @@ def openai_compatible_config_from_provider(
     base_url = _model_base_url(provider, selected_model)
     if provider.name == DEFAULT_PROVIDER_NAME and provider.api_key_env == "OPENAI_API_KEY":
         base_url = environ.get("OPENAI_BASE_URL", base_url)
+    requested_level = thinking_level
+    thinking_level = resolve_upstream_thinking_level(
+        provider, model=selected_model, thinking_level=requested_level
+    )
     reasoning_effort = _reasoning_effort_from_provider(
         provider,
         model=selected_model,
@@ -1841,6 +1883,7 @@ def openai_compatible_config_from_provider(
             model=selected_model,
             thinking_level=thinking_level,
         ),
+        omit_reasoning=requested_level == UPSTREAM_THINKING_LEVEL and thinking_level is None,
         cache_prompt=provider.cache_prompt,
         id_slot_count=provider.id_slot_count,
     )
@@ -1856,6 +1899,10 @@ def anthropic_config_from_provider(
     """Build Anthropic runtime config from durable settings."""
     api_key = _api_key_from_provider(provider, credential_reader=credential_reader)
     selected_model = model or provider.default_model
+    # An unresolved default sends no budget or effort, leaving the API's own.
+    thinking_level = resolve_upstream_thinking_level(
+        provider, model=selected_model, thinking_level=thinking_level
+    )
     thinking_budget_tokens = _anthropic_thinking_budget_from_provider(
         provider,
         model=selected_model,

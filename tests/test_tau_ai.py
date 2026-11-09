@@ -617,6 +617,48 @@ async def test_zai_provider_serializes_thinking_protocol(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    "thinking_format", ["openai", "qwen", "qwen-chat-template", "deepseek", "zai", "together"]
+)
+async def test_omit_reasoning_sends_no_thinking_field(thinking_format: str) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            text='data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n',
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(
+            OpenAICompatibleConfig(
+                api_key="test-key",
+                base_url="http://localhost:8080/v1",
+                thinking_format=thinking_format,
+                omit_reasoning=True,
+            ),
+            client=client,
+        )
+        await _collect(
+            provider.stream_response(
+                model="local", system="You are Tau.", messages=[UserMessage(content="Hi")], tools=[]
+            )
+        )
+
+    payload = loads(requests[0].content)
+    for field in (
+        "reasoning_effort",
+        "reasoning",
+        "thinking",
+        "enable_thinking",
+        "chat_template_kwargs",
+    ):
+        assert field not in payload, field
+
+
+@pytest.mark.anyio
 async def test_unsupported_reasoning_effort_guard_remains_for_openai_format() -> None:
     requests: list[httpx.Request] = []
 

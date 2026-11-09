@@ -237,10 +237,14 @@ Some models can spend extra effort reasoning before answering. Tau exposes a
 thinking level you can cycle:
 
 ```text
-off → minimal → low → medium → high → xhigh → max
+default → off → minimal → low → medium → high → xhigh → max
 ```
 
-- **Shift+Tab** cycles the thinking level (default is `medium`).
+`default` leaves the choice downstream: Tau uses the provider catalog's
+`thinking_default` if the model supports it, and otherwise sends no thinking
+setting so the server decides.
+
+- **Shift+Tab** cycles the thinking level (Tau starts at `medium`).
 - **Ctrl+T** toggles whether reasoning tokens are shown (hidden by default).
   Reasoning blocks are saved with the assistant response, so their original
   positions and visibility toggle are restored when you resume a session.

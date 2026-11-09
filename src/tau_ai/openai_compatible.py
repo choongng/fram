@@ -184,6 +184,7 @@ class OpenAICompatibleProvider:
             compat=self._config.compat,
             max_tokens=self._config.max_tokens,
             include_reasoning_effort_none=self._config.include_reasoning_effort_none,
+            omit_reasoning=self._config.omit_reasoning,
             supports_images=self._config.supports_images,
             prompt_cache_key=cache_key,
             cache_prompt=self._config.cache_prompt,
@@ -901,6 +902,7 @@ def _build_chat_payload(
     compat: Mapping[str, JSONValue] | None = None,
     max_tokens: int | None = None,
     include_reasoning_effort_none: bool = False,
+    omit_reasoning: bool = False,
     supports_images: bool = False,
     prompt_cache_key: str | None = None,
     cache_prompt: bool = False,
@@ -938,16 +940,17 @@ def _build_chat_payload(
     openrouter_provider = resolved_compat.get("openrouterProvider")
     if isinstance(openrouter_provider, dict):
         payload["provider"] = openrouter_provider
-    _apply_chat_reasoning(
-        payload,
-        reasoning_effort=(
-            reasoning_effort if supports_reasoning_effort or thinking_format == "zai" else None
-        ),
-        reasoning_effort_parameter=reasoning_effort_parameter,
-        thinking_format=thinking_format,
-        include_reasoning_effort_none=include_reasoning_effort_none,
-        supports_reasoning_effort=supports_reasoning_effort,
-    )
+    if not omit_reasoning:
+        _apply_chat_reasoning(
+            payload,
+            reasoning_effort=(
+                reasoning_effort if supports_reasoning_effort or thinking_format == "zai" else None
+            ),
+            reasoning_effort_parameter=reasoning_effort_parameter,
+            thinking_format=thinking_format,
+            include_reasoning_effort_none=include_reasoning_effort_none,
+            supports_reasoning_effort=supports_reasoning_effort,
+        )
     if tools:
         payload["tools"] = [_tool_to_openai(tool) for tool in tools]
         if resolved_compat.get("zaiToolStream") is True:

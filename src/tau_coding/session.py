@@ -155,6 +155,7 @@ from tau_coding.provider_config import (
     provider_thinking_unavailable_reason,
     resolve_provider_selection,
     resolve_startup_thinking_level,
+    resolve_upstream_thinking_level,
     save_default_provider_model,
     save_provider_thinking_level,
     toggle_saved_scoped_model,
@@ -221,6 +222,7 @@ from tau_coding.system_prompt import (
 from tau_coding.thinking import (
     DEFAULT_THINKING_LEVEL,
     THINKING_LEVELS,
+    UPSTREAM_THINKING_LEVEL,
     ThinkingLevel,
     next_thinking_level,
     normalize_thinking_level,
@@ -1932,7 +1934,10 @@ class CodingSession:
         provider = self._active_provider_config() or self._runtime_provider_config
         if provider is None or not provider_thinking_is_unbounded(provider, self.model):
             return None
-        return LEVEL_REASONING_CHARS.get(self._thinking_level)
+        level = resolve_upstream_thinking_level(
+            provider, model=self.model, thinking_level=self._thinking_level
+        )
+        return LEVEL_REASONING_CHARS.get(level) if level is not None else None
 
     def _served_model_limits(self) -> ServedModelLimits:
         """The served model's ratios and output cap, its profile read afresh:
@@ -2333,7 +2338,10 @@ class CodingSession:
         if not levels:
             self._preview_thinking = "off"
         elif self.thinking_level not in levels:
-            self._preview_thinking = levels[0]
+            # The first concrete level, as at startup: `default` is opted into.
+            self._preview_thinking = next(
+                (level for level in levels if level != UPSTREAM_THINKING_LEVEL), levels[0]
+            )
         self._invalidate_runtime_model_limits()
 
     def preview_thinking_level(self, level: str) -> str:
@@ -2576,6 +2584,10 @@ class CodingSession:
         if dynamic is not None:
             model = self._active_dynamic_model
             levels = model.thinking_levels if model is not None else None
+            if override == UPSTREAM_THINKING_LEVEL and override not in (levels or ()):
+                # An extension model that does not list `default` keeps the level
+                # it starts at, the nearest thing to the provider deciding.
+                return
             if not levels:
                 raise ProviderConfigError(
                     f"Thinking modes are unavailable for {dynamic.id}:{self.model}"

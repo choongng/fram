@@ -1844,7 +1844,7 @@ async def test_session_uses_active_model_thinking_capabilities(
         )
     )
 
-    assert session.available_thinking_levels == ("off", "low", "high")
+    assert session.available_thinking_levels == ("default", "off", "low", "high")
     assert session.thinking_level == "low"
     assert session.thinking_unavailable_reason is None
     assert await session.set_thinking_level("high") == "Thinking mode: high"
@@ -1861,7 +1861,7 @@ async def test_session_uses_active_model_thinking_capabilities(
 
     session.set_model("reasoner")
 
-    assert session.available_thinking_levels == ("off", "low", "high")
+    assert session.available_thinking_levels == ("default", "off", "low", "high")
     assert session.thinking_level == "high"
     assert session.thinking_unavailable_reason is None
 
@@ -2069,6 +2069,7 @@ async def test_session_uses_codex_subscription_thinking_capabilities(
     )
 
     assert session.available_thinking_levels == (
+        "default",
         "off",
         "minimal",
         "low",
@@ -4393,7 +4394,7 @@ async def test_session_publishes_authenticated_codex_model_inventory(
     assert live.context_windows == {"astra": 500_000}
     assert live.model_metadata["astra"].name == "Astra"
     assert live.model_metadata["astra"].input == ("text", "image")
-    assert provider_thinking_levels(live, model="astra") == ("low", "high")
+    assert provider_thinking_levels(live, model="astra") == ("default", "low", "high")
 
     refreshed = ModelCatalogFakeProvider(
         [],
@@ -5948,7 +5949,7 @@ async def test_cross_provider_preview_uses_previewed_models_and_thinking_capabil
     assert "thinking_models" in (session.thinking_unavailable_reason or "")
 
     session.preview_model_choice(ModelChoice("provider-b", "beta"))
-    assert session.available_thinking_levels == ("off", "low")
+    assert session.available_thinking_levels == ("default", "off", "low")
     assert session.preview_thinking_level("low") == "Thinking mode: low"
     result = session.handle_command("/model beta")
     assert result.model_selection_provider == "provider-b"

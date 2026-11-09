@@ -62,6 +62,12 @@ class OpenAICompatibleConfig:
     compat: Mapping[str, JSONValue] = field(default_factory=dict)
     model_aliases: Mapping[str, str] = field(default_factory=dict)
     include_reasoning_effort_none: bool = False
+    omit_reasoning: bool = False
+    """Send no reasoning/thinking field at all, leaving the level to the server.
+
+    Unlike ``reasoning_effort=None``, which some thinking formats still turn
+    into an explicit "disabled" toggle.
+    """
     provider_name: str = "OpenAI-compatible provider"
     response_provider_header: str | None = None
     omit_authorization_header: bool = False

@@ -150,6 +150,7 @@ from tau_coding.system_prompt import (
 from tau_coding.thinking import (
     DEFAULT_THINKING_LEVEL,
     THINKING_LEVELS,
+    UPSTREAM_THINKING_LEVEL,
     ReasoningEffort,
     ThinkingLevel,
     ThinkingParameter,
@@ -267,6 +268,7 @@ __all__ = [
     "serialize_messages_for_compaction",
     "SUMMARIZATION_SYSTEM_PROMPT",
     "THINKING_LEVELS",
+    "UPSTREAM_THINKING_LEVEL",
     "summarize_messages_for_compaction",
     "expand_skill_command",
     "format_skill_invocation",

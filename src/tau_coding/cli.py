@@ -72,7 +72,12 @@ from tau_coding.session_export import (
 from tau_coding.session_manager import CodingSessionRecord, SessionManager, validate_session_id
 from tau_coding.session_preparation import prepare_coding_session
 from tau_coding.shell_config import load_shell_settings
-from tau_coding.thinking import THINKING_LEVELS, ThinkingLevel, normalize_thinking_level
+from tau_coding.thinking import (
+    THINKING_LEVELS,
+    UPSTREAM_THINKING_LEVEL,
+    ThinkingLevel,
+    normalize_thinking_level,
+)
 from tau_coding.tui import run_tui_app
 from tau_coding.update_check import (
     UpdateNotice,
@@ -248,7 +253,8 @@ def main(
             "-t",
             help=(
                 "Initial thinking level for this run "
-                f"({', '.join(THINKING_LEVELS)}). "
+                f"({', '.join((UPSTREAM_THINKING_LEVEL, *THINKING_LEVELS))}; default defers "
+                "to the catalog's thinking_default, else the server's own). "
                 "Overrides remembered defaults without persisting."
             ),
         ),
