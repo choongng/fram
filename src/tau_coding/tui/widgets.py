@@ -1283,7 +1283,7 @@ class TranscriptView(VerticalScroll):
                             ),
                         )
                     )
-                elif item is last_item:
+                elif item is last_item and not state.assistant_buffer:
                     pending.append((item, _hidden_thinking_line(theme)))
                 # Hidden thinking with anything after it renders no line.
                 continue
@@ -1352,8 +1352,9 @@ class TranscriptView(VerticalScroll):
         for item in state.items[self._window_start : self._window_end]:
             if item.role == "thinking" and not state.show_thinking:
                 # The status line belongs to thinking that is still going;
-                # hidden thinking that anything has followed leaves no line.
-                if item is last_item:
+                # hidden thinking that anything has followed leaves no line,
+                # including an answer still streaming and not yet an item.
+                if item is last_item and not state.assistant_buffer:
                     line = _hidden_thinking_line(theme)
                     widgets.append(line)
                     self._item_widgets[id(item)] = line
