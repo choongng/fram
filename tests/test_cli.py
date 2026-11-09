@@ -21,6 +21,7 @@ from tau_coding.provider_config import (
 )
 from tau_coding.rendering import PrintOutputMode
 from tau_coding.resources import TauResourcePaths
+from tau_coding.session_recall import LateRecallSource, create_history_tool
 from tau_coding.skills import load_skills
 from tau_coding.system_prompt import (
     BuildSystemPromptOptions,
@@ -755,11 +756,17 @@ async def test_run_print_mode_prints_final_assistant_text(
     assert provider.calls[0][1] == build_system_prompt(
         BuildSystemPromptOptions(
             cwd=tmp_path,
-            tools=create_coding_tools(cwd=tmp_path),
+            tools=[*create_coding_tools(cwd=tmp_path), create_history_tool(LateRecallSource())],
             skills=load_skills(resource_paths),
         )
     )
-    assert [tool.name for tool in provider.calls[0][3]] == ["read", "write", "edit", "bash"]
+    assert [tool.name for tool in provider.calls[0][3]] == [
+        "read",
+        "write",
+        "edit",
+        "bash",
+        "history",
+    ]
 
 
 @pytest.mark.anyio
@@ -820,7 +827,7 @@ async def test_run_print_mode_system_command_prints_prompt_without_provider_call
     inspection = build_system_prompt_inspection(
         BuildSystemPromptOptions(
             cwd=tmp_path,
-            tools=create_coding_tools(cwd=tmp_path),
+            tools=[*create_coding_tools(cwd=tmp_path), create_history_tool(LateRecallSource())],
             skills=load_skills(TauResourcePaths(root=tmp_path / "resources", agents_root=None)),
         )
     )

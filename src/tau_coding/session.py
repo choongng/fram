@@ -165,6 +165,15 @@ from tau_coding.session_manager import (
     SessionManager,
     normalize_session_name,
 )
+from tau_coding.session_recall import (
+    REFS_MAX_CHARS,
+    LateRecallSource,
+    NumberedEntry,
+    RecalledBranch,
+    RecallSource,
+    create_history_tool,
+    numbered_branch,
+)
 from tau_coding.session_stats import SessionStats, calculate_session_stats
 from tau_coding.skills import Skill, expand_skill_command, load_skills_with_diagnostics
 from tau_coding.system_prompt import (
@@ -545,6 +554,7 @@ class CodingSession:
         self._ended_message_ids: set[int] = set()
         self._pending_message_writes: dict[int, _PendingMessageWrite] = {}
         self._prompt_cache_misses = PromptCacheMissDetector()
+        self._recall_source = LateRecallSource()
         self._message_origins: dict[int, tuple[AgentMessage, MessageDelivery, MessageSource]] = {}
         self._attach_persistence_listener()
         self._stop_observing_queued_requests = observe_queued_requests(self._report_queued_request)
@@ -753,13 +763,15 @@ class CodingSession:
         image_support = ImageSupportState(
             supported=_configured_model_supports_images(config, active_model)
         )
+        recall_source = LateRecallSource()
         base_tools = (
             config.tools
             if config.tools is not None
-            else create_coding_tools(
+            else _default_tools(
                 cwd=config.cwd,
                 shell_command_prefix=config.shell_command_prefix,
                 image_support=image_support,
+                recall_source=recall_source,
             )
         )
         tools = _filter_tools(
@@ -827,6 +839,8 @@ class CodingSession:
             project_trust_resolution=trust_resolution,
         )
         harness.config.after_tool_call = session._after_tool_call
+        session._recall_source = recall_source
+        recall_source.bind(session.recall_branch)
         if config.owns_initial_provider:
             # Ownership starts before any repair/discovery work so every
             # failure path has exactly one closer for the candidate.
@@ -1471,12 +1485,16 @@ class CodingSession:
             result,
             tool_name=tool_name,
             buffer_dir=buffer_dir if buffer_dir is not None else default_buffer_dir(),
-            limits=BufferLimits.for_context_window(
-                self.context_window_tokens, self._config.tool_result_inline_tokens
-            ),
+            limits=self._buffer_limits(),
             first_line=first_line,
             source_path=source_path,
             output_name=output_name if buffer_dir is not None else None,
+        )
+
+    def _buffer_limits(self) -> BufferLimits:
+        """How much of a tool result is shown inline, for the current model."""
+        return BufferLimits.for_context_window(
+            self.context_window_tokens, self._config.tool_result_inline_tokens
         )
 
     @property
@@ -2749,10 +2767,11 @@ class CodingSession:
         base_tools = (
             self._config.tools
             if self._config.tools is not None
-            else create_coding_tools(
+            else _default_tools(
                 cwd=self._config.cwd,
                 shell_command_prefix=self._config.shell_command_prefix,
                 image_support=self._image_support,
+                recall_source=self._recall_source,
             )
         )
         staged_tools = _filter_tools(
@@ -3344,6 +3363,11 @@ class CodingSession:
         self._owned_providers.extend(replacement._owned_providers)
         replacement._owned_providers.clear()
         self._image_support = replacement._image_support
+        self._message_origins = replacement._message_origins
+        # The adopted tools read history through the replacement's source;
+        # point it at this session, which outlives the replacement object.
+        self._recall_source = replacement._recall_source
+        self._recall_source.bind(self.recall_branch)
         self._project_trust_resolution = replacement._project_trust_resolution
         self._project_trust_commit_pending = False
         self._session_start_pending = False
@@ -4029,6 +4053,20 @@ class CodingSession:
                 cwd=self.cwd,
             )
 
+    async def recall_branch(self) -> RecalledBranch:
+        """The current branch with stable `#N` references, for the history tool.
+
+        Read from the session file rather than the in-memory context, so entries
+        a compaction dropped are still there. An answer is held to the inline
+        limit, so it is never windowed after it is made.
+        """
+        file_entries = await self._read_session_entries()
+        return RecalledBranch(
+            numbered_branch(file_entries, self._state.entries),
+            self.outputs_dir,
+            max_chars=min(REFS_MAX_CHARS, self._buffer_limits().inline_chars),
+        )
+
     async def _read_session_entries(self) -> list[SessionEntry]:
         """Read stored entries, detaching roots imported from external history."""
         return _detach_missing_parents(await self._config.storage.read_all())
@@ -4538,6 +4576,24 @@ class CodingSession:
         if context_index >= self._state.context_entry_ids.index(first_kept_entry_id):
             return None
         return message_text(question)
+
+
+def _default_tools(
+    *,
+    cwd: Path,
+    shell_command_prefix: str | None,
+    image_support: ImageSupportState | None,
+    recall_source: RecallSource,
+) -> list[AgentTool]:
+    """The coding tools plus `history`, which reads this session's own file."""
+    return [
+        *create_coding_tools(
+            cwd=cwd,
+            shell_command_prefix=shell_command_prefix,
+            image_support=image_support,
+        ),
+        create_history_tool(recall_source),
+    ]
 
 
 def _keep_recent_tokens(threshold: int | None) -> int:
