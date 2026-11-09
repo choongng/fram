@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from tau_agent.messages import (
@@ -21,7 +22,13 @@ SUMMARY_MESSAGE_CHAR_LIMIT = 500
 DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000
 DEFAULT_COMPACTION_RESERVE_TOKENS = 16_384
 DEFAULT_COMPACTION_KEEP_RECENT_TOKENS = 20_000
+#: Where automatic compaction fires at the latest unless the user sets a
+#: threshold. Every call re-reads the whole context, so on a 1M-token window
+#: the window-based default (window minus the reserve) never fires and each
+#: call past here costs more than a compaction would save.
+DEFAULT_AUTO_COMPACT_TOKEN_CAP = 150_000
 COMPACTION_SUMMARY_PREFIX = "Previous conversation summary:\n"
+OPEN_QUESTION_HEADING = "## Open Question to User"
 
 SUMMARIZATION_SYSTEM_PROMPT = (
     "You are a context summarization assistant. Your task is to read a conversation "
@@ -55,6 +62,10 @@ SUMMARIZATION_PROMPT = (
     "## Critical Context\n"
     "- [Any data, examples, or references needed to continue]\n"
     '- [Or "(none)" if not applicable]\n\n'
+    "The conversation is in chronological order. When a later message corrects, "
+    "reverses, or replaces something said earlier (a changed requirement, a retracted "
+    "plan, a revised decision, a fixed error), the later message wins: record only the "
+    "current version and do not present superseded information as still true.\n\n"
     "Keep each section concise. Preserve exact file paths, function names, and error "
     "messages."
 )
@@ -63,7 +74,11 @@ UPDATE_SUMMARIZATION_PROMPT = (
     "The messages above are NEW conversation messages to incorporate into the existing "
     "summary provided in <previous-summary> tags.\n\n"
     "Update the existing structured summary with new information. RULES:\n"
-    "- PRESERVE all existing information from the previous summary\n"
+    "- PRESERVE existing information from the previous summary unless the new messages "
+    "supersede it\n"
+    "- The new messages are later than the previous summary, and later messages win: "
+    "when they correct, reverse, or replace something in the summary, replace the old "
+    "information instead of keeping both\n"
     "- ADD new progress, decisions, and context from the new messages\n"
     '- UPDATE the Progress section: move items from "In Progress" to "Done" when '
     "completed\n"
@@ -177,6 +192,47 @@ def auto_compaction_threshold_for_context_window(context_window_tokens: int) -> 
     return max(1, context_window_tokens - DEFAULT_COMPACTION_RESERVE_TOKENS)
 
 
+def parse_auto_compaction_threshold(value: str, context_window_tokens: int | None) -> int | None:
+    """Parse a user-supplied automatic compaction threshold.
+
+    ``value`` is a whole token count (``"50000"``), a whole percentage of the
+    context window (``"80%"``), or ``"off"``. Returns the threshold in tokens,
+    or ``None`` for ``off``. Raises ``ValueError`` with a user-facing message for
+    malformed or out-of-range values: a threshold must be at least one token and
+    no larger than the context window. ``context_window_tokens`` is ``None`` when
+    no catalog declares the model's window: any token count is then taken as
+    given, and a percentage is refused.
+    """
+    text = value.strip()
+    if text.lower() == "off":
+        return None
+    if context_window_tokens is None:
+        usage = (
+            "Expected a token count or 'off' (a percentage needs the model's context "
+            "window, which no catalog declares)."
+        )
+    else:
+        usage = (
+            f"Expected a token count (1-{context_window_tokens}), a percentage of the "
+            "context window (1%-100%), or 'off'."
+        )
+    is_percent = text.endswith("%")
+    digits = text[:-1] if is_percent else text
+    sign = digits[:1] if digits[:1] in ("-", "+") else ""
+    if not digits[len(sign) :].isdigit() or not digits[len(sign) :].isascii():
+        raise ValueError(f"Invalid auto-compact threshold: {value!r}. {usage}")
+    number = int(digits)
+    if is_percent:
+        if context_window_tokens is None or not 1 <= number <= 100:
+            raise ValueError(f"Auto-compact percentage out of range: {value}. {usage}")
+        tokens = context_window_tokens * number // 100
+    else:
+        tokens = number
+    if tokens < 1 or (context_window_tokens is not None and tokens > context_window_tokens):
+        raise ValueError(f"Auto-compact threshold out of range: {value}. {usage}")
+    return tokens
+
+
 def provider_context_tokens(message: AssistantMessage) -> int:
     """Return the provider-reported context represented by an assistant response."""
     usage = message.usage
@@ -273,14 +329,52 @@ def summarize_messages_for_compaction(messages: tuple[AgentMessage, ...]) -> str
     return "\n".join(lines)
 
 
+def unanswered_assistant_question(messages: tuple[AgentMessage, ...]) -> int | None:
+    """Return the index of an assistant question the user has not answered yet.
+
+    The question is the last assistant message whose text ends with "?", provided
+    no ``UserMessage`` follows it. Callers pass only the messages that count as a
+    reply from the person, so extension-injected turns in between do not hide
+    the question.
+    """
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if isinstance(message, UserMessage):
+            return None
+        if isinstance(message, AssistantMessage) and message.text.rstrip().endswith("?"):
+            return index
+    return None
+
+
+def with_open_question(summary: str, question: str) -> str:
+    """Append an unanswered assistant question verbatim to a compaction summary.
+
+    A summarizer paraphrases or drops the question the user is about to answer,
+    and the user's reply then arrives without the text it answers. Carrying it
+    through deterministically keeps the reply interpretable.
+    """
+    return (
+        f"{summary.rstrip()}\n\n{OPEN_QUESTION_HEADING}\n"
+        "The assistant asked this and the user has not answered yet (verbatim):\n\n"
+        f"{question.strip()}"
+    )
+
+
 def build_compaction_summary_prompt(
     messages: tuple[AgentMessage, ...],
     *,
     custom_instructions: str | None = None,
+    refs: Sequence[int] | None = None,
 ) -> str:
-    """Build the model prompt Tau uses to summarize compacted history."""
+    """Build the model prompt Tau uses to summarize compacted history.
+
+    `refs`, one per message, label the messages by their `#N` references
+    instead of by position.
+    """
     previous_summary, new_messages = _split_previous_compaction_summary(messages)
-    conversation = serialize_messages_for_compaction(new_messages)
+    if refs is not None and previous_summary is not None:
+        refs = refs[1:]
+    conversation = serialize_messages_for_compaction(new_messages, refs=refs)
     prompt = f"<conversation>\n{conversation}\n</conversation>\n\n"
     base_prompt = (
         UPDATE_SUMMARIZATION_PROMPT if previous_summary is not None else SUMMARIZATION_PROMPT
@@ -296,14 +390,21 @@ def build_compaction_summary_prompt(
     return f"{prompt}{base_prompt}"
 
 
-def serialize_messages_for_compaction(messages: tuple[AgentMessage, ...]) -> str:
-    """Serialize provider-neutral messages for the compaction summarizer."""
+def serialize_messages_for_compaction(
+    messages: tuple[AgentMessage, ...], *, refs: Sequence[int] | None = None
+) -> str:
+    """Serialize provider-neutral messages for the compaction summarizer.
+
+    Each message is labelled `ref=#N` from `refs` when given, else
+    `index=` its position from 1.
+    """
     if not messages:
         return "(no new messages)"
 
     lines: list[str] = []
     for index, message in enumerate(messages, start=1):
-        attributes = f"index={index} role={message.role}"
+        label = f"ref=#{refs[index - 1]}" if refs is not None else f"index={index}"
+        attributes = f"{label} role={message.role}"
         if isinstance(message, ToolResultMessage):
             attributes += f" name={message.tool_name} error={str(message.is_error).lower()}"
         lines.append(f"<message {attributes}>")
@@ -351,3 +452,56 @@ def _split_previous_compaction_summary(
         return None, messages
 
     return text.removeprefix(COMPACTION_SUMMARY_PREFIX), messages[1:]
+
+
+CONTINUATION_SUMMARY_REQUEST = (
+    "[Context compaction, from the harness, not the user] The conversation above is "
+    "about to be compacted. Do not call a tool or continue the work. Reply only "
+    "with the summary described below.\n\n"
+    "The entries up to and including #{last_ref} will be replaced by your summary and "
+    "the index that follows. Everything after #{last_ref} stays in context verbatim, so "
+    "do not summarize it. Where a detail is long (a log, a diff, a file's contents), "
+    "cite its #N reference or output file instead of copying it: the history tool and "
+    "the files can recover it. The harness puts the index below in front of your "
+    "summary, so do not copy it or any earlier index into the summary. "
+    "Ranges marked (no caption) get the captions you write.\n\n"
+    "{index}\n\n"
+    "{caption_request}"
+    "{format_prompt}"
+)
+
+
+def build_continuation_summary_request(
+    *,
+    last_ref: int,
+    index: str,
+    previous_summary: bool,
+    custom_instructions: str | None = None,
+    caption_request: str = "",
+) -> str:
+    """The user message that asks the live conversation to summarize itself.
+
+    Sent after the conversation's own cached messages, so the transcript is a
+    cache read and only this message and the summary are new.
+    """
+    format_prompt = (
+        UPDATE_SUMMARIZATION_PROMPT.replace(
+            "The messages above are NEW conversation messages to incorporate into the "
+            "existing summary provided in <previous-summary> tags.",
+            "The conversation above begins with the previous summary; fold the entries "
+            "after it, up to the boundary, into it.",
+        )
+        if previous_summary
+        else SUMMARIZATION_PROMPT
+    )
+    instructions = custom_instructions.strip() if custom_instructions is not None else ""
+    if instructions:
+        format_prompt = f"{format_prompt}\n\nAdditional focus: {instructions}"
+    return CONTINUATION_SUMMARY_REQUEST.format(
+        last_ref=last_ref,
+        index=index or "(No index: the range holds no indexable turns.)",
+        caption_request=f"{caption_request}\n\nThen write the summary.\n\n"
+        if caption_request
+        else "",
+        format_prompt=format_prompt,
+    )

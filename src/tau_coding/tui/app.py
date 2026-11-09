@@ -6530,7 +6530,7 @@ class TauTuiApp(App[None]):
             await transcript.finish_assistant_message()
             if self.state.items and (
                 isinstance(event, (AutoRetryStartEvent, PromptCacheMissEvent, ProviderRetryEvent))
-                or event.reason == "overflow"
+                or event.reason in ("overflow", "threshold")
             ):
                 await transcript.append_item(
                     self.state.items[-1],

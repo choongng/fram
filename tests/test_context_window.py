@@ -3,6 +3,8 @@ from pathlib import Path
 from tau_agent import AssistantMessage, TextContent, ToolCall, ToolResultMessage, Usage, UserMessage
 from tau_agent.messages import assistant_content
 from tau_coding.context_window import (
+    SUMMARIZATION_PROMPT,
+    UPDATE_SUMMARIZATION_PROMPT,
     ContextUsageEstimate,
     auto_compaction_threshold_for_context_window,
     build_compaction_summary_prompt,
@@ -12,6 +14,7 @@ from tau_coding.context_window import (
     estimate_text_tokens,
     serialize_messages_for_compaction,
     summarize_messages_for_compaction,
+    unanswered_assistant_question,
 )
 from tau_coding.tools import create_coding_tools
 
@@ -179,3 +182,21 @@ def test_compaction_summary_prompt_updates_previous_summary() -> None:
     assert "Previous conversation summary" not in serialize_messages_for_compaction(
         (UserMessage(content="Now add tests."),)
     )
+
+
+def test_unanswered_assistant_question_finds_the_last_question_without_a_reply() -> None:
+    messages = (
+        UserMessage(content="start"),
+        AssistantMessage(content="Old question?"),
+        UserMessage(content="answer"),
+        AssistantMessage(content="New question?  \n"),
+        AssistantMessage(content="Still thinking."),
+    )
+    assert unanswered_assistant_question(messages) == 3
+    assert unanswered_assistant_question((*messages, UserMessage(content="reply"))) is None
+    assert unanswered_assistant_question(messages[:3]) is None
+
+
+def test_summarization_prompts_tell_the_model_later_messages_supersede_earlier() -> None:
+    assert "later message wins" in SUMMARIZATION_PROMPT
+    assert "later messages win" in UPDATE_SUMMARIZATION_PROMPT

@@ -105,7 +105,9 @@ class AgentHarness:
         self._messages.append(message)
 
     def replace_messages(self, messages: Sequence[AgentMessage]) -> None:
-        self._messages = list(messages)
+        # In place: a running loop holds this list and reads it afresh for each
+        # request, so a compaction between turns reaches the next request.
+        self._messages[:] = list(messages)
 
     def subscribe(self, listener: EventListener) -> Callable[[], None]:
         self._listeners.append(listener)
@@ -115,6 +117,11 @@ class AgentHarness:
                 self._listeners.remove(listener)
 
         return unsubscribe
+
+    @property
+    def cancel_requested(self) -> bool:
+        """Whether the current run has been asked to stop."""
+        return self._current_signal is not None and self._current_signal.is_cancelled()
 
     def cancel(self) -> None:
         if self._current_signal is not None:

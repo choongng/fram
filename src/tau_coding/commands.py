@@ -9,6 +9,7 @@ from typing import Protocol
 
 from tau_agent.tools import AgentTool
 from tau_coding.branding import BRANDING
+from tau_coding.context_window import parse_auto_compaction_threshold
 from tau_coding.prompt_templates import PromptTemplate
 from tau_coding.provider_catalog import BUILTIN_PROVIDER_CATALOG, builtin_provider_entry
 from tau_coding.reload import CodingReloadSummary, ReloadCategorySummary
@@ -70,7 +71,17 @@ class CommandSession(Protocol):
     def auto_compact_token_threshold(self) -> int | None: ...
 
     @property
+    def auto_compaction_enabled(self) -> bool: ...
+
+    def set_auto_compact_token_threshold(self, threshold: int) -> None: ...
+
+    def set_auto_compaction_enabled(self, enabled: bool) -> None: ...
+
+    @property
     def context_window_tokens(self) -> int: ...
+
+    @property
+    def declared_context_window_tokens(self) -> int | None: ...
 
     @property
     def thinking_level(self) -> str: ...
@@ -248,6 +259,15 @@ def create_default_command_registry() -> CommandRegistry:
             usage="/compact [instructions]",
             description="Summarize and compact active context.",
             handler=_compact_command,
+        )
+    )
+    registry.register(
+        SlashCommand(
+            name="autocompact",
+            usage="/autocompact [tokens|percent%|off]",
+            description="Show or set the automatic compaction threshold.",
+            handler=_autocompact_command,
+            search_terms=("compact", "threshold", "context"),
         )
     )
     registry.register(
@@ -439,6 +459,35 @@ def _compact_command(context: CommandContext) -> CommandResult:
         handled=True,
         compact_summary=context.args.strip(),
     )
+
+
+def _autocompact_command(context: CommandContext) -> CommandResult:
+    session = context.session
+    if not context.args.strip():
+        return CommandResult(handled=True, message=_autocompact_status(session))
+    try:
+        threshold = parse_auto_compaction_threshold(
+            context.args, session.declared_context_window_tokens
+        )
+    except ValueError as exc:
+        return CommandResult(
+            handled=True,
+            message=f"{exc}\nSetting unchanged. {_autocompact_status(session)}",
+        )
+    if threshold is None:
+        session.set_auto_compaction_enabled(False)
+    else:
+        session.set_auto_compact_token_threshold(threshold)
+    return CommandResult(handled=True, message=_autocompact_status(session))
+
+
+def _autocompact_status(session: CommandSession) -> str:
+    threshold = session.auto_compact_token_threshold
+    if not session.auto_compaction_enabled or threshold is None:
+        return "Auto-compact: off"
+    window = session.declared_context_window_tokens
+    share = f" ({threshold * 100 // window}% of {window} context window)" if window else ""
+    return f"Auto-compact threshold: {threshold} tokens{share}"
 
 
 def _export_command(context: CommandContext) -> CommandResult:

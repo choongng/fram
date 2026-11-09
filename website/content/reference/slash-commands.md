@@ -13,6 +13,7 @@ command palette with **Ctrl+K**.
 | `/session` | Show session info and stats (model, cwd, tools, skills, context) |
 | `/system` | Show the active system prompt grouped by source without adding it to context or session history |
 | `/compact [instructions]` | Summarize and compact the active context |
+| `/autocompact [tokens\|percent%\|off]` | Show or set the automatic compaction threshold for this session |
 | `/export [--format html\|jsonl] [dest]` | Export the current session |
 | `/resume [session-id]` | Resume a previous session, or open the picker |
 | `/tree` | Branch from an earlier point in the session tree |

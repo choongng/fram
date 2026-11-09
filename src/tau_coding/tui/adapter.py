@@ -154,6 +154,9 @@ class TuiEventAdapter:
         if isinstance(event, CompactionStartEvent) and event.reason == "overflow":
             self.state.add_item("status", "… Context limit reached; compacting and retrying")
             return
+        if isinstance(event, CompactionStartEvent) and event.reason == "threshold":
+            self.state.add_item("status", "… Context over the threshold; compacting mid-run")
+            return
         if isinstance(event, CompactionEndEvent) and event.reason == "overflow":
             if (event.aborted or event.error_message) and self._pending_overflow_error is not None:
                 self.state.add_assistant_error(self._pending_overflow_error)

@@ -45,16 +45,36 @@ not expected to match.
 ## Automatic compaction
 
 By default, Tau compacts automatically when the estimate gets close to the
-model's context window. It checks three moments:
+model's context window. It checks at these moments:
 
-- before a new prompt (to catch context added out-of-band),
-- after a successful turn (to compact before your next turn), and
+- when a turn is about to start: a new prompt, an extension's message that
+  starts a turn, or a continue,
+- between two turns of a run that is going on, and
 - after a context-overflow error (force compaction regardless of the local estimate,
   then retry once).
 
 When it compacts, Tau asks the model to summarize older messages, keeps a recent
 suffix of the conversation, and continues. The original session file is never
 edited — only the *active context* sent to the provider changes.
+
+Tau does not compact after a run ends. A session waiting for your reply stays
+idle: no summary request occupies the provider, and the summary is written only
+once your reply exists.
+
+The summarizer is told that the conversation is chronological and that later
+messages supersede earlier ones, so a requirement you changed or a plan the
+agent abandoned is recorded in its final form rather than alongside the version
+it replaced. If the assistant's last question to you (its last message ending in
+`?` with no reply from you after it) falls in the summarized part, Tau appends
+it verbatim to the summary under `## Open Question to User`, so the answer you
+type next still has the question it answers. Messages that extensions inject do
+not count as your reply. This applies to automatic and manual compaction alike.
+
+The summary is requested as a continuation of the conversation, so the provider
+can read the transcript from its prompt cache; a separate summary request is the
+fallback. Tau puts an index of the compacted range before the summary, citing
+stable `#N` entry references. The agent's `history` tool turns a reference back
+into the original entry, so compacted detail stays recoverable.
 
 The default threshold follows the model's context window minus a reserve. Providers
 that advertise an explicit runtime threshold can override that default. In particular,
@@ -71,14 +91,34 @@ the original context. During successful overflow recovery, the TUI shows compact
 and retry progress instead of presenting the intermediate provider rejection as a
 terminal error. The error becomes visible only if recovery cannot complete.
 
+To change it while a session is running, without restarting, use `/autocompact`:
+
+```text
+/autocompact          # show the current threshold
+/autocompact 100000   # compact once the context passes 100,000 tokens
+/autocompact 80%      # 80% of the model's context window
+/autocompact off      # turn automatic compaction off
+```
+
+The new value takes effect at the next compaction decision. Setting a value
+after `off` turns automatic compaction back on. A malformed value, a token count
+below one or above the context window, or a percentage outside 1%-100% is
+rejected with a message, and the setting stays as it was. The change applies to
+the current session only; it is not saved to your settings.
+
+Unless you set one, the threshold is at most 150,000 tokens, so a very large
+window still compacts before each call gets expensive. A value you set is capped
+at the selected model's own limit while that model is active.
+
 ## Large tool results
 
 A tool result larger than the inline limit does not go into context whole. Tau
 saves the full text to a file beside the session
-(`<session>.outputs/<tool>-<call-id>.txt`) and the model sees a window of it (the
-last 60 lines; for `read`, as many whole lines from the start as fit half the
-limit) plus the file's path, which it can page
-through with `read` or search with `grep`.
+(`<session>.outputs/<tool>-<call-id>.txt`) and the model sees a window of it
+(the last 60 lines; for `read`, as many whole lines from the start as fit half
+the limit) plus the file's path, which it can page through with `read` or search
+with `grep`. A cut `read` is not saved: it points back at the source file and
+the offset to continue from.
 
 The limit is 1/50 of the model's context window, between 1,000 and 4,000 tokens
 (at about 4 characters per token): about 16,000 characters on a 200K-token

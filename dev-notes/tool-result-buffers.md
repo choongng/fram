@@ -6,8 +6,8 @@
 transcript. Every result passes through `buffer_tool_result` from the session's
 `after_tool_call` hook:
 
-- A session with a file saves each result, small ones too, as
-  `<session>.outputs/<tool>-<call-id>.txt`.
+- A session with a file saves each result but a successful `read`, small ones
+  too, as `<session>.outputs/<tool>-<call-id>.txt`.
 - A result over the inline limit is replaced by a window of it and a marker
   naming the saved file. The window is the tail by default, and the head for
   `read`.
@@ -63,9 +63,10 @@ its prefixes on, so a copied row still matches.
 An oversized `read` is windowed by size, because a line can be a few characters
 of code or a few thousand of converted prose. The cut falls between file lines
 and the `[Read cut: ...]` note names the lines shown and the offset to continue
-from in the source file, not the saved copy, whose rows would be prefixed twice. An outline of the file's definitions and headings follows, with line
-numbers a read offset can use, so a model can jump to a section it would
-otherwise page towards and may never reach.
+from in the source file. A read is not saved: its file is already on disk, and a
+copy would carry a second set of row prefixes. An outline of the file's
+definitions and headings follows, with line numbers a read offset can use, so a
+model can jump to a section it would otherwise page towards and may never reach.
 
 Pi's read tool pages with `offset` and `limit` too. The row format, cut note and
 outline are Tau additions, and they stay in the coding layer.

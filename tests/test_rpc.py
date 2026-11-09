@@ -30,6 +30,7 @@ from tau_coding import (
 from tau_coding import cli as cli_module
 from tau_coding.provider_config import ProviderModelMetadata
 from tau_coding.rpc import RpcServer
+from tau_coding.session_recall import COMPACTION_INDEX_HEADING
 
 
 async def _session(tmp_path: Path, provider: FakeProvider) -> CodingSession:
@@ -97,6 +98,8 @@ async def test_rpc_state_matches_pi_frontend_contract(tmp_path: Path) -> None:
         "sessionId",
         "sessionName",
         "autoCompactionEnabled",
+        # Tau's own: pi frontends ignore it; set_auto_compaction_threshold sets it.
+        "autoCompactionThreshold",
         "messageCount",
         "pendingMessageCount",
     }
@@ -361,7 +364,9 @@ async def test_rpc_compaction_returns_canonical_summary_and_boundary(tmp_path: P
     response, entries_response = [json.loads(line) for line in stdout.getvalue().splitlines()]
     compaction = next(entry for entry in await storage.read_all() if entry.type == "compaction")
     boundary = response["data"]["firstKeptEntryId"]
-    assert response["data"]["summary"] == "real summary"
+    # The code-built index of the compacted entries comes first.
+    assert response["data"]["summary"].startswith(COMPACTION_INDEX_HEADING)
+    assert response["data"]["summary"].endswith("\n\nreal summary")
     assert boundary in original_ids
     assert compaction.replaces_entry_ids == []
     assert boundary != compaction.id
