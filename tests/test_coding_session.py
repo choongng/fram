@@ -7416,6 +7416,8 @@ async def test_adopted_session_binds_the_tool_result_hook_to_itself(tmp_path: Pa
 
     hook = session._harness.config.after_tool_call  # noqa: SLF001
     assert hook == session._after_tool_call  # noqa: SLF001
+    before = session._harness.config.before_tool_call  # noqa: SLF001
+    assert before == session._refuse_unproductive_call  # noqa: SLF001
     await session.aclose()
 
 

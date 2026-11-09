@@ -139,6 +139,25 @@ TAU_TOOL_RESULT_INLINE_TOKENS=8000 tau
 The environment variable wins over the settings file. The setting applies to
 sessions started after the change; the variable is read on each tool call.
 
+## Repeated tool calls
+
+A model can lock onto one tool call, or a pair it takes in turn, and repeat it
+for as long as a run lasts. Tau refuses a call that has already run twice among
+the last ten calls with the same result each time. The refusal goes back to the
+model in place of a result and says what to do instead, usually quoting what the
+call gave. A call whose result changes is never refused, and a `write` or `edit`
+clears the record of earlier results, because a read may now give something
+else. So does a `bash` command whose result differs from its last run, since it
+may have changed files too.
+
+Tau also refuses a `bash` command that runs one of the session's tools as a
+program, unless a program by that name exists on your `PATH`.
+
+Eight refusals in a row stop the run, which ends as aborted with that reason.
+
+A refusal is an ordinary tool result, so it does not invalidate the provider's
+prompt cache.
+
 ## Manual compaction
 
 Compact on demand any time:
