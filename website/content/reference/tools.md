@@ -128,6 +128,21 @@ default was hit so the model can retry with a larger value. Set
 non-numeric or non-positive value keeps 600). Commands you type yourself with
 `!` have no default timeout.
 
+## `history`
+
+Reads earlier entries of the current session branch from the session file,
+including entries a compaction removed from context.
+
+| Parameter | Description |
+|---|---|
+| `refs` | Entries by reference: `#12`, `#12-#40` or `12,15`. Returned in full, up to the size shown inline for any tool result (at most 20,000 characters); the answer names the first entry left out. |
+| `query` | Case-insensitive search over entry text and tool arguments. |
+| `tool` | Only calls and results of this tool. Combines with `query`. |
+
+`#N` is the entry's position in the session file. References appear in the index
+at the start of a compaction summary and in `history` results. A session built
+with an explicit tool list does not get this tool.
+
 ## Choosing the right tool
 
 - **`read`** — inspect files (instead of `cat`/`sed`).

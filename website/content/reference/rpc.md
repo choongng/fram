@@ -27,6 +27,20 @@ session statistics and trees, forking, last-assistant lookup, session naming, an
 discovery. Unknown commands and invalid arguments return `success: false` without stopping the
 process.
 
+Auto-compaction control has two commands. `set_auto_compaction`
+(`"enabled": true|false`) is Pi's on/off switch. `set_auto_compaction_threshold`
+is a Tau extension that changes the threshold of a running session: its
+`threshold` is a whole token count (`50000`), a percentage of the context window
+as a string (`"80%"`), or `"off"`. Values below one token, above the context
+window, or outside 1%-100% return `success: false` and leave the setting
+unchanged. The next compaction decision uses the new value. `get_state` reports
+the effective threshold as `autoCompactionThreshold` (`null` when
+auto-compaction is off).
+
+```json
+{"id":"t","type":"set_auto_compaction_threshold","threshold":"80%"}
+```
+
 Use `agent_settled`, not `agent_end`, to decide that a run is fully idle: retries, overflow
 compaction, or queued continuations can follow `agent_end`.
 

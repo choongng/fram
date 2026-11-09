@@ -205,6 +205,14 @@ that stored these as a generic `message` with `role: "custom"`, or as a Tau-v1
 user message with `custom_type`, are normalized when loaded and replay the same
 context.
 
+User-side `message` and `custom_message` entries record where they came from.
+`delivery` is `prompt` for a message that started a run, `steer` for one queued
+while the agent was working and delivered after its current turn, and
+`follow_up` for one queued to run when the agent would otherwise stop. `source`
+is `interactive` for text typed at the host and `extension` for a message an
+extension sent. Both fields are absent on assistant and tool-result entries and
+on entries written by older Tau versions.
+
 Tau's persisted entry wrappers use snake_case names such as `parent_id` and
 `custom_type`. The Pi-compatible RPC inspection API projects those fields as
 `parentId` and `customType`; see the [RPC reference](/reference/rpc/).
