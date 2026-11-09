@@ -3258,6 +3258,45 @@ async def test_message_end_while_paged_back_keeps_later_items_reachable(
 
 
 @pytest.mark.anyio
+async def test_paging_back_while_a_message_ends_leaves_it_behind_the_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tau_coding.tui import widgets as tui_widgets
+
+    monkeypatch.setattr(tui_widgets, "TRANSCRIPT_WINDOW_ITEMS", 6)
+    monkeypatch.setattr(tui_widgets, "TRANSCRIPT_WINDOW_PAGE_ITEMS", 2)
+    app = TauTuiApp(
+        FakeSession(messages=[UserMessage(content=f"m{i}\n" + "line\n" * 4) for i in range(12)])
+    )
+
+    async with app.run_test(size=(40, 30)) as pilot:
+        await pilot.pause()
+        transcript = app.query_one("#transcript", TranscriptView)
+        assert transcript._window_end == 12
+
+        live = tui_widgets.StreamingTranscriptMessageWidget(
+            ChatItem(role="assistant", text="x"), theme=tui_widgets.TAU_DARK_THEME
+        )
+        await transcript.mount(live)
+        transcript._active_message_widgets.append(live)
+
+        async def page_back_instead_of_removing() -> None:
+            await transcript._shift_window("earlier")
+
+        monkeypatch.setattr(live, "remove", page_back_instead_of_removing)
+        canonical = [ChatItem(role="assistant", text="answer")]
+        app.state.items.extend(canonical)
+        await transcript.finish_structured_assistant_message(canonical, show_thinking=False)
+
+        # Checked before the next refresh: a later redraw would hide the
+        # misplaced row, and the scroll position can page the window further.
+        assert transcript._window_end < len(app.state.items)
+        assert transcript._bottom_boundary is not None
+        texts = [widget.item.text for widget in app.query(TranscriptMessageWidget)]
+        assert "answer" not in texts
+
+
+@pytest.mark.anyio
 async def test_tool_only_message_keeps_a_paged_back_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -27,3 +27,6 @@ website/.astro/
 .firecrawl/
 # Local scratch tooling
 scripts/analyze_session.py
+
+# Local packaging lockfile
+packaging/fram/uv.lock

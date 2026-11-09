@@ -263,6 +263,34 @@ async def test_thinking_toggle_all_during_streaming(toggle_at: int, start_shown:
 
 
 @pytest.mark.anyio
+async def test_hiding_thinking_while_the_answer_streams_shows_no_status_line() -> None:
+    """The answer is only a buffer until MessageEnd, so the thinking item is
+    still last in the state while text is visibly streaming below it."""
+    app = TauTuiApp(FakeSession())
+    stream = _streamer(app)
+
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        for event in _turn_events(0, with_tool=False):
+            await stream(event)
+            if isinstance(event, MessageUpdateEvent) and isinstance(
+                event.assistant_message_event, TextDeltaEvent
+            ):
+                break
+        await pilot.pause()
+        assert app.state.assistant_buffer
+
+        await _toggle(pilot)
+        await _toggle(pilot)
+        assert _hidden_line_positions(app) == []
+
+        # The full redraw a window shift runs takes the same decision.
+        app.query_one("#transcript", TranscriptView)._redraw(scroll_end=False, preserve_window=True)
+        await pilot.pause()
+        assert _hidden_line_positions(app) == []
+
+
+@pytest.mark.anyio
 async def test_thinking_toggle_all_status_line_only_for_the_open_block() -> None:
     """Hidden, only the open block shows the status line; earlier hidden
     blocks show nothing."""
