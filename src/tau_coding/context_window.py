@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from tau_agent.messages import (
@@ -363,10 +364,17 @@ def build_compaction_summary_prompt(
     messages: tuple[AgentMessage, ...],
     *,
     custom_instructions: str | None = None,
+    refs: Sequence[int] | None = None,
 ) -> str:
-    """Build the model prompt Tau uses to summarize compacted history."""
+    """Build the model prompt Tau uses to summarize compacted history.
+
+    `refs`, one per message, label the messages by their `#N` references
+    instead of by position.
+    """
     previous_summary, new_messages = _split_previous_compaction_summary(messages)
-    conversation = serialize_messages_for_compaction(new_messages)
+    if refs is not None and previous_summary is not None:
+        refs = refs[1:]
+    conversation = serialize_messages_for_compaction(new_messages, refs=refs)
     prompt = f"<conversation>\n{conversation}\n</conversation>\n\n"
     base_prompt = (
         UPDATE_SUMMARIZATION_PROMPT if previous_summary is not None else SUMMARIZATION_PROMPT
@@ -382,14 +390,21 @@ def build_compaction_summary_prompt(
     return f"{prompt}{base_prompt}"
 
 
-def serialize_messages_for_compaction(messages: tuple[AgentMessage, ...]) -> str:
-    """Serialize provider-neutral messages for the compaction summarizer."""
+def serialize_messages_for_compaction(
+    messages: tuple[AgentMessage, ...], *, refs: Sequence[int] | None = None
+) -> str:
+    """Serialize provider-neutral messages for the compaction summarizer.
+
+    Each message is labelled `ref=#N` from `refs` when given, else
+    `index=` its position from 1.
+    """
     if not messages:
         return "(no new messages)"
 
     lines: list[str] = []
     for index, message in enumerate(messages, start=1):
-        attributes = f"index={index} role={message.role}"
+        label = f"ref=#{refs[index - 1]}" if refs is not None else f"index={index}"
+        attributes = f"{label} role={message.role}"
         if isinstance(message, ToolResultMessage):
             attributes += f" name={message.tool_name} error={str(message.is_error).lower()}"
         lines.append(f"<message {attributes}>")
@@ -437,3 +452,56 @@ def _split_previous_compaction_summary(
         return None, messages
 
     return text.removeprefix(COMPACTION_SUMMARY_PREFIX), messages[1:]
+
+
+CONTINUATION_SUMMARY_REQUEST = (
+    "[Context compaction, from the harness, not the user] The conversation above is "
+    "about to be compacted. Do not call a tool or continue the work. Reply only "
+    "with the summary described below.\n\n"
+    "The entries up to and including #{last_ref} will be replaced by your summary and "
+    "the index that follows. Everything after #{last_ref} stays in context verbatim, so "
+    "do not summarize it. Where a detail is long (a log, a diff, a file's contents), "
+    "cite its #N reference or output file instead of copying it: the history tool and "
+    "the files can recover it. The harness puts the index below in front of your "
+    "summary, so do not copy it or any earlier index into the summary. "
+    "Ranges marked (no caption) get the captions you write.\n\n"
+    "{index}\n\n"
+    "{caption_request}"
+    "{format_prompt}"
+)
+
+
+def build_continuation_summary_request(
+    *,
+    last_ref: int,
+    index: str,
+    previous_summary: bool,
+    custom_instructions: str | None = None,
+    caption_request: str = "",
+) -> str:
+    """The user message that asks the live conversation to summarize itself.
+
+    Sent after the conversation's own cached messages, so the transcript is a
+    cache read and only this message and the summary are new.
+    """
+    format_prompt = (
+        UPDATE_SUMMARIZATION_PROMPT.replace(
+            "The messages above are NEW conversation messages to incorporate into the "
+            "existing summary provided in <previous-summary> tags.",
+            "The conversation above begins with the previous summary; fold the entries "
+            "after it, up to the boundary, into it.",
+        )
+        if previous_summary
+        else SUMMARIZATION_PROMPT
+    )
+    instructions = custom_instructions.strip() if custom_instructions is not None else ""
+    if instructions:
+        format_prompt = f"{format_prompt}\n\nAdditional focus: {instructions}"
+    return CONTINUATION_SUMMARY_REQUEST.format(
+        last_ref=last_ref,
+        index=index or "(No index: the range holds no indexable turns.)",
+        caption_request=f"{caption_request}\n\nThen write the summary.\n\n"
+        if caption_request
+        else "",
+        format_prompt=format_prompt,
+    )

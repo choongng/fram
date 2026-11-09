@@ -104,6 +104,9 @@ class CompactionEntry(BaseSessionEntry):
     provider: str | None = None
     model: str | None = None
     response_provider: str | None = None
+    # The compaction index tree (tau_coding.history_index) as of this
+    # compaction, as plain JSON so the core stays free of coding-layer types.
+    index: list[dict[str, JSONValue]] | None = None
 
 
 class BranchSummaryEntry(BaseSessionEntry):

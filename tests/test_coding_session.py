@@ -92,9 +92,11 @@ from tau_coding.session import (
     SESSION_NAME_SYSTEM_PROMPT,
     _ordered_tree_entries,
     _tree_branch_indents,
+    is_context_overflow_error,
     is_retryable_huggingface_route_error,
     parse_terminal_command,
 )
+from tau_coding.session_recall import split_compaction_index
 
 
 async def _collect_session_events(session_stream: object) -> list[object]:
@@ -155,6 +157,17 @@ def _provider_http_error(
             ],
         ),
     )
+
+
+def _model_summary(summary: str) -> str:
+    """A stored compaction summary without the index code puts before it."""
+    return split_compaction_index(summary)[1]
+
+
+def _sent_summary(text: str) -> str:
+    """A replayed summary message without its index."""
+    prefix = "Previous conversation summary:\n"
+    return prefix + _model_summary(text.removeprefix(prefix))
 
 
 class SwitchableFakeProvider:
@@ -4048,7 +4061,7 @@ async def test_session_compact_persists_summary_and_rebuilds_context(
     assert result == f"Compacted {message_count_before - 1} context entries."
     assert len(compactions) == 1
     assert isinstance(compactions[0], CompactionEntry)
-    assert compactions[0].summary == "Generated session summary"
+    assert _model_summary(compactions[0].summary) == "Generated session summary"
     assert compactions[0].replaces_entry_ids == []
     assert compactions[0].first_kept_entry_id == message_entries_before[-1]
     assert compactions[0].usage == Usage(
@@ -4069,76 +4082,19 @@ async def test_session_compact_persists_summary_and_rebuilds_context(
     assert persisted_payload["first_kept_entry_id"] == message_entries_before[-1]
     assert leaves == []
     assert entries_after_compact[-1] == compactions[0]
-    assert provider.calls[1][1].startswith("You are a context summarization assistant.")
-    assert "Additional focus: Focus on session persistence." in provider.calls[1][2][0].content
+    # Asked of the live conversation: its own system prompt, its messages, then
+    # the request carrying the focus.
+    assert provider.calls[1][1] == provider.calls[0][1]
+    request = provider.calls[1][2][-1]
+    assert "Additional focus: Focus on session persistence." in request.content
+    assert "#4" in request.content
+    provider.calls[2][2][0].content = _sent_summary(provider.calls[2][2][0].content)
     _assert_messages(
         provider.calls[2][2],
         [
             UserMessage(content=("Previous conversation summary:\nGenerated session summary")),
             AssistantMessage(content="Session answer"),
             UserMessage(content="Continue."),
-        ],
-    )
-
-
-@pytest.mark.anyio
-async def test_session_auto_compacts_after_response_when_threshold_is_exceeded(
-    tmp_path: Path,
-) -> None:
-    storage = JsonlSessionStorage(tmp_path / "session.jsonl")
-    large_prompt = "Explain sessions.\n" + ("old context " * 12_000)
-    provider = FakeProvider(
-        [
-            [
-                assistant_start(model="fake"),
-                assistant_done(message=AssistantMessage(content="First answer")),
-            ],
-            [
-                assistant_start(model="fake"),
-                assistant_done(message=AssistantMessage(content="Second answer")),
-            ],
-            [
-                assistant_start(model="fake"),
-                assistant_done(message=AssistantMessage(content="Generated automatic summary")),
-            ],
-            [
-                assistant_start(model="fake"),
-                assistant_done(message=AssistantMessage(content="Third answer")),
-            ],
-        ]
-    )
-    session = await CodingSession.load(
-        CodingSessionConfig(
-            provider=provider,
-            model="fake",
-            system="You are Tau.",
-            storage=storage,
-            cwd=tmp_path,
-            auto_compact_token_threshold=1,
-        )
-    )
-    _first_events = await _collect_session_events(session.prompt(large_prompt))
-
-    _second_events = await _collect_session_events(session.prompt("Continue."))
-    _third_events = await _collect_session_events(session.prompt("Next."))
-
-    entries = await storage.read_all()
-    compactions = [entry for entry in entries if entry.type == "compaction"]
-
-    assert len(compactions) == 1
-    assert compactions[0].summary == "Generated automatic summary"
-    assert compactions[0].replaces_entry_ids == []
-    assert compactions[0].first_kept_entry_id in session.state.context_entry_ids
-    assert compactions[0].tokens_before is not None
-    assert compactions[0].tokens_before > 0
-    assert "Explain sessions." in provider.calls[2][2][0].content
-    _assert_messages(
-        provider.calls[3][2],
-        [
-            UserMessage(content=f"Previous conversation summary:\n{compactions[0].summary}"),
-            UserMessage(content="Continue."),
-            AssistantMessage(content="Second answer"),
-            UserMessage(content="Next."),
         ],
     )
 
@@ -4201,7 +4157,7 @@ async def test_session_auto_compacts_from_provider_reported_usage(
 
     compactions = [entry for entry in await storage.read_all() if entry.type == "compaction"]
     assert len(compactions) == 1
-    assert compactions[0].summary == "Provider-usage summary"
+    assert _model_summary(compactions[0].summary) == "Provider-usage summary"
 
 
 @pytest.mark.anyio
@@ -4263,7 +4219,7 @@ async def test_session_auto_compacts_with_pi_style_default_threshold(
     compactions = [entry for entry in await storage.read_all() if entry.type == "compaction"]
 
     assert len(compactions) == 1
-    assert compactions[0].summary == "Default threshold summary"
+    assert _model_summary(compactions[0].summary) == "Default threshold summary"
 
 
 @pytest.mark.anyio
@@ -4863,7 +4819,7 @@ async def test_session_compacts_and_retries_once_after_context_overflow(
     compactions = [entry for entry in entries if entry.type == "compaction"]
 
     assert len(compactions) == 1
-    assert compactions[0].summary == "Overflow recovery summary"
+    assert _model_summary(compactions[0].summary) == "Overflow recovery summary"
     assert compactions[0].tokens_before is not None
     assert compactions[0].tokens_before > 0
     assert any(
@@ -4871,13 +4827,20 @@ async def test_session_compacts_and_retries_once_after_context_overflow(
         and getattr(getattr(event, "message", None), "text", None) == "Recovered answer"
         for event in retry_events
     )
-    assert [message.text for message in provider.calls[4][2][:4]] == [
+    assert [
+        _sent_summary(message.text) if index == 0 else message.text
+        for index, message in enumerate(provider.calls[4][2][:4])
+    ] == [
         "Previous conversation summary:\nOverflow recovery summary",
         "Keep this recent turn.",
         "Second answer",
         "Trigger overflow.",
     ]
     assert len(provider.calls[4][2]) == 4
+    # The summary continues the conversation, without the entries it keeps.
+    summary_request = provider.calls[3][2]
+    assert "Do not call a tool or continue the work" in summary_request[-1].text
+    assert [message.text for message in summary_request[:-1]] == [large_prompt, "First answer"]
     overflow_errors = [
         entry.message
         for entry in entries
@@ -7568,7 +7531,7 @@ async def test_session_auto_compacts_at_next_turn_start_when_threshold_is_exceed
     compactions = [entry for entry in entries if entry.type == "compaction"]
 
     assert len(compactions) == 1
-    assert compactions[0].summary == "Generated automatic summary"
+    assert _model_summary(compactions[0].summary) == "Generated automatic summary"
     assert compactions[0].replaces_entry_ids == []
     assert compactions[0].first_kept_entry_id in session.state.context_entry_ids
     assert compactions[0].tokens_before is not None
@@ -7628,8 +7591,9 @@ async def test_session_continue_auto_compacts_before_the_run_not_after(
     # still over the threshold.
     assert len(provider.calls) == 2
     # The summary is asked of the live conversation: same system prompt.
+    assert provider.calls[0][1] == provider.calls[1][1]
     compactions = [entry for entry in await storage.read_all() if entry.type == "compaction"]
-    assert [entry.summary for entry in compactions] == ["Continue summary"]
+    assert [_model_summary(entry.summary) for entry in compactions] == ["Continue summary"]
 
 
 @pytest.mark.anyio
@@ -7689,9 +7653,10 @@ async def test_session_auto_compacts_between_turns_of_a_long_run(
     events = await _collect_session_events(session.prompt("Fetch it."))
 
     compactions = [entry for entry in await storage.read_all() if entry.type == "compaction"]
-    assert [entry.summary for entry in compactions] == ["Mid-run summary"]
+    assert [_model_summary(entry.summary) for entry in compactions] == ["Mid-run summary"]
+    assert provider.calls[2][1] == provider.calls[1][1]
     sent = provider.calls[3][2]
-    assert sent[0].text == "Previous conversation summary:\nMid-run summary"
+    assert _sent_summary(sent[0].text) == "Previous conversation summary:\nMid-run summary"
     assert [message.role for message in sent[1:]] == ["user", "assistant", "toolResult"]
     assert sent[1].text == "Fetch it."
     assert [getattr(event, "type", None) for event in events].count("compaction_end") == 1
@@ -7847,7 +7812,7 @@ async def test_compaction_leaves_half_threshold_headroom(tmp_path: Path) -> None
     compactions = [entry for entry in await storage.read_all() if entry.type == "compaction"]
     assert len(compactions) == 1
     _model, system, sent, tools = provider.calls[1]
-    assert sent[0].text == "Previous conversation summary:\nS"
+    assert _sent_summary(sent[0].text) == "Previous conversation summary:\nS"
     assert sent[-1].text == "Next."
     after = estimate_context_tokens(system=system, messages=tuple(sent[:-1]), tools=tuple(tools))
     assert after <= threshold // 2
@@ -7905,7 +7870,7 @@ async def test_compaction_headroom_holds_for_a_long_summary(tmp_path: Path) -> N
     compactions = [entry for entry in await storage.read_all() if entry.type == "compaction"]
     assert len(compactions) == 1
     _model, system, sent, tools = provider.calls[1]
-    assert sent[0].text == "Previous conversation summary:\n" + summary.strip()
+    assert _sent_summary(sent[0].text) == "Previous conversation summary:\n" + summary.strip()
     assert sent[-1].text == "Next."
     after = estimate_context_tokens(system=system, messages=tuple(sent[:-1]), tools=tuple(tools))
     assert after <= threshold // 2
@@ -7965,7 +7930,7 @@ async def test_compaction_summary_over_cap_is_truncated_with_marker(tmp_path: Pa
     _model, system, sent, tools = provider.calls[1]
     prefix = "Previous conversation summary:\n"
     assert sent[0].text.startswith(prefix)
-    held = sent[0].text[len(prefix) :]
+    held = _model_summary(sent[0].text[len(prefix) :])
     assert held.endswith(marker)
     assert len(held) <= cap
     head = held[: -len(marker)]
@@ -8020,10 +7985,37 @@ async def test_compaction_carries_forward_an_unanswered_assistant_question_verba
     compaction = next(entry for entry in await storage.read_all() if entry.type == "compaction")
     assert compaction.summary == result.summary
     if carried:
-        assert compaction.summary == (
+        assert _model_summary(compaction.summary) == (
             "## Goal\nTidy branches\n\n## Open Question to User\n"
             "The assistant asked this and the user has not answered yet (verbatim):\n\n"
             f"{question}"
         )
     else:
-        assert compaction.summary == "## Goal\nTidy branches"
+        assert _model_summary(compaction.summary) == "## Goal\nTidy branches"
+
+
+@pytest.mark.anyio
+async def test_extension_started_prompt_is_marked_as_extension_source(tmp_path: Path) -> None:
+    storage = JsonlSessionStorage(tmp_path / "session.jsonl")
+    provider = FakeProvider([[assistant_start(), assistant_done(AssistantMessage(content="ok"))]])
+    session = await CodingSession.load(_config(tmp_path, provider, storage))
+
+    await _collect_session_events(
+        session.prompt("wake up", source="extension", custom_type="myext:wake")
+    )
+
+    entries = await storage.read_all()
+    custom_entries = [entry for entry in entries if isinstance(entry, CustomMessageEntry)]
+    assert [(entry.delivery, entry.source) for entry in custom_entries] == [("prompt", "extension")]
+
+
+def test_llama_cpp_context_size_error_is_an_overflow() -> None:
+    message = AssistantMessage(
+        stop_reason="error",
+        error_message=(
+            "llama request failed with status 400 for model m: request (98498 tokens) "
+            "exceeds the available context size (98304 tokens), try increasing it"
+        ),
+    )
+
+    assert is_context_overflow_error(message)

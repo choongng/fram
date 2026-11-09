@@ -154,7 +154,7 @@ async def run_agent_loop(
                     provider=provider,
                     model=model,
                     system=system,
-                    messages=_provider_context(messages),
+                    messages=provider_context(messages),
                     tools=tools,
                     signal=signal,
                     session_id=session_id,
@@ -218,8 +218,11 @@ async def run_agent_loop(
     yield AgentEndEvent(messages=new_messages)
 
 
-def _provider_context(messages: list[AgentMessage]) -> list[AgentMessage]:
+def provider_context(messages: list[AgentMessage]) -> list[AgentMessage]:
     """Return replayable messages while retaining failures in durable history.
+
+    Public so a caller re-sending the loop's request (continuation compaction)
+    sends the same messages, byte for byte, and hits the prompt cache.
 
     Providers cannot consistently accept an assistant turn with no content. Tau
     persists terminal failures for diagnostics, but an empty failed or aborted

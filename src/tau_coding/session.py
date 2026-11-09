@@ -11,6 +11,7 @@ from os import environ
 from pathlib import Path
 from typing import Literal
 
+from tau_agent.cache_hints import long_lived_conversation
 from tau_agent.events import (
     AgentEndEvent,
     AgentEvent,
@@ -19,6 +20,7 @@ from tau_agent.events import (
     TurnEndEvent,
 )
 from tau_agent.harness import AgentHarness, AgentHarnessConfig, QueuedMessages
+from tau_agent.loop import provider_context
 from tau_agent.messages import (
     AgentMessage,
     AssistantMessage,
@@ -70,6 +72,7 @@ from tau_coding.context_window import (
     ContextUsageEstimate,
     auto_compaction_threshold_for_context_window,
     build_compaction_summary_prompt,
+    build_continuation_summary_request,
     estimate_context_tokens,
     estimate_context_usage,
     estimate_message_tokens,
@@ -98,6 +101,17 @@ from tau_coding.events import (
 from tau_coding.extensions.provider_registry import DynamicProviderRegistry
 from tau_coding.extensions.providers import DynamicProvider, ProviderModel
 from tau_coding.extensions.runtime import ExtensionRuntime
+from tau_coding.history_index import (
+    INDEX_MAX_CHARS,
+    IndexNode,
+    add_chapter,
+    apply_captions,
+    build_chapter,
+    caption_request,
+    parse_captions,
+    render_index,
+    uncaptioned,
+)
 from tau_coding.models_dev_store import ModelsDevRefreshResult, refresh_models_dev_catalog
 from tau_coding.oauth import account_id_from_access_token
 from tau_coding.paths import TauPaths
@@ -173,6 +187,8 @@ from tau_coding.session_recall import (
     RecallSource,
     create_history_tool,
     numbered_branch,
+    split_compaction_index,
+    with_compaction_index,
 )
 from tau_coding.session_stats import SessionStats, calculate_session_stats
 from tau_coding.skills import Skill, expand_skill_command, load_skills_with_diagnostics
@@ -212,6 +228,9 @@ SESSION_NAME_SYSTEM_PROMPT = (
 #: the summary before it is written, so a long summary cannot push the
 #: compacted context past the headroom the cut left.
 COMPACTION_SUMMARY_MAX_CHARS = 8_000
+#: Output room a continuation compaction leaves for its summary: about the
+#: summary budget in tokens, plus thinking.
+CONTINUATION_SUMMARY_OUTPUT_TOKENS = 8_000
 COMPACTION_SUMMARY_TRUNCATED = "\n\n[Summary truncated to fit the compaction budget.]"
 COMPACTION_SUMMARY_CUT_OFF = "\n\n[Summary cut off at the output limit.]"
 TREE_RUNNING_MESSAGE = (
@@ -355,6 +374,7 @@ class _GeneratedSummary:
     provider: str | None = None
     model: str | None = None
     response_provider: str | None = None
+    index: list[dict[str, JSONValue]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -3386,7 +3406,7 @@ class CodingSession:
             raise ValueError("Not enough context to compact while preserving recent entries")
         tokens_before = self.context_token_estimate
         generated = await self._generate_compaction_summary(
-            plan.messages_to_summarize,
+            plan,
             custom_instructions=instructions,
         )
         compaction = await self._append_compaction(
@@ -3397,6 +3417,7 @@ class CodingSession:
             provider=generated.provider,
             model=generated.model,
             response_provider=generated.response_provider,
+            index=generated.index,
         )
         return ManualCompactionResult(
             summary=compaction.summary,
@@ -4203,7 +4224,9 @@ class CodingSession:
             if plan is None:
                 return False
             tokens_before = self.context_token_estimate
-            generated = await self._generate_compaction_summary(plan.messages_to_summarize)
+            # The context already overflowed: it cannot be re-sent with a request
+            # added, so the summary request stops where the summarized range does.
+            generated = await self._generate_compaction_summary(plan, send_kept_tail=False)
             await self._append_compaction(
                 generated.text,
                 first_kept_entry_id=plan.first_kept_entry_id,
@@ -4212,6 +4235,7 @@ class CodingSession:
                 provider=generated.provider,
                 model=generated.model,
                 response_provider=generated.response_provider,
+                index=generated.index,
             )
             return True
         except Exception as exc:  # noqa: BLE001 - the original overflow remains visible
@@ -4347,7 +4371,7 @@ class CodingSession:
         if plan is None:
             return False
         tokens_before = self.context_token_estimate
-        generated = await self._generate_compaction_summary(plan.messages_to_summarize)
+        generated = await self._generate_compaction_summary(plan)
         await self._append_compaction(
             generated.text,
             first_kept_entry_id=plan.first_kept_entry_id,
@@ -4356,24 +4380,181 @@ class CodingSession:
             provider=generated.provider,
             model=generated.model,
             response_provider=generated.response_provider,
+            index=generated.index,
         )
         return True
 
     async def _generate_compaction_summary(
         self,
-        messages: tuple[AgentMessage, ...],
+        plan: CompactionPlan,
         *,
         custom_instructions: str | None = None,
+        send_kept_tail: bool = True,
     ) -> _GeneratedSummary:
+        """Summarize a plan's range and extend the index tree with it.
+
+        Asked first as a continuation of the live conversation, so the
+        transcript is a prompt-cache read; a separate request is the fallback.
+        Without `send_kept_tail` the continuation is only tried without the
+        entries the compaction keeps (see `_continuation_summary`).
+        Either request also captions the tree's new nodes while their entries
+        are in context (see dev-notes/session-recall-and-continuation-compaction.md).
+        """
         focus = [
             text
             for text in (custom_instructions, *self._extension_runtime.compaction_instructions)
             if text is not None and text.strip()
         ]
+        instructions = "\n\n".join(focus) or None
+        recalled = await self.recall_branch()
+        branch, outputs_dir = recalled.entries, recalled.outputs_dir
+        numbers = {item.entry.id: item.number for item in branch}
+        forest = _index_forest(_latest_compaction(branch))
+        chapter = build_chapter(
+            _summarized_items(branch, self._state.context_entry_ids, plan.first_kept_entry_id),
+            outputs_dir=outputs_dir,
+        )
+        if chapter is not None:
+            forest = add_chapter(forest, chapter)
+        wanted = uncaptioned(forest)
+        # The model sees the index as it will read once captioned: facts stand
+        # in for the captions it is about to write.
+        index = render_index(forest)
+        asks = caption_request(wanted)
+        generated: _GeneratedSummary | None = None
+        last_ref = _last_ref_before(branch, plan.first_kept_entry_id, numbers)
+        if last_ref is not None:
+            generated = await self._continuation_summary(
+                plan.messages_to_summarize,
+                last_ref=last_ref,
+                index=index,
+                caption_request=asks,
+                previous_summary=_starts_with_summary(plan.messages_to_summarize),
+                custom_instructions=instructions,
+                send_kept_tail=send_kept_tail,
+            )
+        if generated is None:
+            summarized_ids = self._state.context_entry_ids[: len(plan.messages_to_summarize)]
+            refs = [numbers[entry_id] for entry_id in summarized_ids if entry_id in numbers]
+            generated = await self._separate_request_summary(
+                _without_index(plan.messages_to_summarize),
+                custom_instructions=instructions,
+                caption_request=asks,
+                refs=refs if len(refs) == len(summarized_ids) else None,
+            )
+        captions, summary = parse_captions(generated.text)
+        apply_captions(forest, captions)
+        return replace(
+            generated,
+            text=with_compaction_index(render_index(forest), _hold_summary_to_budget(summary)),
+            index=[node.model_dump(mode="json", exclude_defaults=True) for node in forest],
+        )
+
+    async def _continuation_summary(
+        self,
+        summarized: tuple[AgentMessage, ...],
+        *,
+        last_ref: int,
+        index: str,
+        caption_request: str,
+        previous_summary: bool,
+        custom_instructions: str | None,
+        send_kept_tail: bool = True,
+    ) -> _GeneratedSummary | None:
+        """Ask the live conversation for its summary, or None when it cannot.
+
+        The request is the one the agent loop would send next (same system
+        prompt, tools, messages and cache lifetime) plus one user message, so
+        everything before that message is read from the prompt cache. Tools stay
+        in the request: removing them would change the cached prefix.
+
+        When that does not fit the window, the request stops where the
+        `summarized` range does: the kept tail is not summarized, and the range
+        usually ends where an earlier request ended, so its prefix was cached
+        then. None when neither fits, the request fails, or it calls a tool.
+        """
+        request = UserMessage(
+            content=build_continuation_summary_request(
+                last_ref=last_ref,
+                index=index,
+                caption_request=caption_request,
+                previous_summary=previous_summary,
+                custom_instructions=custom_instructions,
+            )
+        )
+        system = self._harness.config.system
+        tools = list(self._harness.config.tools)
+        messages: list[AgentMessage] | None = None
+        transcripts = (self._harness.messages, summarized) if send_kept_tail else (summarized,)
+        for transcript in transcripts:
+            candidate = [*provider_context(list(transcript)), request]
+            needed = estimate_context_tokens(
+                system=system,
+                messages=tuple(candidate),
+                tools=tuple(tools),
+            )
+            if needed + CONTINUATION_SUMMARY_OUTPUT_TOKENS <= self.context_window_tokens:
+                messages = candidate
+                break
+        if messages is None:
+            return None
+        final: AssistantMessage | None = None
+        try:
+            with long_lived_conversation(self._config.long_lived):
+                async for event in self._harness.config.provider.stream_response(
+                    model=self.model,
+                    system=system,
+                    messages=messages,
+                    tools=tools,
+                    session_id=self._config.session_id,
+                ):
+                    if isinstance(event, AssistantDoneEvent):
+                        final = event.message
+                    elif isinstance(event, AssistantErrorEvent):
+                        return None
+        except Exception:  # noqa: BLE001 - the separate request is the fallback
+            return None
+        if final is None or final.tool_calls:
+            return None
+        text = _summary_reply_text(final.text, stop_reason=final.stop_reason)
+        if not parse_captions(text)[1]:
+            return None
+        return _GeneratedSummary(
+            text=text,
+            usage=final.usage,
+            provider=self.provider_name,
+            model=self.model,
+            response_provider=final.response_provider,
+        )
+
+    async def _separate_request_summary(
+        self,
+        messages: tuple[AgentMessage, ...],
+        *,
+        custom_instructions: str | None,
+        caption_request: str = "",
+        refs: Sequence[int] | None = None,
+    ) -> _GeneratedSummary:
+        """Summarize `messages` in a request of their own, flattened into one message.
+
+        `refs` are the messages' `#N` references, which the captions are asked
+        by; without them the messages are numbered from 1.
+        """
         prompt = build_compaction_summary_prompt(
             messages,
-            custom_instructions="\n\n".join(focus) or None,
+            custom_instructions=custom_instructions,
+            refs=refs,
         )
+        if caption_request:
+            numbering = (
+                "The <message> entries carry their #N references (ref=#N); caption each "
+                "range below from the messages it covers and from earlier captions."
+                if refs is not None
+                else "The <message> entries are numbered from 1 within this request, "
+                "not by the #N ranges below; caption each range from the messages it "
+                "most likely covers and from earlier captions."
+            )
+            prompt += f"\n\n{numbering}\n\n{caption_request}"
         prompt += f"\n\nKeep the whole summary under {COMPACTION_SUMMARY_MAX_CHARS} characters."
         # The summary request has its own prompt, so on a single-slot server it
         # displaces the conversation's cached prefix.
@@ -4402,13 +4583,14 @@ class CodingSession:
                     f"Compaction summarization failed: {event.error.error_message or event.reason}"
                 )
 
-        summary = (final_text if final_text is not None else "".join(text_parts)).strip()
-        if not summary:
+        text = _summary_reply_text(
+            final_text if final_text is not None else "".join(text_parts),
+            stop_reason=stop_reason,
+        )
+        if not parse_captions(text)[1]:
             raise RuntimeError("Compaction summarization returned an empty summary")
-        if stop_reason == "length":
-            summary += COMPACTION_SUMMARY_CUT_OFF
         return _GeneratedSummary(
-            text=_hold_summary_to_budget(summary),
+            text=text,
             usage=sum_usage(response_usages) if response_usages else None,
             provider=self.provider_name,
             model=self.model,
@@ -4489,7 +4671,7 @@ class CodingSession:
         if threshold is None or threshold <= 0:
             return first_kept_index
         target = threshold // 2
-        reserved = "x" * COMPACTION_SUMMARY_MAX_CHARS
+        reserved = "x" * (COMPACTION_SUMMARY_MAX_CHARS + INDEX_MAX_CHARS)
         system = self._harness.config.system
         tools = tuple(self._harness.config.tools)
         cuts = [
@@ -4528,6 +4710,7 @@ class CodingSession:
         provider: str | None = None,
         model: str | None = None,
         response_provider: str | None = None,
+        index: list[dict[str, JSONValue]] | None = None,
     ) -> CompactionEntry:
         if first_kept_entry_id not in self._state.context_entry_ids:
             raise ValueError("First kept entry is not in the active context")
@@ -4544,6 +4727,7 @@ class CodingSession:
             provider=provider,
             model=model,
             response_provider=response_provider,
+            index=index,
         )
         await self._append_session_entry(compaction)
         self._last_parent_id = compaction.id
@@ -4576,6 +4760,80 @@ class CodingSession:
         if context_index >= self._state.context_entry_ids.index(first_kept_entry_id):
             return None
         return message_text(question)
+
+
+def _summarized_items(
+    branch: Sequence[NumberedEntry],
+    context_entry_ids: Sequence[str],
+    first_kept_entry_id: str,
+) -> list[NumberedEntry]:
+    """The context entries a compaction replaces, with their references.
+
+    Taken from the live context, not by scanning the branch: entries an earlier
+    compaction kept sit before that compaction in the file, and are summarized
+    now along with what came after it.
+    """
+    replaced: set[str] = set()
+    for entry_id in context_entry_ids:
+        if entry_id == first_kept_entry_id:
+            break
+        replaced.add(entry_id)
+    return [item for item in branch if item.entry.id in replaced]
+
+
+def _last_ref_before(
+    branch: Sequence[NumberedEntry], first_kept_entry_id: str, numbers: Mapping[str, int]
+) -> int | None:
+    """The reference of the last entry a compaction replaces, or None if unknown."""
+    kept = numbers.get(first_kept_entry_id)
+    if kept is None:
+        return None
+    before = [item.number for item in branch if item.number < kept]
+    return before[-1] if before else None
+
+
+def _index_forest(compaction: CompactionEntry | None) -> list[IndexNode]:
+    """The index tree a compaction stored, or none (older compactions have none)."""
+    if compaction is None or not compaction.index:
+        return []
+    try:
+        return [IndexNode.model_validate(node) for node in compaction.index]
+    except ValueError:
+        return []
+
+
+def _latest_compaction(branch: Sequence[NumberedEntry]) -> CompactionEntry | None:
+    """The compaction in effect on the branch: its last one."""
+    found: CompactionEntry | None = None
+    for item in branch:
+        if isinstance(item.entry, CompactionEntry):
+            found = item.entry
+    return found
+
+
+def _without_index(messages: tuple[AgentMessage, ...]) -> tuple[AgentMessage, ...]:
+    """Drop the index from a leading previous summary; the stored tree carries it."""
+    if not _starts_with_summary(messages):
+        return messages
+    text = message_text(messages[0]).removeprefix(COMPACTION_SUMMARY_PREFIX)
+    _lines, rest = split_compaction_index(text)
+    return (UserMessage(content=COMPACTION_SUMMARY_PREFIX + rest), *messages[1:])
+
+
+def _starts_with_summary(messages: Sequence[AgentMessage]) -> bool:
+    return bool(messages) and message_text(messages[0]).startswith(COMPACTION_SUMMARY_PREFIX)
+
+
+def _summary_reply_text(text: str, *, stop_reason: str | None) -> str:
+    """A summary reply's text, marked as cut when the reply hit the output limit.
+
+    The captions come first, so a reply cut inside them has no summary
+    (`parse_captions` drops an unclosed block) and is refused like an empty one.
+    """
+    text = text.strip()
+    if stop_reason == "length" and parse_captions(text)[1]:
+        text += COMPACTION_SUMMARY_CUT_OFF
+    return text
 
 
 def _default_tools(
