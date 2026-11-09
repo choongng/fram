@@ -72,7 +72,7 @@ from tau_coding import (
 )
 from tau_coding import session as coding_session_module
 from tau_coding.codex_model_store import cached_codex_model_catalog, save_codex_model_catalog
-from tau_coding.context_window import estimate_context_tokens
+from tau_coding.context_window import DEFAULT_AUTO_COMPACT_TOKEN_CAP, estimate_context_tokens
 from tau_coding.events import (
     AgentSettledEvent,
     PromptCacheMissEvent,
@@ -4303,6 +4303,9 @@ async def test_session_uses_live_provider_limits_for_compaction_threshold(
 
     assert provider.discovery_calls == ["gpt-5.6-sol"]
     assert session.context_window_tokens == 372_000
+    assert session.auto_compact_token_threshold == DEFAULT_AUTO_COMPACT_TOKEN_CAP
+    # A user-set threshold above the live limit is capped at it.
+    session.set_auto_compact_token_threshold(360_000)
     assert session.auto_compact_token_threshold == 334_800
     assert session.context_window_source == "provider live catalog"
     assert session.model_limits_discovery_error is None
@@ -4813,6 +4816,9 @@ async def test_session_falls_back_when_live_model_limit_discovery_fails(
     )
 
     assert session.context_window_tokens == 272_000
+    assert session.auto_compact_token_threshold == DEFAULT_AUTO_COMPACT_TOKEN_CAP
+    # A user-set threshold above the configured window's limit is capped at it.
+    session.set_auto_compact_token_threshold(300_000)
     assert session.auto_compact_token_threshold == 255_616
     assert session.context_window_source == "configured catalog"
     assert session.model_limits_discovery_error == "RuntimeError: catalog unavailable"

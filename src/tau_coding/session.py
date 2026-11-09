@@ -63,6 +63,7 @@ from tau_coding.commands import CommandRegistry, CommandResult, create_default_c
 from tau_coding.context import discover_project_context_with_diagnostics
 from tau_coding.context_window import (
     COMPACTION_SUMMARY_PREFIX,
+    DEFAULT_AUTO_COMPACT_TOKEN_CAP,
     DEFAULT_COMPACTION_KEEP_RECENT_TOKENS,
     DEFAULT_CONTEXT_WINDOW_TOKENS,
     SUMMARIZATION_SYSTEM_PROMPT,
@@ -1346,26 +1347,94 @@ class CodingSession:
 
     @property
     def auto_compact_token_threshold(self) -> int | None:
-        """Return the effective automatic compaction threshold, if any."""
+        """Return the effective automatic compaction threshold, if any.
+
+        A user-set threshold outlives model switches, so it is capped at the
+        selected model's own limit (its live limit, or its declared window less
+        the reserve) while that model is active, and comes back when a model
+        with room for it is selected again. A model no catalog declares has no
+        limit to cap at, so a user-set value is used as given. Without one, the
+        model's limit applies, at most `DEFAULT_AUTO_COMPACT_TOKEN_CAP`.
+        """
         if not self._auto_compact_enabled:
             return None
+        limit = self._model_auto_compact_limit()
         if self._auto_compact_token_threshold is not None:
-            return self._auto_compact_token_threshold
+            if limit is None:
+                return self._auto_compact_token_threshold
+            return min(self._auto_compact_token_threshold, limit)
+        if limit is None:
+            limit = auto_compaction_threshold_for_context_window(DEFAULT_CONTEXT_WINDOW_TOKENS)
+        return None if limit is None else min(limit, DEFAULT_AUTO_COMPACT_TOKEN_CAP)
+
+    def _model_auto_compact_limit(self) -> int | None:
+        """The selected model's own compaction limit, or None when nothing declares it."""
         if self._runtime_model_limits_key == (self.provider_name, self.model):
             limits = self._runtime_model_limits
             if limits is not None:
                 return limits.effective_auto_compact_token_limit
-        return auto_compaction_threshold_for_context_window(self.context_window_tokens)
+        declared = self._declared_context_window()
+        if declared is None:
+            return None
+        return auto_compaction_threshold_for_context_window(declared[0])
 
     def set_auto_compaction_enabled(self, enabled: bool) -> None:
         """Enable or disable automatic compaction for future turns."""
         self._auto_compact_enabled = enabled
         self._config = replace(self._config, auto_compact_enabled=enabled)
 
+    def set_auto_compact_token_threshold(self, threshold: int) -> None:
+        """Set the automatic compaction threshold for future turns and enable it.
+
+        The next compaction decision reads the new value; nothing is restarted.
+        """
+        if isinstance(threshold, bool) or not isinstance(threshold, int) or threshold <= 0:
+            raise ValueError("Auto-compact threshold must be a positive token count")
+        self._auto_compact_token_threshold = threshold
+        self._auto_compact_enabled = True
+        self._config = replace(
+            self._config, auto_compact_token_threshold=threshold, auto_compact_enabled=True
+        )
+
     @property
     def auto_compaction_enabled(self) -> bool:
         """Return whether automatic compaction is enabled."""
         return self._auto_compact_enabled
+
+    @property
+    def context_window_tokens(self) -> int:
+        """Return the selected model's discovered or configured context window.
+
+        The selected model is the pending TUI selection when there is one, so
+        the window is looked up under that selection's provider, not the
+        committed runtime's. A model nothing declares gets the default window.
+        """
+        declared = self._declared_context_window()
+        return DEFAULT_CONTEXT_WINDOW_TOKENS if declared is None else declared[0]
+
+    @property
+    def declared_context_window_tokens(self) -> int | None:
+        """Return the selected model's window when something declares it, else None."""
+        declared = self._declared_context_window()
+        return None if declared is None else declared[0]
+
+    def _declared_context_window(self) -> tuple[int, str] | None:
+        """The selected model's window and where it was declared, if anywhere."""
+        if self._runtime_model_limits_key == (self.provider_name, self.model):
+            limits = self._runtime_model_limits
+            if limits is not None:
+                return limits.context_window, "provider live catalog"
+        dynamic_model = self._active_dynamic_model
+        if dynamic_model is not None and dynamic_model.context_window is not None:
+            return dynamic_model.context_window, "extension provider"
+        provider = self._selected_provider_config()
+        if provider is None:
+            return None
+        window = provider.context_windows.get(self.model)
+        if window is None:
+            metadata = provider.model_metadata.get(self.model)
+            window = metadata.context_window if metadata is not None else None
+        return None if window is None else (window, "configured catalog")
 
     async def _after_tool_call(
         self, call: ToolCall, result: AgentToolResult, is_error: bool
@@ -1417,26 +1486,14 @@ class CodingSession:
         return session_outputs_dir(session_path) if session_path is not None else None
 
     @property
-    def context_window_tokens(self) -> int:
-        """Return the active model's discovered or configured context window."""
-        if self._runtime_model_limits_key == (self.provider_name, self.model):
-            limits = self._runtime_model_limits
-            if limits is not None:
-                return limits.context_window
-        provider = self._active_provider_config()
-        if provider is None:
-            return DEFAULT_CONTEXT_WINDOW_TOKENS
-        return provider.context_windows.get(self.model, DEFAULT_CONTEXT_WINDOW_TOKENS)
-
-    @property
     def context_window_source(self) -> str:
         """Return where the active context-window limit came from."""
-        if (
-            self._runtime_model_limits_key == (self.provider_name, self.model)
-            and self._runtime_model_limits is not None
-        ):
-            return "provider live catalog"
-        return "configured catalog"
+        declared = self._declared_context_window()
+        if declared is None:
+            return (
+                f"default ({DEFAULT_CONTEXT_WINDOW_TOKENS} tokens; no catalog declares this model)"
+            )
+        return declared[1]
 
     @property
     def model_limits_discovery_error(self) -> str | None:
@@ -4574,6 +4631,8 @@ def is_context_overflow_error(message: AssistantMessage) -> bool:
         "token limit",
         "exceeds the limit",
         "exceeded the limit",
+        # llama.cpp: "request (N tokens) exceeds the available context size".
+        "context size",
     )
     return any(marker in normalized for marker in markers)
 

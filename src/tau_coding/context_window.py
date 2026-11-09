@@ -21,6 +21,11 @@ SUMMARY_MESSAGE_CHAR_LIMIT = 500
 DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000
 DEFAULT_COMPACTION_RESERVE_TOKENS = 16_384
 DEFAULT_COMPACTION_KEEP_RECENT_TOKENS = 20_000
+#: Where automatic compaction fires at the latest unless the user sets a
+#: threshold. Every call re-reads the whole context, so on a 1M-token window
+#: the window-based default (window minus the reserve) never fires and each
+#: call past here costs more than a compaction would save.
+DEFAULT_AUTO_COMPACT_TOKEN_CAP = 150_000
 COMPACTION_SUMMARY_PREFIX = "Previous conversation summary:\n"
 OPEN_QUESTION_HEADING = "## Open Question to User"
 
@@ -184,6 +189,47 @@ def auto_compaction_threshold_for_context_window(context_window_tokens: int) -> 
     if context_window_tokens <= 0:
         return None
     return max(1, context_window_tokens - DEFAULT_COMPACTION_RESERVE_TOKENS)
+
+
+def parse_auto_compaction_threshold(value: str, context_window_tokens: int | None) -> int | None:
+    """Parse a user-supplied automatic compaction threshold.
+
+    ``value`` is a whole token count (``"50000"``), a whole percentage of the
+    context window (``"80%"``), or ``"off"``. Returns the threshold in tokens,
+    or ``None`` for ``off``. Raises ``ValueError`` with a user-facing message for
+    malformed or out-of-range values: a threshold must be at least one token and
+    no larger than the context window. ``context_window_tokens`` is ``None`` when
+    no catalog declares the model's window: any token count is then taken as
+    given, and a percentage is refused.
+    """
+    text = value.strip()
+    if text.lower() == "off":
+        return None
+    if context_window_tokens is None:
+        usage = (
+            "Expected a token count or 'off' (a percentage needs the model's context "
+            "window, which no catalog declares)."
+        )
+    else:
+        usage = (
+            f"Expected a token count (1-{context_window_tokens}), a percentage of the "
+            "context window (1%-100%), or 'off'."
+        )
+    is_percent = text.endswith("%")
+    digits = text[:-1] if is_percent else text
+    sign = digits[:1] if digits[:1] in ("-", "+") else ""
+    if not digits[len(sign) :].isdigit() or not digits[len(sign) :].isascii():
+        raise ValueError(f"Invalid auto-compact threshold: {value!r}. {usage}")
+    number = int(digits)
+    if is_percent:
+        if context_window_tokens is None or not 1 <= number <= 100:
+            raise ValueError(f"Auto-compact percentage out of range: {value}. {usage}")
+        tokens = context_window_tokens * number // 100
+    else:
+        tokens = number
+    if tokens < 1 or (context_window_tokens is not None and tokens > context_window_tokens):
+        raise ValueError(f"Auto-compact threshold out of range: {value}. {usage}")
+    return tokens
 
 
 def provider_context_tokens(message: AssistantMessage) -> int:

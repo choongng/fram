@@ -18,6 +18,7 @@ from tau_agent.session import JsonlSessionStorage
 from tau_agent.session.entries import SessionEntry
 from tau_agent.types import JSONValue
 from tau_coding.commands import CommandRegistry
+from tau_coding.context_window import parse_auto_compaction_threshold
 from tau_coding.events import CodingSessionEvent
 from tau_coding.provider_config import (
     AnthropicProviderConfig,
@@ -82,6 +83,9 @@ class RpcSession(Protocol):
     def context_window_tokens(self) -> int: ...
 
     @property
+    def declared_context_window_tokens(self) -> int | None: ...
+
+    @property
     def context_token_estimate(self) -> int: ...
 
     @property
@@ -112,6 +116,8 @@ class RpcSession(Protocol):
     async def set_thinking_level(self, level: str) -> str: ...
 
     def set_auto_compaction_enabled(self, enabled: bool) -> None: ...
+
+    def set_auto_compact_token_threshold(self, threshold: int) -> None: ...
 
     async def compact_detailed(self, instructions: str | None = None) -> ManualCompactionResult: ...
 
@@ -238,6 +244,7 @@ class RpcServer:
                         "sessionId": self._session.session_id or "",
                         "sessionName": self._session.session_title,
                         "autoCompactionEnabled": self._session.auto_compaction_enabled,
+                        "autoCompactionThreshold": self._session.auto_compact_token_threshold,
                         "messageCount": len(self._session.messages),
                         "pendingMessageCount": self._session.queued_message_count,
                     },
@@ -334,6 +341,23 @@ class RpcServer:
             if command_type == "set_auto_compaction":
                 self._session.set_auto_compaction_enabled(_required_bool(command, "enabled"))
                 await self._response(request_id, command_type)
+                return
+            if command_type == "set_auto_compaction_threshold":
+                threshold = parse_auto_compaction_threshold(
+                    _threshold_text(command), self._session.declared_context_window_tokens
+                )
+                if threshold is None:
+                    self._session.set_auto_compaction_enabled(False)
+                else:
+                    self._session.set_auto_compact_token_threshold(threshold)
+                await self._response(
+                    request_id,
+                    command_type,
+                    {
+                        "autoCompactionEnabled": self._session.auto_compaction_enabled,
+                        "autoCompactionThreshold": self._session.auto_compact_token_threshold,
+                    },
+                )
                 return
             if command_type == "bash":
                 bash_result = await self._session.run_terminal_command(
@@ -555,6 +579,15 @@ def _required_bool(command: Mapping[str, object], key: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"{key} must be a boolean")
     return value
+
+
+def _threshold_text(command: Mapping[str, object]) -> str:
+    value = command.get("threshold")
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, str):
+        return value
+    raise ValueError("threshold must be a token count, a '<percent>%' string, or 'off'")
 
 
 def _optional_string(command: Mapping[str, object], key: str) -> str | None:
