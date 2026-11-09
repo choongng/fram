@@ -26,6 +26,7 @@ from tau_agent.messages import (
     AgentMessage,
     AssistantMessage,
     CustomMessage,
+    TextContent,
     ToolCall,
     Usage,
     UserMessage,
@@ -102,7 +103,7 @@ from tau_coding.events import (
 from tau_coding.extensions.provider_registry import DynamicProviderRegistry
 from tau_coding.extensions.providers import DynamicProvider, ProviderModel
 from tau_coding.extensions.runtime import ExtensionRuntime
-from tau_coding.guards import ToolCallGuards
+from tau_coding.guards import TEXT_TOOL_CALL_NUDGE, ToolCallGuards
 from tau_coding.history_index import (
     INDEX_MAX_CHARS,
     IndexNode,
@@ -579,6 +580,7 @@ class CodingSession:
         self._pending_message_writes: dict[int, _PendingMessageWrite] = {}
         self._prompt_cache_misses = PromptCacheMissDetector()
         self._recall_source = LateRecallSource()
+        self._text_call_nudge: UserMessage | None = None
         self._tool_guards = ToolCallGuards(
             tools=lambda: self._harness.config.tools, stop_run=lambda: self._harness.cancel()
         )
@@ -1491,13 +1493,19 @@ class CodingSession:
             source_path=read_source_path(result.details) if call.name == "read" else None,
             output_name=output_file_name(call.name, call.id),
         )
-        if self._tool_guards.take_cleared(call):
-            self._tool_guards.record(call, result, shown, is_error)
+        cut_note = self._tool_guards.take_cut_note(call)
+        if not self._tool_guards.take_cleared(call):
+            return shown, is_error
+        self._tool_guards.record(call, result, shown, is_error)
+        if cut_note is not None:
+            shown = shown.model_copy(
+                update={"content": [*shown.content, TextContent(text=cut_note)]}
+            )
         return shown, is_error
 
     async def _refuse_unproductive_call(self, call: ToolCall) -> tuple[bool, str | None]:
         """Refuse a tool call the guards reject; see `ToolCallGuards`."""
-        return self._tool_guards.verdict(call, self._tool_guards.problem(call))
+        return self._tool_guards.check(call)
 
     def _buffer_result(
         self,
@@ -1792,15 +1800,41 @@ class CodingSession:
         self._message_origins.pop(id(message), None)
         return message_text(message)
 
+    def _follow_up_text_tool_call(self, event: TurnEndEvent) -> None:
+        """Ask again when a reply wrote its tool call as text instead of making it."""
+        message = event.message
+        if not isinstance(message, AssistantMessage) or self._harness.cancel_requested:
+            return
+        if self._tool_guards.wants_text_call_follow_up(message):
+            nudge = UserMessage(content=TEXT_TOOL_CALL_NUDGE)
+            self._record_message_origin(nudge, delivery="follow_up", source="extension")
+            self._harness.follow_up_message(nudge)
+            self._text_call_nudge = nudge
+
+    def _drop_undelivered_nudge(self) -> None:
+        """Withdraw a follow-up the run ended without sending.
+
+        A run can end on the turn that queued it, at its turn budget's report
+        or on a cancel. Left queued, it would reach the next run and describe
+        a reply that is no longer the last one.
+        """
+        if self._text_call_nudge is not None:
+            self._harness.discard_follow_up(self._text_call_nudge)
+            self._text_call_nudge = None
+
     async def _signals_after(self, event: AgentEvent) -> AsyncIterator[CodingSessionEvent]:
         """Yield session diagnostics that one agent event gives rise to."""
         if isinstance(event, AgentStartEvent):
             self._tool_guards.reset()
+        if isinstance(event, AgentEndEvent):
+            self._drop_undelivered_nudge()
         if isinstance(event, MessageEndEvent) and isinstance(event.message, AssistantMessage):
             cache_miss = self._prompt_cache_misses.observe(event.message)
             if cache_miss is not None:
                 await self._extension_runtime.emit_event(cache_miss)
                 yield cache_miss
+        if isinstance(event, TurnEndEvent):
+            self._follow_up_text_tool_call(event)
         if isinstance(event, TurnEndEvent) and self._run_continues_after(event):
             async for signal in self._compact_between_turns():
                 yield signal

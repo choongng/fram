@@ -64,3 +64,20 @@ policy, so they live in `tau_coding` and reach the harness through
 ## How to test it
 
 `uv run pytest tests/test_repeat_breaker.py`
+
+## Malformed calls
+
+Some models end a tool call's last string with a chat template's control tokens,
+running the reply's next call or reasoning into the argument. Others write a
+tool call as text and end the turn, so nothing runs.
+
+- `check` looks for template tokens in every string of a call's arguments. Where
+  each leak sits in a top-level argument the schema declares and does not
+  require, or in one that only labels the call, the tail is cut at the token and
+  the call runs with a note in its result. Otherwise the call is refused, with
+  the call to send instead.
+- A reply that ended normally with template call markup in its text gets a
+  follow-up asking for a real call, at most twice in a row and four times a run.
+  A reply that only names `<tool_call>` in prose is left alone.
+
+Refusing a leaked call counts toward the eight-refusal stop like any other.

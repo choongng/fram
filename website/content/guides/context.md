@@ -158,6 +158,18 @@ Eight refusals in a row stop the run, which ends as aborted with that reason.
 A refusal is an ordinary tool result, so it does not invalidate the provider's
 prompt cache.
 
+
+## Malformed tool calls
+
+Some models run a chat template's control tokens, such as `<|tool_call>`, into a
+tool call's last string, or write a call as text and end the turn. Tau cuts the
+leaked tail from an argument the call can run without, and says so in the
+result. A call whose required value carries such a token is refused, with the
+call to send instead, so a file that must contain those exact tokens can't be
+written directly, by any tool, including a `bash` heredoc. Split the token
+across strings in a command or script that joins them. A reply that ends with a
+call written as text is asked again, up to twice in a row and four times a run.
+
 ## Manual compaction
 
 Compact on demand any time:
