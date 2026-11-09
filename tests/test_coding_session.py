@@ -4171,6 +4171,10 @@ async def test_session_auto_compacts_from_provider_reported_usage(
                 assistant_start(model="fake"),
                 assistant_done(message=AssistantMessage(content="Provider-usage summary")),
             ],
+            [
+                assistant_start(model="fake"),
+                assistant_done(message=AssistantMessage(content="Third answer")),
+            ],
         ]
     )
     session = await CodingSession.load(
@@ -4190,6 +4194,7 @@ async def test_session_auto_compacts_from_provider_reported_usage(
     assert session.context_usage.provider_tokens == 1_000
     assert session.has_provider_context_usage is True
     await _collect_session_events(session.prompt("Second short prompt."))
+    await _collect_session_events(session.prompt("Third short prompt."))
 
     compactions = [entry for entry in await storage.read_all() if entry.type == "compaction"]
     assert len(compactions) == 1
@@ -4215,6 +4220,10 @@ async def test_session_auto_compacts_with_pi_style_default_threshold(
             [
                 assistant_start(model="fake"),
                 assistant_done(message=AssistantMessage(content="Default threshold summary")),
+            ],
+            [
+                assistant_start(model="fake"),
+                assistant_done(message=AssistantMessage(content="Third answer")),
             ],
         ]
     )
@@ -4246,6 +4255,7 @@ async def test_session_auto_compacts_with_pi_style_default_threshold(
 
     _first_events = await _collect_session_events(session.prompt(large_prompt))
     _second_events = await _collect_session_events(session.prompt("Continue."))
+    _third_events = await _collect_session_events(session.prompt("Next."))
 
     compactions = [entry for entry in await storage.read_all() if entry.type == "compaction"]
 
@@ -7498,3 +7508,186 @@ async def test_session_buffers_an_oversized_tool_result_beside_the_session(
     assert f"Full output: {buffer}" in result.text
     assert len(result.text) < 60_000
     assert "event 0\n" not in (tmp_path / "session.jsonl").read_text()
+
+
+@pytest.mark.anyio
+async def test_session_auto_compacts_at_next_turn_start_when_threshold_is_exceeded(
+    tmp_path: Path,
+) -> None:
+    storage = JsonlSessionStorage(tmp_path / "session.jsonl")
+    large_prompt = "Explain sessions.\n" + ("old context " * 12_000)
+    provider = FakeProvider(
+        [
+            [
+                assistant_start(model="fake"),
+                assistant_done(message=AssistantMessage(content="First answer")),
+            ],
+            [
+                assistant_start(model="fake"),
+                assistant_done(message=AssistantMessage(content="Second answer")),
+            ],
+            [
+                assistant_start(model="fake"),
+                assistant_done(message=AssistantMessage(content="Generated automatic summary")),
+            ],
+            [
+                assistant_start(model="fake"),
+                assistant_done(message=AssistantMessage(content="Third answer")),
+            ],
+        ]
+    )
+    session = await CodingSession.load(
+        CodingSessionConfig(
+            provider=provider,
+            model="fake",
+            system="You are Tau.",
+            storage=storage,
+            cwd=tmp_path,
+            auto_compact_token_threshold=1,
+        )
+    )
+    _first_events = await _collect_session_events(session.prompt(large_prompt))
+
+    _second_events = await _collect_session_events(session.prompt("Continue."))
+    # Over the threshold now, but the session is idle: nothing is summarized
+    # until the next turn is about to send the context again.
+    assert len(provider.calls) == 2
+    assert not [entry for entry in await storage.read_all() if entry.type == "compaction"]
+    _third_events = await _collect_session_events(session.prompt("Next."))
+
+    entries = await storage.read_all()
+    compactions = [entry for entry in entries if entry.type == "compaction"]
+
+    assert len(compactions) == 1
+    assert compactions[0].summary == "Generated automatic summary"
+    assert compactions[0].replaces_entry_ids == []
+    assert compactions[0].first_kept_entry_id in session.state.context_entry_ids
+    assert compactions[0].tokens_before is not None
+    assert compactions[0].tokens_before > 0
+    assert "Explain sessions." in provider.calls[2][2][0].content
+    _assert_messages(
+        provider.calls[3][2],
+        [
+            UserMessage(content=f"Previous conversation summary:\n{compactions[0].summary}"),
+            UserMessage(content="Continue."),
+            AssistantMessage(content="Second answer"),
+            UserMessage(content="Next."),
+        ],
+    )
+
+
+@pytest.mark.anyio
+async def test_session_continue_auto_compacts_before_the_run_not_after(
+    tmp_path: Path,
+) -> None:
+    storage = JsonlSessionStorage(tmp_path / "session.jsonl")
+    await storage.append(
+        MessageEntry(id="old", message=UserMessage(content="Old " + ("context " * 12_000)))
+    )
+    await storage.append(
+        MessageEntry(id="answer", parent_id="old", message=AssistantMessage(content="Answer"))
+    )
+    await storage.append(
+        MessageEntry(id="user", parent_id="answer", message=UserMessage(content="Continue me"))
+    )
+    provider = FakeProvider(
+        [
+            [
+                assistant_start(model="fake"),
+                assistant_done(message=AssistantMessage(content="Continue summary")),
+            ],
+            [
+                assistant_start(model="fake"),
+                assistant_done(message=AssistantMessage(content="Continued")),
+            ],
+        ]
+    )
+    session = await CodingSession.load(
+        CodingSessionConfig(
+            provider=provider,
+            model="fake",
+            system="You are Tau.",
+            storage=storage,
+            cwd=tmp_path,
+            auto_compact_token_threshold=1,
+        )
+    )
+
+    _events = await _collect_session_events(session.continue_())
+
+    # One summary before the run, and none after it although the context is
+    # still over the threshold.
+    assert len(provider.calls) == 2
+    # The summary is asked of the live conversation: same system prompt.
+    compactions = [entry for entry in await storage.read_all() if entry.type == "compaction"]
+    assert [entry.summary for entry in compactions] == ["Continue summary"]
+
+
+@pytest.mark.anyio
+async def test_session_auto_compacts_between_turns_of_a_long_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # An unattended run is one prompt and many tool turns: a threshold checked
+    # only at prompt start let it grow until the provider refused it.
+    storage = JsonlSessionStorage(tmp_path / "session.jsonl")
+    tool_call = ToolCall(id="call-1", name="fetch", arguments={})
+    provider = FakeProvider(
+        [
+            [
+                assistant_start(model="fake"),
+                assistant_done(message=AssistantMessage(content="First answer")),
+            ],
+            [
+                assistant_start(model="fake"),
+                assistant_done(
+                    message=AssistantMessage(
+                        content=assistant_content("Fetching.", [tool_call]),
+                        stop_reason="toolUse",
+                    )
+                ),
+            ],
+            [
+                assistant_start(model="fake"),
+                assistant_done(message=AssistantMessage(content="Mid-run summary")),
+            ],
+            [
+                assistant_start(model="fake"),
+                assistant_done(message=AssistantMessage(content="Done")),
+            ],
+        ]
+    )
+    session = await CodingSession.load(
+        CodingSessionConfig(
+            provider=provider,
+            model="fake",
+            system="You are Tau.",
+            storage=storage,
+            cwd=tmp_path,
+            # The fetch is buffered down to a window, so the threshold sits just
+            # above the first prompt rather than counting on the whole result.
+            tools=[_fetch_tool("fetched " * 6_000)],
+            auto_compact_token_threshold=37_000,
+        )
+    )
+    extension_events = _record_extension_events(session, monkeypatch)
+    _first_events = await _collect_session_events(
+        session.prompt("Explain.\n" + ("old context " * 12_000))
+    )
+    assert not [entry for entry in await storage.read_all() if entry.type == "compaction"]
+    extension_events.clear()
+
+    events = await _collect_session_events(session.prompt("Fetch it."))
+
+    compactions = [entry for entry in await storage.read_all() if entry.type == "compaction"]
+    assert [entry.summary for entry in compactions] == ["Mid-run summary"]
+    sent = provider.calls[3][2]
+    assert sent[0].text == "Previous conversation summary:\nMid-run summary"
+    assert [message.role for message in sent[1:]] == ["user", "assistant", "toolResult"]
+    assert sent[1].text == "Fetch it."
+    assert [getattr(event, "type", None) for event in events].count("compaction_end") == 1
+    types = [getattr(event, "type", None) for event in extension_events]
+    assert types.index("compaction_start") < types.index("compaction_end")
+    assert types.index("compaction_end") < types.index("agent_end")
+    # The harness kept every message of the run, after the compaction too.
+    assert session.messages[-1].text == "Done"
