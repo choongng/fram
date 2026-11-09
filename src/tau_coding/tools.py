@@ -237,6 +237,7 @@ class ToolDefinition:
     executor: Callable[
         [Mapping[str, JSONValue], ToolCancellationToken | None], Awaitable[AgentToolResult]
     ]
+    changes_workspace: bool = False
     prepare_arguments: ToolArgumentPreparer | None = None
 
     def to_agent_tool(self) -> AgentTool:
@@ -270,6 +271,7 @@ class ToolDefinition:
             execute_fn=execute,
             prompt_snippet=self.prompt_snippet,
             prompt_guidelines=self.prompt_guidelines,
+            changes_workspace=self.changes_workspace,
             prepare_arguments=self.prepare_arguments,
         )
 
@@ -639,6 +641,7 @@ def create_write_tool_definition(*, cwd: str | Path | None = None) -> ToolDefini
             "required": ["path", "content"],
         },
         executor=execute,
+        changes_workspace=True,
     )
 
 
@@ -751,6 +754,7 @@ def create_edit_tool_definition(*, cwd: str | Path | None = None) -> ToolDefinit
             "additionalProperties": False,
         },
         executor=execute,
+        changes_workspace=True,
         prepare_arguments=_prepare_edit_arguments,
     )
 

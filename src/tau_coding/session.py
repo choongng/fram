@@ -15,6 +15,7 @@ from tau_agent.cache_hints import long_lived_conversation
 from tau_agent.events import (
     AgentEndEvent,
     AgentEvent,
+    AgentStartEvent,
     MessageEndEvent,
     ToolExecutionEndEvent,
     TurnEndEvent,
@@ -101,6 +102,7 @@ from tau_coding.events import (
 from tau_coding.extensions.provider_registry import DynamicProviderRegistry
 from tau_coding.extensions.providers import DynamicProvider, ProviderModel
 from tau_coding.extensions.runtime import ExtensionRuntime
+from tau_coding.guards import ToolCallGuards
 from tau_coding.history_index import (
     INDEX_MAX_CHARS,
     IndexNode,
@@ -577,6 +579,9 @@ class CodingSession:
         self._pending_message_writes: dict[int, _PendingMessageWrite] = {}
         self._prompt_cache_misses = PromptCacheMissDetector()
         self._recall_source = LateRecallSource()
+        self._tool_guards = ToolCallGuards(
+            tools=lambda: self._harness.config.tools, stop_run=lambda: self._harness.cancel()
+        )
         self._message_origins: dict[int, tuple[AgentMessage, MessageDelivery, MessageSource]] = {}
         self._attach_persistence_listener()
         self._stop_observing_queued_requests = observe_queued_requests(self._report_queued_request)
@@ -863,6 +868,7 @@ class CodingSession:
             project_trust_resolution=trust_resolution,
         )
         harness.config.after_tool_call = session._after_tool_call
+        harness.config.before_tool_call = session._refuse_unproductive_call
         session._recall_source = recall_source
         recall_source.bind(session.recall_branch)
         if config.owns_initial_provider:
@@ -1478,16 +1484,20 @@ class CodingSession:
         self, call: ToolCall, result: AgentToolResult, is_error: bool
     ) -> tuple[AgentToolResult, bool]:
         """Save a tool call's output and keep an oversized one out of the transcript."""
-        return (
-            self._buffer_result(
-                result,
-                tool_name=call.name,
-                first_line=read_first_line(call.arguments),
-                source_path=read_source_path(result.details) if call.name == "read" else None,
-                output_name=output_file_name(call.name, call.id),
-            ),
-            is_error,
+        shown = self._buffer_result(
+            result,
+            tool_name=call.name,
+            first_line=read_first_line(call.arguments),
+            source_path=read_source_path(result.details) if call.name == "read" else None,
+            output_name=output_file_name(call.name, call.id),
         )
+        if self._tool_guards.take_cleared(call):
+            self._tool_guards.record(call, result, shown, is_error)
+        return shown, is_error
+
+    async def _refuse_unproductive_call(self, call: ToolCall) -> tuple[bool, str | None]:
+        """Refuse a tool call the guards reject; see `ToolCallGuards`."""
+        return self._tool_guards.verdict(call, self._tool_guards.problem(call))
 
     def _buffer_result(
         self,
@@ -1784,6 +1794,8 @@ class CodingSession:
 
     async def _signals_after(self, event: AgentEvent) -> AsyncIterator[CodingSessionEvent]:
         """Yield session diagnostics that one agent event gives rise to."""
+        if isinstance(event, AgentStartEvent):
+            self._tool_guards.reset()
         if isinstance(event, MessageEndEvent) and isinstance(event.message, AssistantMessage):
             cache_miss = self._prompt_cache_misses.observe(event.message)
             if cache_miss is not None:
@@ -3342,6 +3354,7 @@ class CodingSession:
         self._state = replacement._state
         self._harness = replacement._harness
         self._harness.config.after_tool_call = self._after_tool_call
+        self._harness.config.before_tool_call = self._refuse_unproductive_call
         self._preview_model = None
         self._preview_thinking = None
         self._prompt_cache_misses = replacement._prompt_cache_misses
