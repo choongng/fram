@@ -1791,6 +1791,8 @@ class CodingSession:
 
     def _run_continues_after(self, event: TurnEndEvent) -> bool:
         """Whether the loop will send another request in this run."""
+        if self._harness.cancel_requested:
+            return False
         message = event.message
         if isinstance(message, AssistantMessage) and message.stop_reason in {"error", "aborted"}:
             return False

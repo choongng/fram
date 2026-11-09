@@ -26,6 +26,8 @@ from tau_agent import (
     Usage,
     UserMessage,
 )
+from tau_agent.events import TurnEndEvent
+from tau_agent.harness import SimpleCancellationToken
 from tau_agent.messages import AssistantMessageDiagnostic, assistant_content
 from tau_agent.provider_events import AssistantErrorEvent
 from tau_agent.session import (
@@ -8019,3 +8021,26 @@ def test_llama_cpp_context_size_error_is_an_overflow() -> None:
     )
 
     assert is_context_overflow_error(message)
+
+
+@pytest.mark.anyio
+async def test_a_cancelled_run_does_not_compact_between_turns(tmp_path: Path) -> None:
+    session = await CodingSession.load(
+        CodingSessionConfig(
+            provider=FakeProvider([]),
+            model="fake",
+            system="You are Tau.",
+            storage=JsonlSessionStorage(tmp_path / "session.jsonl"),
+            cwd=tmp_path,
+        )
+    )
+    turn = TurnEndEvent(
+        message=AssistantMessage(content=[ToolCall(id="c", name="bash", arguments={})])
+    )
+    assert session._run_continues_after(turn)
+
+    signal = SimpleCancellationToken()
+    signal.cancel()
+    session._harness._current_signal = signal
+
+    assert not session._run_continues_after(turn)

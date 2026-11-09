@@ -118,6 +118,11 @@ class AgentHarness:
 
         return unsubscribe
 
+    @property
+    def cancel_requested(self) -> bool:
+        """Whether the current run has been asked to stop."""
+        return self._current_signal is not None and self._current_signal.is_cancelled()
+
     def cancel(self) -> None:
         if self._current_signal is not None:
             self._current_signal.cancel()
