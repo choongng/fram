@@ -88,6 +88,9 @@ class AgentTool:
     execution_mode: ToolExecutionMode = "parallel"
     render_call: ToolCallRenderer | None = None
     render_result: ToolResultRenderer | None = None
+    #: The call can change the files other calls read (write, edit), so a
+    #: harness that remembers what a call gave forgets it after this one.
+    changes_workspace: bool = False
 
     @property
     def input_schema(self) -> Mapping[str, JSONValue]:

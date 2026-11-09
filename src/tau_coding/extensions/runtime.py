@@ -1203,6 +1203,7 @@ class ExtensionRuntime:
             prompt_guidelines=tool.prompt_guidelines,
             prepare_arguments=tool.prepare_arguments,
             execution_mode=tool.execution_mode,
+            changes_workspace=tool.changes_workspace,
             render_call=tool.render_call,
             render_result=tool.render_result,
         )
