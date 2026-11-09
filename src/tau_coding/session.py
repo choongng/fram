@@ -434,6 +434,8 @@ class CodingSessionConfig:
     keep the short default. See :mod:`tau_agent.cache_hints`.
     """
     thinking_level: ThinkingLevel = DEFAULT_THINKING_LEVEL
+    max_turns: int | None = None
+    """Turn budget per run (``--max-turns``); the run ends with a report turn."""
     thinking_level_override: ThinkingLevel | None = None
     """One-shot startup override (e.g. ``--thinking``) for the session's level.
 
@@ -831,6 +833,8 @@ class CodingSession:
                 model=active_model,
                 system=system,
                 tools=tools,
+                max_turns=config.max_turns,
+                report_at_max_turns=True,
                 session_id=config.session_id,
                 long_lived=config.long_lived,
             ),
@@ -3108,6 +3112,7 @@ class CodingSession:
                 session_id=record.id,
                 session_manager=manager,
                 command_registry=self._config.command_registry,
+                max_turns=self._config.max_turns,
                 long_lived=self._config.long_lived,
                 provider_name=provider_name,
                 inference_provider=None if dynamic_resume else record.inference_provider,
