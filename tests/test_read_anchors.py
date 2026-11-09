@@ -156,7 +156,7 @@ def test_an_oversized_read_is_windowed_by_size_not_line_count(tmp_path: Path) ->
     assert shown.count("\n") + 1 > WINDOW_LINES
     assert len(shown) <= limits.window_chars
     last = shown.split("\n")[-1].split("#")[0]
-    assert marker.startswith(f"lines 1-{last} of the file are shown (of 1-2000 asked)")
+    assert marker.startswith(f"lines 1-{last} of the file are shown (of 1-2000 returned)")
     assert f"continue with offset={int(last) + 1}." in marker
 
     # A wrapped line is not split between the window and what is left out.
@@ -173,3 +173,49 @@ def test_an_oversized_read_is_windowed_by_size_not_line_count(tmp_path: Path) ->
     assert shown.split("\n")[-1].startswith(tuple(f"{n}.3| " for n in range(1, 50)))
     last = int(shown.split("\n")[-1].split(".")[0])
     assert marker.startswith(f"lines 1-{last} of the file are shown")
+
+
+def test_a_cut_read_sends_the_model_back_to_the_source_file(tmp_path: Path) -> None:
+    text = "\n".join(f"{n}#abc| line {n}" for n in range(1, 2_001))
+
+    shown = buffer_tool_result(
+        AgentToolResult(content=[TextContent(text=text)]),
+        tool_name="read",
+        buffer_dir=tmp_path,
+        limits=BufferLimits(inline_chars=100, window_chars=500, window_lines=60),
+        source_path="/work/big.py",
+        output_name="read-c1.txt",
+    ).content[0]
+
+    assert isinstance(shown, TextContent)
+    assert " on /work/big.py.]" in shown.text
+    assert "Full output" not in shown.text
+
+
+@pytest.mark.anyio
+async def test_a_line_too_long_for_the_window_is_read_past(tmp_path: Path) -> None:
+    (tmp_path / "a.jsonl").write_text(f"short1\nshort2\n{'x' * 20_000}\nafter\n")
+    read = await create_read_tool(cwd=tmp_path).execute("c", {"path": "a.jsonl", "offset": 3})
+
+    shown = _text(
+        buffer_tool_result(
+            read,
+            tool_name="read",
+            buffer_dir=tmp_path,
+            limits=BufferLimits(inline_chars=16_000, window_chars=8_000),
+            source_path=str(tmp_path / "a.jsonl"),
+            first_line=3,
+        )
+    )
+
+    marker = shown.split("[Read cut: ")[1]
+    assert marker.startswith("line 3 is too long to show whole; its first ")
+    # Going on from line 3 would show the same part again.
+    assert "continue with read offset=4 on " in marker
+    seen = int(marker.split("its first ")[1].split(" characters")[0].replace(",", ""))
+    assert 0 < seen < 20_000
+    assert f"`sed -n '3p' {tmp_path / 'a.jsonl'} | cut -b {seen + 1}-`" in marker
+
+
+def test_row_prefixes_come_off_text_ending_in_a_newline() -> None:
+    assert strip_row_prefixes("1#abc| a = 1\n2#def| b = 2\n") == "a = 1\nb = 2\n"

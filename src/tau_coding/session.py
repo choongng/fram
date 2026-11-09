@@ -178,6 +178,7 @@ from tau_coding.tool_buffers import (
     default_buffer_dir,
     output_file_name,
     read_first_line,
+    read_source_path,
     session_outputs_dir,
 )
 from tau_coding.tools import ImageSupportState, create_bash_tool, create_coding_tools
@@ -1358,6 +1359,7 @@ class CodingSession:
                 result,
                 tool_name=call.name,
                 first_line=read_first_line(call.arguments),
+                source_path=read_source_path(result.details) if call.name == "read" else None,
                 output_name=output_file_name(call.name, call.id),
             ),
             is_error,
@@ -1369,6 +1371,7 @@ class CodingSession:
         *,
         tool_name: str,
         first_line: int = 1,
+        source_path: str | None = None,
         output_name: str | None = None,
     ) -> AgentToolResult:
         """Save a tool call's output beside the session file; window it if oversized.
@@ -1386,6 +1389,7 @@ class CodingSession:
                 self.context_window_tokens, self._config.tool_result_inline_tokens
             ),
             first_line=first_line,
+            source_path=source_path,
             output_name=output_name if buffer_dir is not None else None,
         )
 

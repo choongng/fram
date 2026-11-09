@@ -133,11 +133,13 @@ def strip_row_prefixes(text: str) -> str | None:
     """`text` with its row prefixes removed and wrapped rows rejoined.
 
     Returns None unless every line of `text` starts with a row prefix: text
-    that is only partly prefixed is not a copy of rows, and is left alone.
+    that is only partly prefixed is not a copy of rows, and is left alone. One
+    final newline is allowed and kept.
     A continuation row is joined to the row before it without a newline.
     """
     lines: list[str] = []
-    for row in text.split("\n"):
+    body = text.removesuffix("\n")
+    for row in body.split("\n"):
         match = _FIRST_ROW.match(row)
         if match is not None:
             lines.append(row[match.end() :])
@@ -149,4 +151,4 @@ def strip_row_prefixes(text: str) -> str | None:
             lines[-1] += row[match.end() :]
         else:
             lines.append(row[match.end() :])
-    return "\n".join(lines)
+    return "\n".join(lines) + text[len(body) :]

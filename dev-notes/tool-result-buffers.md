@@ -63,7 +63,7 @@ its prefixes on, so a copied row still matches.
 An oversized `read` is windowed by size, because a line can be a few characters
 of code or a few thousand of converted prose. The cut falls between file lines
 and the `[Read cut: ...]` note names the lines shown and the offset to continue
-from. An outline of the file's definitions and headings follows, with line
+from in the source file, not the saved copy, whose rows would be prefixed twice. An outline of the file's definitions and headings follows, with line
 numbers a read offset can use, so a model can jump to a section it would
 otherwise page towards and may never reach.
 

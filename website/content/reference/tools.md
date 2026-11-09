@@ -32,15 +32,18 @@ Reads a file from disk.
 For text files, `read` shows each line as `N#hhh| text`, where `N` is its line
 number and `hhh` a short hash; a line over 180 characters continues on `N.2| `
 rows. These prefixes are not file content, and `edit` accepts old text copied
-with them. `read` applies `offset`/`limit` to file lines and
-truncates to at most 2,000 lines or 50 KB (whichever comes first), appending a
-hint like `[42 more lines in file. Use offset=101 to continue.]`. Supported
-images (JPEG, static PNG, GIF, WebP, and BMP) are detected from their file
-content and sent to vision-capable models as image attachments. BMP files are
-converted to PNG. Tau validates images and, when necessary, resizes them without
-upscaling or changing their aspect ratio. The processed attachment is limited to
-2,000 pixels on either side and 5 MB. Processing also rejects source files above
-50 MB or 40 million pixels. Animated PNG and JPEG XL inputs receive explicit
+with them. `read` applies `offset`/`limit` to file lines and truncates to at
+most 2,000 lines or 50 KB (whichever comes first), appending a hint like
+`[42 more lines in file. Use offset=101 to continue.]`. In a session, a result
+over the inline limit in [Context](../guides/context.md) is cut again between
+lines, with a `[Read cut: ...]` note naming the offset to continue from and an
+outline of the file's definitions or headings. Supported images (JPEG, static
+PNG, GIF, WebP, and BMP) are detected from their file content and sent to
+vision-capable models as image attachments. BMP files are converted to PNG. Tau
+validates images and, when necessary, resizes them without upscaling or changing
+their aspect ratio. The processed attachment is limited to 2,000 pixels on
+either side and 5 MB. Processing also rejects source files above 50 MB or 40
+million pixels. Animated PNG and JPEG XL inputs receive explicit
 unsupported-format notices. If decoding, conversion, or resizing cannot produce
 a safe attachment, Tau returns a clear omission notice.
 

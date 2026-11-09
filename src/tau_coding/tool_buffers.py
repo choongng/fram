@@ -29,7 +29,7 @@ from pathlib import Path
 from tau_agent.messages import ImageContent, TextContent
 from tau_agent.tools import AgentToolResult
 from tau_coding.context_window import CHARS_PER_TOKEN
-from tau_coding.line_anchors import row_line_number
+from tau_coding.line_anchors import row_line_number, strip_row_prefixes
 
 #: The inline limit is this fraction of the model's context window...
 INLINE_WINDOW_DIVISOR = 50
@@ -151,6 +151,7 @@ def buffer_tool_result(
     buffer_dir: Path,
     limits: BufferLimits,
     first_line: int = 1,
+    source_path: str | None = None,
     output_name: str | None = None,
 ) -> AgentToolResult:
     """Return `result` unchanged if it fits inline, else a window plus a buffer path.
@@ -158,7 +159,9 @@ def buffer_tool_result(
     `first_line` is the file line the text starts at (a read's offset), so the
     marker and outline of a head-windowed read name the file's own line numbers.
     A read is cut by characters only, never by `window_lines`, and between file
-    lines where it can.
+    lines where it can. `source_path` is the file a read came from: its marker
+    sends the model back there rather than to the saved copy, whose rows would
+    carry a second set of prefixes and number rows instead of file lines.
 
     With `output_name`, the full text is saved as that file in `buffer_dir`
     whatever its size, so every output stays on disk; without it, only an
@@ -191,7 +194,12 @@ def buffer_tool_result(
     where = "first" if head else "last"
     if head:
         marker = _read_marker(
-            text, shown, first_line=first_line, location=location, failure=failure
+            text,
+            shown,
+            first_line=first_line,
+            source_path=source_path,
+            location=location,
+            failure=failure,
         )
     elif location is not None:
         marker = (
@@ -221,6 +229,12 @@ def read_first_line(arguments: Mapping[str, object]) -> int:
     if isinstance(offset, int) and not isinstance(offset, bool) and offset > 1:
         return offset
     return 1
+
+
+def read_source_path(details: object) -> str | None:
+    """The file a read result came from, from the read tool's details."""
+    path = details.get("path") if isinstance(details, Mapping) else None
+    return path if isinstance(path, str) else None
 
 
 def _read_window(text: str, max_chars: int) -> str:
@@ -259,7 +273,13 @@ def _continues(row: str) -> bool:
 
 
 def _read_marker(
-    text: str, shown: str, *, first_line: int, location: str | None, failure: str
+    text: str,
+    shown: str,
+    *,
+    first_line: int,
+    source_path: str | None,
+    location: str | None,
+    failure: str,
 ) -> str:
     """Which file lines a cut read shows, of those it returned, and where to go on."""
     body = _READ_TOOL_NOTE.sub("", text).removesuffix("\n")
@@ -277,14 +297,27 @@ def _read_marker(
         last_asked = first_line + body.count("\n")
         whole = shown.count("\n") + (1 if text[len(shown) : len(shown) + 1] in ("\n", "") else 0)
         last_shown = min(first_line + whole - 1, last_asked)
+    rest = ""
     if last_shown >= first_line:
         shown_part = f"lines {first_line}-{last_shown} of the file are shown"
+        next_line = last_shown + 1
     else:
+        # Not even one line fits. Going on from it would show the same part
+        # again, so go on from the line after, and say how to see the rest.
+        seen = strip_row_prefixes(shown)
         shown_part = f"line {first_line} is too long to show whole"
-    marker = (
-        f"[Read cut: {shown_part} (of {first_line}-{last_asked} asked); "
-        f"continue with offset={last_shown + 1}."
-    )
+        next_line = first_line + 1
+        where = source_path if source_path is not None else location
+        if seen is not None and where is not None:
+            shown_part = f"{shown_part}; its first {len(seen):,} characters are shown"
+            rest = (
+                f" The rest of line {first_line}: "
+                f"`sed -n '{first_line}p' {where} | cut -b {len(seen.encode()) + 1}-` through bash."
+            )
+    marker = f"[Read cut: {shown_part} (of {first_line}-{last_asked} returned); "
+    if source_path is not None:
+        return f"{marker}continue with read offset={next_line} on {source_path}.{rest}]"
+    marker = f"{marker}continue with offset={next_line}.{rest}"
     if location is not None:
         return f"{marker} Full output: {location}. Page it with read (offset/limit) or grep it.]"
     return f"{marker} The full output could not be saved ({failure}).]"

@@ -194,7 +194,7 @@ async def test_cut_read_marker_names_file_lines_and_next_offset(tmp_path: Path) 
     assert kept.startswith(f"100#{anchor_hash('row 100')}| row 100\n")
     assert len(kept) <= 8_000 and kept.count("\n") + 1 > 60
     last = int(kept.split("\n")[-1].split("#")[0])
-    assert f"lines 100-{last} of the file are shown (of 100-2000 asked)" in shown
+    assert f"lines 100-{last} of the file are shown (of 100-2000 returned)" in shown
     assert f"continue with offset={last + 1}" in shown
     [path] = list((tmp_path / "buffers").iterdir())
     assert f"Full output: {path}" in shown
@@ -215,7 +215,7 @@ def test_char_cut_read_marker_names_the_last_whole_line(tmp_path: Path) -> None:
     )
 
     # 450 chars are four whole 100-char lines and part of a fifth.
-    assert "lines 11-14 of the file are shown (of 11-110 asked)" in shown
+    assert "lines 11-14 of the file are shown (of 11-110 returned)" in shown
     assert "continue with offset=15" in shown
 
 
@@ -239,7 +239,7 @@ async def test_read_with_explicit_limit_fills_the_char_window(tmp_path: Path) ->
 
     rows = [line for line in shown.split("\n") if "| r" in line]
     assert len(rows) == 300 > 60
-    assert "lines 1-300 of the file are shown (of 1-300 asked)" in shown
+    assert "lines 1-300 of the file are shown (of 1-300 returned)" in shown
     assert "continue with offset=301" in shown
 
 
@@ -301,7 +301,7 @@ async def test_cut_read_through_session_outline_carries_file_line_numbers(
     last = int(shown.split("\n[Read cut")[0].split("\n")[-1].split("#")[0])
     assert last > 160
     assert f"lines 101-{last} of the file are shown" in shown
-    assert f"continue with offset={last + 1}" in shown
+    assert f"continue with read offset={last + 1}" in shown
     outline = shown.split("Definitions (", 1)[1]
     late = next(name for name, line in where.items() if line > 400 and "class" in name)
     assert f"L{where[late]} {late}" in outline

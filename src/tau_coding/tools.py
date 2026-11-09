@@ -114,7 +114,6 @@ class TruncationResult:
     total_bytes: int
     output_lines: int
     output_bytes: int
-    last_line_partial: bool
     first_line_exceeds_limit: bool
     max_lines: int
     max_bytes: int
@@ -387,7 +386,8 @@ def create_read_tool_definition(
         details: dict[str, JSONValue] = {"path": str(path), "truncation": truncation.to_json()}
 
         if truncation.first_line_exceeds_limit:
-            first_line_size = format_size(len(all_lines[start_line].encode()))
+            rows = "\n".join(line_rows(start_display, all_lines[start_line]))
+            first_line_size = format_size(len(rows.encode()))
             output = (
                 f"[Line {start_display} is {first_line_size}, exceeds "
                 f"{format_size(DEFAULT_MAX_OUTPUT_BYTES)} limit. Use bash: sed -n "
@@ -1040,7 +1040,6 @@ def _truncation_result(
     output_lines: int,
     output_bytes: int,
     *,
-    last_line_partial: bool = False,
     first_line: bool = False,
 ) -> TruncationResult:
     return TruncationResult(
@@ -1051,7 +1050,6 @@ def _truncation_result(
         total_bytes=total_bytes,
         output_lines=output_lines,
         output_bytes=output_bytes,
-        last_line_partial=last_line_partial,
         first_line_exceeds_limit=first_line,
         max_lines=DEFAULT_MAX_OUTPUT_LINES,
         max_bytes=DEFAULT_MAX_OUTPUT_BYTES,
