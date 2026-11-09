@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
+from typing import Any
 
 from tau_agent.messages import (
     AssistantMessage,
@@ -78,10 +79,34 @@ def _copy_replay_metadata(target: AssistantMessage, source: AssistantMessage) ->
         target_text_block.text_signature = source_text_block.text_signature
 
 
+#: A Responses-API reply stopped by a content filter. Unlike the output limit,
+#: it says nothing about whether the last tool call was cut.
+FILTERED_INCOMPLETE = "incomplete:content_filter"
+
+
+def responses_status(response: Mapping[str, Any]) -> str | None:
+    """A Responses-API response's status, telling a content filter from the limit."""
+    status = response.get("status")
+    if not isinstance(status, str):
+        return None
+    details = response.get("incomplete_details")
+    if (
+        status == "incomplete"
+        and isinstance(details, Mapping)
+        and details.get("reason") == "content_filter"
+    ):
+        return FILTERED_INCOMPLETE
+    return status
+
+
 def _finish_reason(value: str | None, *, has_tools: bool) -> str:
+    # The output limit wins over a tool call: the call it ends is cut off, and
+    # the agent loop answers it without running it.
+    if value in {"length", "max_tokens", "MAX_TOKENS", "incomplete"}:
+        return "length"
     if has_tools or value in {"tool_calls", "tool_use", "toolUse"}:
         return "toolUse"
-    if value in {"length", "max_tokens", "MAX_TOKENS", "incomplete"}:
+    if value == FILTERED_INCOMPLETE:
         return "length"
     return "stop"
 

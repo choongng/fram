@@ -520,6 +520,7 @@ def _object_or_empty(value: object) -> dict[str, JSONValue]:
 
 
 def _normalize_finish_reason(reason: str | None, *, has_tool_calls: bool) -> str:
+    # Function calls arrive whole, so a limit reached after one did not cut it.
     if has_tool_calls:
         return "tool_calls"
     if reason in {"MAX_TOKENS", "MODEL_ARMOR", "RECITATION"}:

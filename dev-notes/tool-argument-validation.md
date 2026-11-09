@@ -77,6 +77,8 @@ Paths are written as `limit`, `ranges[1].start` or `options.mode`.
 
 ## Order
 
+0. A call cut off at the output limit is answered with a note. It never runs,
+   and `before_tool_call` doesn't see it; `after_tool_call` still does.
 1. `before_tool_call` may block the call.
 2. An unknown tool name is refused.
 3. The tool's `prepare_arguments`, if any, rewrites the arguments.

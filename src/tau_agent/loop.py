@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from time import monotonic_ns
 
@@ -180,6 +181,7 @@ async def run_agent_loop(
             tool_results: list[ToolResultMessage] = []
             calls = list(assistant.tool_calls)
             has_more_tools = bool(calls)
+            cut = calls[-1] if calls and assistant.stop_reason == "length" else None
             for call in calls:
                 cancelled_before = signal is not None and signal.is_cancelled()
                 async for event in _execute_tool_call(
@@ -188,6 +190,7 @@ async def run_agent_loop(
                     signal,
                     before_tool_call,
                     after_tool_call,
+                    cut_note=_cut_tool_call_note(call) if call is cut else None,
                 ):
                     yield event
                     if isinstance(event, MessageEndEvent) and isinstance(
@@ -334,7 +337,11 @@ async def _execute_tool_call(
     signal: CancellationToken | None,
     before_tool_call: BeforeToolCall | None,
     after_tool_call: AfterToolCall | None,
+    *,
+    cut_note: str | None = None,
 ) -> AsyncIterator[AgentEvent]:
+    """Run `call`; a call cut off at the output limit (`cut_note`) is not run
+    and is answered with the note instead."""
     yield ToolExecutionStartEvent(
         tool_call_id=call.id,
         tool_name=call.name,
@@ -343,7 +350,9 @@ async def _execute_tool_call(
 
     blocked = False
     block_reason: str | None = None
-    if before_tool_call is not None:
+    if cut_note is not None:
+        blocked, block_reason = True, cut_note
+    elif before_tool_call is not None:
         blocked, block_reason = await before_tool_call(call)
 
     if blocked:
@@ -396,9 +405,9 @@ async def _execute_tool_call(
 def _checked_arguments(
     tool: AgentTool, call: ToolCall
 ) -> tuple[Mapping[str, JSONValue], list[str]]:
-    # Arguments that did not parse as JSON arrive as `_raw_arguments` alone,
+    # Arguments that did not parse as JSON arrive as `RAW_ARGUMENTS` alone,
     # and the tool reports those itself.
-    if set(call.arguments) == {"_raw_arguments"}:
+    if set(call.arguments) == {RAW_ARGUMENTS}:
         return call.arguments, []
     arguments: Mapping[str, JSONValue] = call.arguments
     if tool.prepare_arguments is not None:
@@ -431,6 +440,28 @@ async def _run_tool(
         return _error_result(str(exc)), True, updates
     finally:
         accepting = False
+
+
+#: The one argument a provider hands on for a call whose argument text is not
+#: valid JSON: the text itself.
+RAW_ARGUMENTS = "_raw_arguments"
+
+
+def _cut_tool_call_note(call: ToolCall) -> str:
+    """The answer to `call`, the last call of a reply that ended at the output
+    limit while writing it.
+
+    A cut call is not run: its arguments end where the limit fell, so even ones
+    that parse may be incomplete. The model is told so and how to send less.
+    """
+    raw = call.arguments.get(RAW_ARGUMENTS) if set(call.arguments) == {RAW_ARGUMENTS} else None
+    chars = len(raw) if isinstance(raw, str) else len(json.dumps(call.arguments))
+    return (
+        f"This {call.name} call was cut off: the reply reached the output limit after "
+        f"{chars} characters of its arguments. It did not run, and nothing it would have "
+        "done was done. Send less in one call: to write or edit a file, write it in "
+        "smaller parts, one call per part."
+    )
 
 
 def _error_result(message: str) -> AgentToolResult:
