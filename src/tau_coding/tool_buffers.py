@@ -7,9 +7,10 @@ of it (the tail by default, the head for `read`) plus a marker that names the
 file. The model pages the rest in with tools it already knows: `read` with
 `offset`/`limit`, or `grep` through `bash`.
 
-A session saves every tool result, small ones too, as
+A session saves every tool result but a successful read's, small ones too, as
 `<session>.outputs/<tool>-<call-id>.txt` (`output_file_name`), so old outputs
-stay greppable after they leave context. Output with no call to name it by (a
+stay greppable after they leave context. A read is left out because its file is
+already on disk. Output with no call to name it by (a
 user's terminal command) is named by a hash of its content, so the same output
 always gets the same path. See dev-notes/tool-result-buffers.md.
 """
@@ -159,9 +160,9 @@ def buffer_tool_result(
     `first_line` is the file line the text starts at (a read's offset), so the
     marker and outline of a head-windowed read name the file's own line numbers.
     A read is cut by characters only, never by `window_lines`, and between file
-    lines where it can. `source_path` is the file a read came from: its marker
-    sends the model back there rather than to the saved copy, whose rows would
-    carry a second set of prefixes and number rows instead of file lines.
+    lines where it can. `source_path` is the file a read came from: nothing is
+    saved, because the file is already on disk, and the marker sends the model
+    back there.
 
     With `output_name`, the full text is saved as that file in `buffer_dir`
     whatever its size, so every output stays on disk; without it, only an
@@ -172,14 +173,14 @@ def buffer_tool_result(
     text = "\n".join(texts)
     location: str | None = None
     failure = ""
-    if output_name is not None:
+    if output_name is not None and source_path is None:
         try:
             location = str(_write_output(_unused_path(buffer_dir / output_name), text))
         except OSError as exc:
             failure = f"{type(exc).__name__}: {exc}"
     if len(text) <= limits.inline_chars:
         return result
-    if output_name is None:
+    if output_name is None and source_path is None:
         try:
             location = str(_write_buffer(buffer_dir, text))
         except OSError as exc:

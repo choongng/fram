@@ -219,3 +219,16 @@ async def test_a_line_too_long_for_the_window_is_read_past(tmp_path: Path) -> No
 
 def test_row_prefixes_come_off_text_ending_in_a_newline() -> None:
     assert strip_row_prefixes("1#abc| a = 1\n2#def| b = 2\n") == "a = 1\nb = 2\n"
+
+
+def test_a_read_is_not_saved(tmp_path: Path) -> None:
+    buffer_tool_result(
+        AgentToolResult(content=[TextContent(text="1#abc| small")]),
+        tool_name="read",
+        buffer_dir=tmp_path,
+        limits=BufferLimits(inline_chars=100, window_chars=500, window_lines=60),
+        source_path="/work/small.py",
+        output_name="read-c1.txt",
+    )
+
+    assert list(tmp_path.iterdir()) == []
