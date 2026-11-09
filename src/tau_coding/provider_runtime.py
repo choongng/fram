@@ -58,6 +58,7 @@ from tau_coding.provider_config import (
     provider_model_max_tokens,
     provider_model_supports_images,
     provider_thinking_levels,
+    resolve_upstream_thinking_level,
     validate_huggingface_inference_provider,
     validate_provider_model,
 )
@@ -387,6 +388,9 @@ def _codex_reasoning_effort(
     model: str | None,
     thinking_level: ThinkingLevel | None,
 ) -> str | None:
+    thinking_level = resolve_upstream_thinking_level(
+        provider, model=model, thinking_level=thinking_level
+    )
     if thinking_level is None or provider.thinking_parameter != "reasoning.effort":
         return None
     levels = provider_thinking_levels(provider, model=model)

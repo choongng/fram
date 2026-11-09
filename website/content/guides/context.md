@@ -168,6 +168,39 @@ with nothing done. Tau asks the model to act on its reasoning so far, up to
 twice in a row. Replies that don't act on the request count toward a limit of
 six per run.
 
+## Runaway reasoning
+
+When a model exposes its reasoning, Tau watches it as it streams. If the
+reasoning starts going round the same text, or passes a budget, Tau ends that
+reply and asks the model to act on what it has. A looped passage is left out of
+the follow-up request; reasoning cut by a budget is kept so the model can build
+on it.
+
+A budget applies when you set one, or when the thinking level is sent to the
+provider only as on or off, so the level would otherwise have no effect. Those
+level budgets are 4,096 characters for `minimal`, 8,192 for `low`, 32,768 for
+`medium` and 65,536 for `high`. A budget is kept under the model's output limit,
+with room left for the reply.
+
+To change it while a session is running, use `/reasoning-guard`:
+
+```text
+/reasoning-guard          # show the current state and budget
+/reasoning-guard 20000    # budget of 20,000 characters of reasoning per turn
+/reasoning-guard off      # no loop cut and no budget
+/reasoning-guard on       # back to the default behaviour
+```
+
+The new value takes effect at the next provider request, even in the middle of a
+run, and applies to the current session only. A value you set wins over the
+`TAU_TURN_REASONING_CHARS` and `TAU_TURN_REASONING_TOKENS` environment
+variables. To choose at startup, use `--reasoning-guard` or
+`TAU_REASONING_GUARD`.
+
+A low budget can cut long reasoning that was going somewhere. `off` covers only
+this guard: repeated tool calls and tool arguments that start repeating are
+still stopped.
+
 ## Malformed tool calls
 
 Some models run a chat template's control tokens, such as `<|tool_call>`, into a
@@ -204,10 +237,14 @@ Some models can spend extra effort reasoning before answering. Tau exposes a
 thinking level you can cycle:
 
 ```text
-off → minimal → low → medium → high → xhigh → max
+default → off → minimal → low → medium → high → xhigh → max
 ```
 
-- **Shift+Tab** cycles the thinking level (default is `medium`).
+`default` leaves the choice downstream: Tau uses the provider catalog's
+`thinking_default` if the model supports it, and otherwise sends no thinking
+setting so the server decides.
+
+- **Shift+Tab** cycles the thinking level (Tau starts at `medium`).
 - **Ctrl+T** toggles whether reasoning tokens are shown (hidden by default).
   Reasoning blocks are saved with the assistant response, so their original
   positions and visibility toggle are restored when you resume a session.

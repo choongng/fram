@@ -53,6 +53,7 @@ from tau_coding.provider_config import (
     upsert_openai_compatible_provider,
 )
 from tau_coding.provider_runtime import ClosableModelProvider, create_model_provider
+from tau_coding.reasoning_guard import REASONING_GUARD_ENV, parse_reasoning_guard
 from tau_coding.rendering import PrintOutputMode, create_event_renderer
 from tau_coding.resources import ResourceDiagnostic, TauResourcePaths
 from tau_coding.rpc import RpcServer
@@ -71,7 +72,12 @@ from tau_coding.session_export import (
 from tau_coding.session_manager import CodingSessionRecord, SessionManager, validate_session_id
 from tau_coding.session_preparation import prepare_coding_session
 from tau_coding.shell_config import load_shell_settings
-from tau_coding.thinking import THINKING_LEVELS, ThinkingLevel, normalize_thinking_level
+from tau_coding.thinking import (
+    THINKING_LEVELS,
+    UPSTREAM_THINKING_LEVEL,
+    ThinkingLevel,
+    normalize_thinking_level,
+)
 from tau_coding.tui import run_tui_app
 from tau_coding.update_check import (
     UpdateNotice,
@@ -247,7 +253,8 @@ def main(
             "-t",
             help=(
                 "Initial thinking level for this run "
-                f"({', '.join(THINKING_LEVELS)}). "
+                f"({', '.join((UPSTREAM_THINKING_LEVEL, *THINKING_LEVELS))}; default defers "
+                "to the catalog's thinking_default, else the server's own). "
                 "Overrides remembered defaults without persisting."
             ),
         ),
@@ -366,6 +373,13 @@ def main(
             help="Automatically compact TUI context above this rough token estimate.",
         ),
     ] = None,
+    reasoning_guard: Annotated[
+        str | None,
+        typer.Option(
+            "--reasoning-guard",
+            help="Reasoning loop cut and thinking budget: on, off or characters per turn.",
+        ),
+    ] = None,
     extension: Annotated[
         list[Path] | None,
         typer.Option(
@@ -479,6 +493,13 @@ def main(
             raise typer.BadParameter(str(exc)) from exc
 
     rpc_requested = mode is PrintOutputMode.rpc
+    if reasoning_guard is not None:
+        try:
+            parse_reasoning_guard(reasoning_guard)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc), param_hint="--reasoning-guard") from exc
+        # Print, RPC and the TUI each build their session; all read this at startup.
+        environ[REASONING_GUARD_ENV] = reasoning_guard
     print_requested = print_mode or (mode is not None and not rpc_requested)
     effective_output = mode or PrintOutputMode.text
     if max_turns is not None and not print_requested:

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
-from typing import Any
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
+from contextlib import aclosing
+from typing import Any, cast
 
 from tau_agent.messages import (
     AssistantMessage,
@@ -133,128 +134,132 @@ async def canonicalize_provider_stream(
     started = False
     terminal = False
 
-    async for event in source:
-        if isinstance(event, ProviderRetryEvent):
-            # Retries never become assistant content; they are surfaced as a
-            # transient status (AssistantRetryEvent -> ProviderRetryEvent) so a
-            # frontend can say why the agent is quiet between attempts.
-            yield AssistantRetryEvent(
-                attempt=event.attempt,
-                max_attempts=event.max_attempts,
-                delay_seconds=event.delay_seconds,
-                message=event.message,
-            )
-            continue
-        if isinstance(event, ProviderResponseStartEvent):
-            if event.response_provider is not None:
-                partial.response_provider = event.response_provider
+    # A consumer that stops early must release the HTTP response and timers now.
+    async with aclosing(cast("AsyncGenerator[ProviderEvent, None]", source)):
+        async for event in source:
+            if isinstance(event, ProviderRetryEvent):
+                # Retries never become assistant content; they are surfaced as a
+                # transient status (AssistantRetryEvent -> ProviderRetryEvent) so a
+                # frontend can say why the agent is quiet between attempts.
+                yield AssistantRetryEvent(
+                    attempt=event.attempt,
+                    max_attempts=event.max_attempts,
+                    delay_seconds=event.delay_seconds,
+                    message=event.message,
+                )
+                continue
+            if isinstance(event, ProviderResponseStartEvent):
+                if event.response_provider is not None:
+                    partial.response_provider = event.response_provider
+                if not started:
+                    started = True
+                    yield AssistantStartEvent(partial=_snapshot(partial))
+                continue
             if not started:
                 started = True
                 yield AssistantStartEvent(partial=_snapshot(partial))
-            continue
-        if not started:
-            started = True
-            yield AssistantStartEvent(partial=_snapshot(partial))
 
-        if isinstance(event, ProviderTextDeltaEvent):
-            if independent_channels:
-                active_index = channel_indices.get("text")
-                active_kind = "text" if active_index is not None else None
-            if active_kind != "text":
-                if not independent_channels:
-                    async for end_event in _end_active_block(partial, active_index):
-                        yield end_event
-                active_index = len(partial.content)
-                active_kind = "text"
-                partial.content.append(TextContent(text=""))
-                channel_indices["text"] = active_index
-                yield TextStartEvent(content_index=active_index, partial=_snapshot(partial))
-            assert active_index is not None
-            block = partial.content[active_index]
-            assert isinstance(block, TextContent)
-            block.text += event.delta
-            yield TextDeltaEvent(
-                content_index=active_index,
-                delta=event.delta,
-                partial=_snapshot(partial),
-            )
-        elif isinstance(event, ProviderThinkingDeltaEvent):
-            if independent_channels:
-                active_index = channel_indices.get("thinking")
-                active_kind = "thinking" if active_index is not None else None
-            if active_kind != "thinking":
-                if not independent_channels:
-                    async for end_event in _end_active_block(partial, active_index):
-                        yield end_event
-                active_index = len(partial.content)
-                active_kind = "thinking"
-                partial.content.append(ThinkingContent(thinking=""))
-                channel_indices["thinking"] = active_index
-                yield ThinkingStartEvent(
+            if isinstance(event, ProviderTextDeltaEvent):
+                if independent_channels:
+                    active_index = channel_indices.get("text")
+                    active_kind = "text" if active_index is not None else None
+                if active_kind != "text":
+                    if not independent_channels:
+                        async for end_event in _end_active_block(partial, active_index):
+                            yield end_event
+                    active_index = len(partial.content)
+                    active_kind = "text"
+                    partial.content.append(TextContent(text=""))
+                    channel_indices["text"] = active_index
+                    yield TextStartEvent(content_index=active_index, partial=_snapshot(partial))
+                assert active_index is not None
+                block = partial.content[active_index]
+                assert isinstance(block, TextContent)
+                block.text += event.delta
+                yield TextDeltaEvent(
                     content_index=active_index,
+                    delta=event.delta,
                     partial=_snapshot(partial),
                 )
-            assert active_index is not None
-            block = partial.content[active_index]
-            assert isinstance(block, ThinkingContent)
-            block.thinking += event.delta
-            yield ThinkingDeltaEvent(
-                content_index=active_index,
-                delta=event.delta,
-                partial=_snapshot(partial),
-            )
-        elif isinstance(event, ProviderToolCallEvent):
-            indices = list(channel_indices.values()) if independent_channels else [active_index]
-            for index in indices:
-                async for end_event in _end_active_block(partial, index):
-                    yield end_event
-            channel_indices.clear()
-            active_index = None
-            active_kind = None
-            index = len(partial.content)
-            partial.content.append(event.tool_call.model_copy(deep=True))
-            yield ToolCallStartEvent(content_index=index, partial=_snapshot(partial))
-            yield ToolCallEndEvent(
-                content_index=index,
-                tool_call=event.tool_call,
-                partial=_snapshot(partial),
-            )
-        elif isinstance(event, ProviderResponseEndEvent):
-            indices = list(channel_indices.values()) if independent_channels else [active_index]
-            for index in indices:
-                async for end_event in _end_active_block(partial, index):
-                    yield end_event
-            channel_indices.clear()
-            active_index = None
-            active_kind = None
+            elif isinstance(event, ProviderThinkingDeltaEvent):
+                if independent_channels:
+                    active_index = channel_indices.get("thinking")
+                    active_kind = "thinking" if active_index is not None else None
+                if active_kind != "thinking":
+                    if not independent_channels:
+                        async for end_event in _end_active_block(partial, active_index):
+                            yield end_event
+                    active_index = len(partial.content)
+                    active_kind = "thinking"
+                    partial.content.append(ThinkingContent(thinking=""))
+                    channel_indices["thinking"] = active_index
+                    yield ThinkingStartEvent(
+                        content_index=active_index,
+                        partial=_snapshot(partial),
+                    )
+                assert active_index is not None
+                block = partial.content[active_index]
+                assert isinstance(block, ThinkingContent)
+                block.thinking += event.delta
+                yield ThinkingDeltaEvent(
+                    content_index=active_index,
+                    delta=event.delta,
+                    partial=_snapshot(partial),
+                )
+            elif isinstance(event, ProviderToolCallEvent):
+                indices = list(channel_indices.values()) if independent_channels else [active_index]
+                for index in indices:
+                    async for end_event in _end_active_block(partial, index):
+                        yield end_event
+                channel_indices.clear()
+                active_index = None
+                active_kind = None
+                index = len(partial.content)
+                partial.content.append(event.tool_call.model_copy(deep=True))
+                yield ToolCallStartEvent(content_index=index, partial=_snapshot(partial))
+                yield ToolCallEndEvent(
+                    content_index=index,
+                    tool_call=event.tool_call,
+                    partial=_snapshot(partial),
+                )
+            elif isinstance(event, ProviderResponseEndEvent):
+                indices = list(channel_indices.values()) if independent_channels else [active_index]
+                for index in indices:
+                    async for end_event in _end_active_block(partial, index):
+                        yield end_event
+                channel_indices.clear()
+                active_index = None
+                active_kind = None
 
-            # Preserve the exact streamed content order. The parser's final
-            # message remains authoritative only for response metadata/usage.
-            final = event.message.model_copy(deep=True)
-            final.api = api
-            final.provider = provider
-            final.model = model
-            final.response_provider = event.message.response_provider or partial.response_provider
-            final.content = [block.model_copy(deep=True) for block in partial.content]
-            if not final.content and event.message.content:
-                final.content = [block.model_copy(deep=True) for block in event.message.content]
-            _copy_replay_metadata(final, event.message)
-            final.stop_reason = _finish_reason(
-                event.finish_reason,
-                has_tools=bool(final.tool_calls),
-            )  # type: ignore[assignment]
-            yield AssistantDoneEvent(reason=final.stop_reason, message=final)  # type: ignore[arg-type]
-            terminal = True
-        elif isinstance(event, ProviderErrorEvent):
-            error = partial.model_copy(deep=True)
-            error.response_provider = event.response_provider or partial.response_provider
-            error.stop_reason = "error"
-            error.error_message = event.message
-            error.diagnostics = [
-                AssistantMessageDiagnostic(type="provider_error", details=event.data)
-            ]
-            yield AssistantErrorEvent(reason="error", error=error)
-            terminal = True
+                # Preserve the exact streamed content order. The parser's final
+                # message remains authoritative only for response metadata/usage.
+                final = event.message.model_copy(deep=True)
+                final.api = api
+                final.provider = provider
+                final.model = model
+                final.response_provider = (
+                    event.message.response_provider or partial.response_provider
+                )
+                final.content = [block.model_copy(deep=True) for block in partial.content]
+                if not final.content and event.message.content:
+                    final.content = [block.model_copy(deep=True) for block in event.message.content]
+                _copy_replay_metadata(final, event.message)
+                final.stop_reason = _finish_reason(
+                    event.finish_reason,
+                    has_tools=bool(final.tool_calls),
+                )  # type: ignore[assignment]
+                yield AssistantDoneEvent(reason=final.stop_reason, message=final)  # type: ignore[arg-type]
+                terminal = True
+            elif isinstance(event, ProviderErrorEvent):
+                error = partial.model_copy(deep=True)
+                error.response_provider = event.response_provider or partial.response_provider
+                error.stop_reason = "error"
+                error.error_message = event.message
+                error.diagnostics = [
+                    AssistantMessageDiagnostic(type="provider_error", details=event.data)
+                ]
+                yield AssistantErrorEvent(reason="error", error=error)
+                terminal = True
 
     if not started:
         yield AssistantStartEvent(partial=_snapshot(partial))

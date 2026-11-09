@@ -50,8 +50,9 @@ features and fixes.
 | `-p, --print` | Run the positional prompt in non-interactive print mode |
 | `-m, --model TEXT` | Model to request from the provider |
 | `--provider TEXT` | Configured provider name to use |
-| `-t, --thinking LEVEL` | Initial [thinking level](/guides/context/#thinking-modes) for this run (`off`…`max`); overrides remembered defaults without persisting, errors if the model doesn't support it |
+| `-t, --thinking LEVEL` | Initial [thinking level](/guides/context/#thinking-modes) for this run (`default`, or `off`…`max`); overrides remembered defaults without persisting, errors if the model doesn't support it |
 | `--max-turns N` | Print mode: turn budget for the run. The model is warned two turns before it, then gets one last reply for a final report, and any tool call in it is not run |
+| `--reasoning-guard VALUE` | Start with the reasoning guard `on`, `off`, or set to a per-turn budget in characters. Same as `TAU_REASONING_GUARD`. |
 | `--cwd PATH` | Working directory for the built-in tools |
 | `--mode [text\|json\|transcript\|rpc]` | Select headless output; `rpc` starts the JSONL subprocess protocol |
 | `--session TEXT` | Resume a session id in the TUI or print mode |

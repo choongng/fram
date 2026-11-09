@@ -29,6 +29,7 @@ from tau_coding.provider_config import (
     provider_thinking_unavailable_reason,
     resolve_provider_selection,
     resolve_startup_thinking_level,
+    resolve_upstream_thinking_level,
     save_provider_settings,
     set_default_provider_model,
     set_provider_thinking_level,
@@ -161,6 +162,7 @@ def test_builtin_openai_declares_model_scoped_thinking_capabilities() -> None:
     assert settings.get_provider("anthropic").context_windows["claude-sonnet-4-6"] == 1_000_000
     assert openrouter.context_windows["openai/gpt-5.5"] == 1_050_000
     assert provider_thinking_levels(openai, model="gpt-5.5") == (
+        "default",
         "off",
         "low",
         "medium",
@@ -175,6 +177,7 @@ def test_builtin_openai_declares_model_scoped_thinking_capabilities() -> None:
         == "openai:gpt-4.1 is not a reasoning model"
     )
     assert provider_thinking_levels(openrouter, model="openai/gpt-5.5") == (
+        "default",
         "off",
         "low",
         "medium",
@@ -183,6 +186,7 @@ def test_builtin_openai_declares_model_scoped_thinking_capabilities() -> None:
     )
     assert provider_thinking_unavailable_reason(openrouter, model="openai/gpt-5.5") is None
     assert provider_thinking_levels(openrouter, model="anthropic/claude-sonnet-4.6") == (
+        "default",
         "low",
         "medium",
         "high",
@@ -193,6 +197,7 @@ def test_builtin_openai_declares_model_scoped_thinking_capabilities() -> None:
         is None
     )
     assert provider_thinking_levels(huggingface, model="MiniMaxAI/MiniMax-M2.7") == (
+        "default",
         "off",
         "minimal",
         "low",
@@ -201,6 +206,7 @@ def test_builtin_openai_declares_model_scoped_thinking_capabilities() -> None:
     )
     assert provider_thinking_unavailable_reason(huggingface, model="MiniMaxAI/MiniMax-M2.7") is None
     assert provider_thinking_levels(codex, model="gpt-5.5") == (
+        "default",
         "off",
         "minimal",
         "low",
@@ -210,6 +216,7 @@ def test_builtin_openai_declares_model_scoped_thinking_capabilities() -> None:
     )
     assert provider_thinking_unavailable_reason(codex, model="gpt-5.5") is None
     assert provider_thinking_levels(anthropic, model="claude-sonnet-4-6") == (
+        "default",
         "low",
         "medium",
         "high",
@@ -217,6 +224,7 @@ def test_builtin_openai_declares_model_scoped_thinking_capabilities() -> None:
     )
     assert provider_thinking_unavailable_reason(anthropic, model="claude-sonnet-4-6") is None
     assert provider_thinking_levels(anthropic, model="claude-haiku-4-5") == (
+        "default",
         "off",
         "minimal",
         "low",
@@ -224,6 +232,7 @@ def test_builtin_openai_declares_model_scoped_thinking_capabilities() -> None:
         "high",
     )
     assert provider_thinking_levels(anthropic, model="claude-opus-5") == (
+        "default",
         "low",
         "medium",
         "high",
@@ -968,7 +977,10 @@ def test_resolve_startup_thinking_level_keeps_supported_default() -> None:
     provider = _kimi_code_like_provider()
 
     # kimi-for-coding supports global medium but not K3's xhigh default.
-    assert provider_thinking_levels(provider, model="kimi-for-coding") == ("medium",)
+    assert provider_thinking_levels(provider, model="kimi-for-coding") == (
+        "default",
+        "medium",
+    )
     assert resolve_startup_thinking_level(provider, "kimi-for-coding") == "medium"
 
 
@@ -1266,7 +1278,7 @@ def test_kimi_k3_maps_thinking_levels_to_reasoning_effort(
         thinking_level=level,
     )
 
-    assert provider_thinking_levels(provider, model="k3") == ("low", "high", "max")
+    assert provider_thinking_levels(provider, model="k3") == ("default", "low", "high", "max")
     assert config.reasoning_effort == expected_effort
 
 
@@ -1290,6 +1302,7 @@ def test_huggingface_kimi_k3_maps_thinking_levels_to_reasoning_effort(
     )
 
     assert provider_thinking_levels(provider, model="moonshotai/Kimi-K3") == (
+        "default",
         "low",
         "high",
         "max",
@@ -1311,6 +1324,7 @@ def test_huggingface_glm_5_2_does_not_send_unverified_medium_effort(
     )
 
     assert provider_thinking_levels(provider, model="zai-org/GLM-5.2") == (
+        "default",
         "off",
         "high",
         "max",
@@ -1621,7 +1635,7 @@ def test_provider_settings_from_json_loads_custom_thinking_capabilities() -> Non
     provider = settings.get_provider("local")
 
     assert isinstance(provider, OpenAICompatibleProviderConfig)
-    assert provider_thinking_levels(provider, model="reasoner") == ("off", "low", "high")
+    assert provider_thinking_levels(provider, model="reasoner") == ("default", "off", "low", "high")
     assert provider_thinking_levels(provider, model="plain") == ()
     assert provider_default_thinking_level(provider, model="reasoner") == "low"
     assert provider.thinking_defaults == {"reasoner": "high"}
@@ -1703,6 +1717,7 @@ def test_provider_settings_from_json_loads_anthropic_thinking_provider() -> None
 
     assert isinstance(provider, AnthropicProviderConfig)
     assert provider_thinking_levels(provider, model="claude-sonnet-4-6") == (
+        "default",
         "off",
         "low",
         "high",
@@ -1755,6 +1770,7 @@ def test_load_provider_settings_does_not_restore_stale_codex_builtin_models(
     )
     assert provider.default_model == "gpt-5.5"
     assert provider_thinking_levels(provider, model="gpt-5.6-sol") == (
+        "default",
         "off",
         "low",
         "medium",
@@ -2058,3 +2074,47 @@ def test_openai_compatible_provider_config_rejects_invalid_retries() -> None:
         OpenAICompatibleProviderConfig(name="local", max_retries=-1)
     with pytest.raises(ProviderConfigError, match="0 or greater"):
         OpenAICompatibleProviderConfig(name="local", max_retry_delay_seconds=-1)
+
+
+def test_default_thinking_level_defers_to_catalog_then_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    provider = _local_reasoning_provider(
+        thinking_levels=("off", "low", "medium"),
+        thinking_parameter="reasoning_effort",
+    )
+    with_catalog_default = _local_reasoning_provider(
+        thinking_levels=("off", "low", "medium"),
+        thinking_default="low",
+        thinking_parameter="reasoning_effort",
+    )
+
+    assert provider_thinking_levels(provider, model="qwen") == ("default", "off", "low", "medium")
+    assert provider_default_thinking_level(provider, model="qwen") == "medium"
+    resolve = resolve_upstream_thinking_level
+    assert resolve(with_catalog_default, model="qwen", thinking_level="default") == "low"
+    assert resolve(provider, model="qwen", thinking_level="default") is None
+    assert resolve(provider, model="qwen", thinking_level="high") == "high"
+
+    catalog = openai_compatible_config_from_provider(
+        with_catalog_default, model="qwen", thinking_level="default"
+    )
+    assert (catalog.reasoning_effort, catalog.omit_reasoning) == ("low", False)
+    server = openai_compatible_config_from_provider(
+        provider, model="qwen", thinking_level="default"
+    )
+    assert (server.reasoning_effort, server.omit_reasoning) == (None, True)
+    off = openai_compatible_config_from_provider(provider, model="qwen", thinking_level="off")
+    assert off.omit_reasoning is False
+
+
+def test_startup_default_level_is_accepted_for_a_model_without_levels() -> None:
+    plain = OpenAICompatibleProviderConfig(name="local", models=("qwen",), default_model="qwen")
+    reasoning = _local_reasoning_provider(
+        thinking_levels=("off", "low", "medium"),
+        thinking_parameter="reasoning_effort",
+    )
+
+    assert resolve_startup_thinking_level(plain, "qwen", cli_override="default") is None
+    assert resolve_startup_thinking_level(reasoning, "qwen", cli_override="default") == "default"

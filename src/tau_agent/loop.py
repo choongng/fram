@@ -27,9 +27,12 @@ from tau_agent.messages import (
     AssistantMessage,
     ResponseTiming,
     TextContent,
+    ThinkingContent,
     ToolCall,
     ToolResultMessage,
     UserMessage,
+    reasoning_loop_cut,
+    tool_call_loop_cut,
 )
 from tau_agent.provider import CancellationToken, ModelProvider
 from tau_agent.provider_events import (
@@ -212,7 +215,7 @@ async def run_agent_loop(
                     cut_note=(
                         TURN_CAP_REFUSAL
                         if final_report
-                        else _cut_tool_call_note(call)
+                        else _cut_tool_call_note(assistant, call)
                         if call is cut
                         else None
                     ),
@@ -280,10 +283,13 @@ def provider_context(messages: list[AgentMessage]) -> list[AgentMessage]:
     persists terminal failures for diagnostics, but an empty failed or aborted
     turn, or one cut off at the output limit, is not model context and must not
     poison the next request.
+
+    A turn the reasoning-loop guard cut keeps its reasoning in history only:
+    handed a loop, a model tends to pick the same thread up.
     """
     replayable = tuple(
         message
-        for message in messages
+        for message in map(_without_looped_reasoning, messages)
         if not (
             isinstance(message, AssistantMessage)
             and message.stop_reason in {"error", "aborted", "length"}
@@ -291,6 +297,21 @@ def provider_context(messages: list[AgentMessage]) -> list[AgentMessage]:
         )
     )
     return list(repair_tool_history(replayable).messages)
+
+
+LOOPED_TURN_TEXT = "[Reasoning stopped here because it had started to repeat.]"
+
+
+def _without_looped_reasoning(message: AgentMessage) -> AgentMessage:
+    """Drop the reasoning of a turn the reasoning-loop guard cut."""
+    if not isinstance(message, AssistantMessage) or not reasoning_loop_cut(message):
+        return message
+    content = [block for block in message.content if not isinstance(block, ThinkingContent)]
+    if len(content) == len(message.content):
+        return message
+    # Dropping the turn would leave two user turns in a row, which strict chat
+    # templates reject.
+    return message.model_copy(update={"content": content or [TextContent(text=LOOPED_TURN_TEXT)]})
 
 
 async def _assistant_events(
@@ -520,19 +541,31 @@ async def _run_tool(
 RAW_ARGUMENTS = "_raw_arguments"
 
 
-def _cut_tool_call_note(call: ToolCall) -> str:
-    """The answer to `call`, the last call of a reply that ended at the output
-    limit while writing it.
+def _cut_tool_call_note(message: AssistantMessage, call: ToolCall) -> str:
+    """The answer to `call`, the last call of `message`, a reply that ended at
+    the output limit while writing it.
 
     A cut call is not run: its arguments end where the limit fell, so even ones
     that parse may be incomplete. The model is told so and how to send less.
     """
     raw = call.arguments.get(RAW_ARGUMENTS) if set(call.arguments) == {RAW_ARGUMENTS} else None
     chars = len(raw) if isinstance(raw, str) else len(json.dumps(call.arguments))
+    if tool_call_loop_cut(message):
+        what = (
+            "its arguments started repeating the same text over and over, so the reply "
+            f"was stopped after {chars} characters"
+        )
+        step = (
+            "If the file really holds this much repeated text, generate it with a "
+            "short script instead of writing it out. Otherwise send it again without "
+            "the repetition, and send less in one call"
+        )
+    else:
+        what = f"the reply reached the output limit after {chars} characters of its arguments"
+        step = "Send less in one call"
     return (
-        f"This {call.name} call was cut off: the reply reached the output limit after "
-        f"{chars} characters of its arguments. It did not run, and nothing it would have "
-        "done was done. Send less in one call: to write or edit a file, write it in "
+        f"This {call.name} call was cut off: {what}. It did not run, and nothing it "
+        f"would have done was done. {step}: to write or edit a file, write it in "
         "smaller parts, one call per part."
     )
 

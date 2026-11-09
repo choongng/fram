@@ -19,6 +19,7 @@ from typing import Any, Protocol
 import httpx
 
 from tau_agent.messages import (
+    TOOL_CALL_LOOP_CUT,
     AgentMessage,
     AssistantMessage,
     AssistantMessageDiagnostic,
@@ -183,6 +184,7 @@ class OpenAICompatibleProvider:
             compat=self._config.compat,
             max_tokens=self._config.max_tokens,
             include_reasoning_effort_none=self._config.include_reasoning_effort_none,
+            omit_reasoning=self._config.omit_reasoning,
             supports_images=self._config.supports_images,
             prompt_cache_key=cache_key,
             cache_prompt=self._config.cache_prompt,
@@ -512,6 +514,7 @@ class _ChatStreamParser:
         self._thinking_signature: str | None = None
         self._tool_call_builders: dict[int, _ToolCallBuilder] = {}
         self._finish_reason: str | None = None
+        self._loop_cut: AssistantMessageDiagnostic | None = None
         self._usage: Usage | None = None
 
     def feed(self, event: str) -> tuple[list[ProviderEvent], bool]:
@@ -565,6 +568,13 @@ class _ChatStreamParser:
             index = int(tool_call_delta.get("index", 0))
             builder = self._tool_call_builders.setdefault(index, _ToolCallBuilder())
             builder.add_delta(tool_call_delta)
+            loop = builder.repeating()
+            if loop is not None:
+                # Stop reading: the rest would repeat to the output limit. The
+                # call ends cut off at the limit, and the loop answers it.
+                self._finish_reason = "length"
+                self._loop_cut = AssistantMessageDiagnostic(type=TOOL_CALL_LOOP_CUT, details=loop)
+                return events, True
 
         return events, False
 
@@ -589,6 +599,7 @@ class _ChatStreamParser:
                 message=AssistantMessage(
                     content=content,
                     usage=self._usage or Usage(),
+                    diagnostics=[self._loop_cut] if self._loop_cut is not None else None,
                 ),
                 finish_reason=self._finish_reason,
             )
@@ -728,11 +739,56 @@ class _ResponsesStreamParser:
         return events
 
 
+#: A tool call's streamed arguments count as looping once their last
+#: ARGUMENT_LOOP_MIN_CHARS characters, and at least ARGUMENT_LOOP_REPEATS periods,
+#: are one block repeated end to end. Left alone, such a call runs to the output
+#: limit and is lost anyway. Real files do repeat (padding, fixture rows, a table
+#: of identical lines), so the bar is set well above what a hand-written file
+#: holds; the numbers are heuristics.
+ARGUMENT_LOOP_MIN_CHARS = 16_000
+ARGUMENT_LOOP_REPEATS = 16
+#: The tail searched for earlier in the arguments to find a period, how many of
+#: its nearest earlier places are tried, and how many characters arrive
+#: between checks.
+ARGUMENT_LOOP_PROBE = 32
+ARGUMENT_LOOP_CANDIDATES = 8
+ARGUMENT_LOOP_CHECK_EVERY = 512
+
+
+def repeating_tail(text: str) -> dict[str, JSONValue] | None:
+    """How `text` ends in one block repeated end to end, or None if it does not."""
+    size = len(text)
+    if size < ARGUMENT_LOOP_MIN_CHARS:
+        return None
+    probe = text[size - ARGUMENT_LOOP_PROBE :]
+    floor = size - ARGUMENT_LOOP_PROBE - size // ARGUMENT_LOOP_REPEATS
+    end = size - 1
+    for _ in range(ARGUMENT_LOOP_CANDIDATES):
+        start = text.rfind(probe, max(floor, 0), end)
+        if start < 0:
+            return None
+        period = size - ARGUMENT_LOOP_PROBE - start
+        span = max(period * ARGUMENT_LOOP_REPEATS, ARGUMENT_LOOP_MIN_CHARS)
+        if span <= size and text[size - span + period :] == text[size - span : size - period]:
+            return {"period": period, "chars": size, "block": text[size - period :][:200]}
+        end = start + ARGUMENT_LOOP_PROBE - 1
+    return None
+
+
 class _ToolCallBuilder:
     def __init__(self) -> None:
         self.id = ""
         self.name = ""
         self.arguments_parts: list[str] = []
+        self._chars = 0
+        self._checked_at = 0
+
+    def repeating(self) -> dict[str, JSONValue] | None:
+        """How the arguments so far loop, checked every ARGUMENT_LOOP_CHECK_EVERY chars."""
+        if self._chars - self._checked_at < ARGUMENT_LOOP_CHECK_EVERY:
+            return None
+        self._checked_at = self._chars
+        return repeating_tail("".join(self.arguments_parts))
 
     def add_delta(self, delta: Mapping[str, Any]) -> None:
         call_id = delta.get("id")
@@ -750,6 +806,7 @@ class _ToolCallBuilder:
         arguments = function.get("arguments")
         if isinstance(arguments, str):
             self.arguments_parts.append(arguments)
+            self._chars += len(arguments)
 
     def build(self, index: int) -> ToolCall:
         arguments_text = "".join(self.arguments_parts)
@@ -845,6 +902,7 @@ def _build_chat_payload(
     compat: Mapping[str, JSONValue] | None = None,
     max_tokens: int | None = None,
     include_reasoning_effort_none: bool = False,
+    omit_reasoning: bool = False,
     supports_images: bool = False,
     prompt_cache_key: str | None = None,
     cache_prompt: bool = False,
@@ -882,16 +940,17 @@ def _build_chat_payload(
     openrouter_provider = resolved_compat.get("openrouterProvider")
     if isinstance(openrouter_provider, dict):
         payload["provider"] = openrouter_provider
-    _apply_chat_reasoning(
-        payload,
-        reasoning_effort=(
-            reasoning_effort if supports_reasoning_effort or thinking_format == "zai" else None
-        ),
-        reasoning_effort_parameter=reasoning_effort_parameter,
-        thinking_format=thinking_format,
-        include_reasoning_effort_none=include_reasoning_effort_none,
-        supports_reasoning_effort=supports_reasoning_effort,
-    )
+    if not omit_reasoning:
+        _apply_chat_reasoning(
+            payload,
+            reasoning_effort=(
+                reasoning_effort if supports_reasoning_effort or thinking_format == "zai" else None
+            ),
+            reasoning_effort_parameter=reasoning_effort_parameter,
+            thinking_format=thinking_format,
+            include_reasoning_effort_none=include_reasoning_effort_none,
+            supports_reasoning_effort=supports_reasoning_effort,
+        )
     if tools:
         payload["tools"] = [_tool_to_openai(tool) for tool in tools]
         if resolved_compat.get("zaiToolStream") is True:
