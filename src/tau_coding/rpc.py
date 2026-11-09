@@ -26,6 +26,7 @@ from tau_coding.provider_config import (
     ProviderConfig,
     provider_thinking_levels,
 )
+from tau_coding.reasoning_guard import ReasoningGuardSetting, parse_reasoning_guard
 from tau_coding.session import (
     CodingSession,
     ManualCompactionResult,
@@ -118,6 +119,14 @@ class RpcSession(Protocol):
     def set_auto_compaction_enabled(self, enabled: bool) -> None: ...
 
     def set_auto_compact_token_threshold(self, threshold: int) -> None: ...
+
+    @property
+    def reasoning_guard(self) -> ReasoningGuardSetting: ...
+
+    @property
+    def reasoning_budget_chars(self) -> int | None: ...
+
+    def set_reasoning_guard(self, setting: ReasoningGuardSetting) -> None: ...
 
     async def compact_detailed(self, instructions: str | None = None) -> ManualCompactionResult: ...
 
@@ -245,6 +254,8 @@ class RpcServer:
                         "sessionName": self._session.session_title,
                         "autoCompactionEnabled": self._session.auto_compaction_enabled,
                         "autoCompactionThreshold": self._session.auto_compact_token_threshold,
+                        "reasoningGuardEnabled": self._session.reasoning_guard.enabled,
+                        "reasoningBudgetChars": self._session.reasoning_budget_chars,
                         "messageCount": len(self._session.messages),
                         "pendingMessageCount": self._session.queued_message_count,
                     },
@@ -356,6 +367,17 @@ class RpcServer:
                     {
                         "autoCompactionEnabled": self._session.auto_compaction_enabled,
                         "autoCompactionThreshold": self._session.auto_compact_token_threshold,
+                    },
+                )
+                return
+            if command_type == "set_reasoning_guard":
+                self._session.set_reasoning_guard(parse_reasoning_guard(_guard_text(command)))
+                await self._response(
+                    request_id,
+                    command_type,
+                    {
+                        "reasoningGuardEnabled": self._session.reasoning_guard.enabled,
+                        "reasoningBudgetChars": self._session.reasoning_budget_chars,
                     },
                 )
                 return
@@ -579,6 +601,15 @@ def _required_bool(command: Mapping[str, object], key: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"{key} must be a boolean")
     return value
+
+
+def _guard_text(command: Mapping[str, object]) -> str:
+    value = command.get("value")
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, str):
+        return value
+    raise ValueError("value must be on, off or a number of characters")
 
 
 def _threshold_text(command: Mapping[str, object]) -> str:

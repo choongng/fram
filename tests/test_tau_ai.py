@@ -4052,3 +4052,33 @@ async def test_github_copilot_anthropic_sends_vision_header() -> None:
         )
 
     assert requests[0].headers["Copilot-Vision-Request"] == "true"
+
+
+@pytest.mark.anyio
+async def test_closing_a_stream_early_closes_the_http_response() -> None:
+    closed: list[bool] = []
+
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            chunk = b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\n'
+            for _ in range(50):
+                yield chunk
+
+        async def aclose(self) -> None:
+            closed.append(True)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=Body(), headers={"content-type": "text/event-stream"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(
+            OpenAICompatibleConfig(api_key="test-key", base_url="http://localhost:8080/v1"),
+            client=client,
+        )
+        stream = provider.stream_response(
+            model="local", system="You are Tau.", messages=[UserMessage(content="Hi")], tools=[]
+        )
+        await anext(stream)
+        await anext(stream)
+        await stream.aclose()
+        assert closed == [True]

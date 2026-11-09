@@ -1994,6 +1994,20 @@ def _metadata_thinking_value(
     return value if isinstance(value, str) else None
 
 
+#: Thinking formats whose request carries only an on/off switch: the server
+#: gets no level or budget, so a thinking model thinks until it is done or hits
+#: the output limit.
+UNBOUNDED_THINKING_FORMATS = frozenset({"qwen", "qwen-chat-template"})
+
+
+def provider_thinking_is_unbounded(provider: ProviderConfig, model: str) -> bool:
+    """Whether `model`'s thinking format sends the server no level or budget."""
+    return (
+        isinstance(provider, OpenAICompatibleProviderConfig)
+        and _thinking_format(provider, model) in UNBOUNDED_THINKING_FORMATS
+    )
+
+
 def _thinking_format(provider: ProviderConfig, model: str) -> str:
     compat = _model_compat(provider, model)
     value = compat.get("thinkingFormat")

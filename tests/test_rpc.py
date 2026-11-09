@@ -100,6 +100,9 @@ async def test_rpc_state_matches_pi_frontend_contract(tmp_path: Path) -> None:
         "autoCompactionEnabled",
         # Tau's own: pi frontends ignore it; set_auto_compaction_threshold sets it.
         "autoCompactionThreshold",
+        # Tau's own too; set_reasoning_guard sets them.
+        "reasoningGuardEnabled",
+        "reasoningBudgetChars",
         "messageCount",
         "pendingMessageCount",
     }

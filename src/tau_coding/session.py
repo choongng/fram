@@ -150,6 +150,7 @@ from tau_coding.provider_config import (
     provider_model_endpoint,
     provider_model_supports_images,
     provider_thinking_config_warning,
+    provider_thinking_is_unbounded,
     provider_thinking_levels,
     provider_thinking_unavailable_reason,
     resolve_provider_selection,
@@ -165,6 +166,15 @@ from tau_coding.provider_runtime import (
     ClosableModelProvider,
     create_dynamic_model_provider,
     create_model_provider,
+)
+from tau_coding.reasoning_guard import (
+    LEVEL_REASONING_CHARS,
+    ReasoningGuardSetting,
+    RequestGuard,
+    ServedModelLimits,
+    request_reasoning_chars,
+    startup_reasoning_guard,
+    thinking_chars_per_token,
 )
 from tau_coding.reload import CodingReloadSummary, ReloadCategorySummary
 from tau_coding.request_gate import RequestQueued, observe_queued_requests
@@ -433,6 +443,8 @@ class CodingSessionConfig:
     owns_initial_provider: bool = False
     auto_compact_token_threshold: int | None = None
     auto_compact_enabled: bool = True
+    #: None reads the setting from the environment.
+    reasoning_guard: ReasoningGuardSetting | None = None
     long_lived: bool = False
     """An interactive session that waits on its user and on background work.
 
@@ -556,6 +568,11 @@ class CodingSession:
         self._resource_paths = resource_paths_with_cwd(config.resource_paths, config.cwd)
         self._auto_compact_token_threshold = config.auto_compact_token_threshold
         self._auto_compact_enabled = config.auto_compact_enabled
+        self._reasoning_guard = (
+            config.reasoning_guard
+            if config.reasoning_guard is not None
+            else startup_reasoning_guard()
+        )
         self._preview_model: ModelChoice | None = None
         self._preview_thinking: ThinkingLevel | None = None
         self._thinking_level = _state_thinking_level(
@@ -1433,6 +1450,26 @@ class CodingSession:
             return None
         return auto_compaction_threshold_for_context_window(declared[0])
 
+    @property
+    def reasoning_guard(self) -> ReasoningGuardSetting:
+        """Whether the reasoning guard runs, and any budget set for this session."""
+        return self._reasoning_guard
+
+    @property
+    def reasoning_budget_chars(self) -> int | None:
+        """The per-turn thinking budget in force, None when there is none."""
+        setting = self._reasoning_guard
+        if not setting.enabled:
+            return None
+        return request_reasoning_chars(
+            [], self._level_reasoning_chars(), self._served_model_limits(), chars=setting.chars
+        )
+
+    def set_reasoning_guard(self, setting: ReasoningGuardSetting) -> None:
+        """Set the reasoning guard for this session, from its next request on."""
+        self._reasoning_guard = setting
+        self._config = replace(self._config, reasoning_guard=setting)
+
     def set_auto_compaction_enabled(self, enabled: bool) -> None:
         """Enable or disable automatic compaction for future turns."""
         self._auto_compact_enabled = enabled
@@ -1867,12 +1904,59 @@ class CodingSession:
         paths = self._resource_paths.paths or TauPaths(home=self._resource_paths.root)
         return ProfileKey(provider=self._provider_name, endpoint=endpoint, model=model), paths
 
-    def _served_model_profile(self) -> ModelProfile | None:
-        """The served model's stored profile, None when it cannot be read."""
+    def _guard_requests(self) -> None:
+        """Send the requests of the harness run about to start through a guard.
+
+        The harness loop takes its provider once, when the run starts, so the
+        guard is in place for that and taken out at the run's start event.
+        """
+        provider = self._harness.config.provider
+        if isinstance(provider, RequestGuard):
+            provider = provider.inner
+        self._harness.config.provider = RequestGuard(
+            provider,
+            setting=lambda: self._reasoning_guard,
+            level_chars=self._level_reasoning_chars,
+            limits=self._served_model_limits,
+        )
+
+    def _unguard_requests(self) -> None:
+        provider = self._harness.config.provider
+        if isinstance(provider, RequestGuard):
+            self._harness.config.provider = provider.inner
+
+    def _level_reasoning_chars(self) -> int | None:
+        """The thinking budget in characters from the session's thinking level,
+        for a model whose thinking format sends the server no level or budget;
+        else None."""
+        provider = self._active_provider_config() or self._runtime_provider_config
+        if provider is None or not provider_thinking_is_unbounded(provider, self.model):
+            return None
+        return LEVEL_REASONING_CHARS.get(self._thinking_level)
+
+    def _served_model_limits(self) -> ServedModelLimits:
+        """The served model's ratios and output cap, its profile read afresh:
+        the cap is the profile's measured `max_output_tokens`, else the
+        catalog's `max_tokens` for the model, else none."""
+        profile = self._served_model_profile(refresh=True)
+        cap = profile.max_output_tokens if profile is not None else None
+        if cap is None:
+            provider = self._active_provider_config() or self._runtime_provider_config
+            metadata = getattr(provider, "model_metadata", {}).get(self.model)
+            cap = metadata.max_tokens if metadata is not None else None
+        return ServedModelLimits(
+            thinking_chars_per_token=thinking_chars_per_token(profile),
+            context_chars_per_token=context_chars_per_token(profile),
+            max_output_tokens=cap,
+        )
+
+    def _served_model_profile(self, *, refresh: bool = False) -> ModelProfile | None:
+        """The served model's stored profile, None when it cannot be read. Kept
+        until the model changes, `refresh` or a response folds into it."""
         try:
             key, paths = self._served_profile_key()
             cached = self._model_profile_cache
-            if cached is not None and cached.key == key:
+            if not refresh and cached is not None and cached.key == key:
                 return cached
             self._model_profile_cache = ModelProfileStore.at(paths).get(key)
         except Exception:
@@ -1886,6 +1970,9 @@ class CodingSession:
     async def _signals_after(self, event: AgentEvent) -> AsyncIterator[CodingSessionEvent]:
         """Yield session diagnostics that one agent event gives rise to."""
         if isinstance(event, AgentStartEvent):
+            # The run's loop holds the guard from here; later reads of the
+            # provider (compaction, naming) get the bare one.
+            self._unguard_requests()
             self._tool_guards.reset()
             self._output_limit_nudges.reset()
         if isinstance(event, MessageEndEvent):
@@ -2663,6 +2750,7 @@ class CodingSession:
         await self._extension_runtime.emit_event(retry_start)
         yield retry_start
 
+        self._guard_requests()
         retry_events = self._harness.continue_()
         self._invalidate_context_usage_cache()
         final_error: str | None = None
@@ -2694,6 +2782,7 @@ class CodingSession:
                 async for signal in self._signals_after(retry_event):
                     yield signal
         finally:
+            self._unguard_requests()
             aclose = getattr(retry_events, "aclose", None)
             if aclose is not None:
                 with suppress(Exception):
@@ -3235,6 +3324,7 @@ class CodingSession:
                 runtime_provider_config=runtime_provider_config,
                 auto_compact_token_threshold=self._auto_compact_token_threshold,
                 auto_compact_enabled=self._auto_compact_enabled,
+                reasoning_guard=self._reasoning_guard,
                 thinking_level=self._thinking_level,
                 shell_command_prefix=self._config.shell_command_prefix,
                 tool_result_inline_tokens=self._config.tool_result_inline_tokens,
@@ -3488,6 +3578,7 @@ class CodingSession:
         self._resource_paths = replacement._resource_paths
         self._auto_compact_token_threshold = replacement._auto_compact_token_threshold
         self._auto_compact_enabled = replacement._auto_compact_enabled
+        self._reasoning_guard = replacement._reasoning_guard
         self._thinking_level = replacement._thinking_level
         self._pending_initial_entries = replacement._pending_initial_entries
         self._pending_message_writes = replacement._pending_message_writes
@@ -3792,6 +3883,7 @@ class CodingSession:
             else:
                 prompt_message = UserMessage(content=expanded_content)
             self._record_message_origin(prompt_message, delivery="prompt", source=source)
+            self._guard_requests()
             events = self._harness.prompt_message(prompt_message)
             self._invalidate_context_usage_cache()
             async for event in events:
@@ -3864,6 +3956,7 @@ class CodingSession:
                     )
                     await self._extension_runtime.emit_event(retry_start)
                     yield retry_start
+                    self._guard_requests()
                     events = self._harness.continue_()
                     self._invalidate_context_usage_cache()
                     overflow_retry_error: str | None = None
@@ -3915,6 +4008,7 @@ class CodingSession:
             )
             raise
         finally:
+            self._unguard_requests()
             if auto_name_task is not None and not auto_name_task.done():
                 auto_name_task.cancel()
             try:
@@ -3938,6 +4032,7 @@ class CodingSession:
         settled_event: AgentSettledEvent | None = None
         route_failure_message: AssistantMessage | None = None
         try:
+            self._guard_requests()
             events = self._harness.continue_()
             self._invalidate_context_usage_cache()
             async for event in events:
@@ -3975,6 +4070,7 @@ class CodingSession:
             )
             raise
         finally:
+            self._unguard_requests()
             try:
                 await self._reconcile_run_persistence(events, context=context)
             finally:

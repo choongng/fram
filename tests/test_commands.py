@@ -138,6 +138,7 @@ def test_registered_commands_are_pi_aligned(tmp_path: Path) -> None:
         "new",
         "prompts",
         "quit",
+        "reasoning-guard",
         "reload",
         "resume",
         "scoped-models",

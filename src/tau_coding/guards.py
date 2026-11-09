@@ -15,7 +15,15 @@ from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass
 
 from tau_agent.loop import RAW_ARGUMENTS
-from tau_agent.messages import AgentMessage, AssistantMessage, TextContent, ToolCall, UserMessage
+from tau_agent.messages import (
+    REASONING_BUDGET_CUT,
+    AgentMessage,
+    AssistantMessage,
+    TextContent,
+    ToolCall,
+    UserMessage,
+    reasoning_loop_cut,
+)
 from tau_agent.tools import AgentTool, AgentToolResult
 from tau_agent.types import JSONValue
 from tau_coding.tools import NO_OUTPUT
@@ -87,6 +95,30 @@ TEXT_TOOL_CALL_NUDGE = (
 #: one that acts just enough in between stops too.
 MAX_OUTPUT_LIMIT_CONTINUATIONS = 2
 MAX_OUTPUT_LIMIT_CONTINUATIONS_PER_RUN = 6
+#: The follow-up to a turn the reasoning-loop guard cut, whose reasoning is not
+#: replayed.
+LOOP_CUT_NUDGE = (
+    "Your last reply hit the output limit before you acted, and its reasoning was "
+    "dropped. Do not work the whole problem out again in your head: take the next "
+    "concrete step now with a tool call, or answer briefly."
+)
+#: The follow-up to a turn cut at its thinking budget.
+BUDGET_CUT_NUDGE = (
+    "Your last reply used up its thinking budget without acting and was stopped. "
+    "Do not start your reasoning over. Take the next concrete step now with a tool "
+    "call: run what you were working out, or write what you have, then check it."
+)
+#: The follow-up to each later budget cut in a row, when the first nudge's reply
+#: also thought to its budget: this one asks for the write itself.
+BUDGET_CUT_WRITE_NUDGE = (
+    "You were stopped again: your thinking budget ran out. Do not think it "
+    "through again: no more reasoning. Reply now with only a tool call that "
+    "writes what you have so far, even partial, to the file you are working on; "
+    "then run it."
+)
+#: Budget-cut follow-ups allowed in a row: their replies think on a share of the
+#: budget, so several take no more than one full turn.
+MAX_BUDGET_CUT_CONTINUATIONS = 4
 #: The follow-up to a cut-off reply. It doesn't say the reasoning is still there:
 #: a reply can be empty, a server can drop it on replay, and compaction can run.
 OUTPUT_LIMIT_NUDGE = (
@@ -238,13 +270,14 @@ class OutputLimitNudges:
     def __init__(self, queued: Callable[[], Sequence[AgentMessage]]) -> None:
         self._queued = queued
         self._in_a_row = 0
+        self._budget_cuts_in_a_row = 0
         self._unanswered_this_run = 0
         self._nudge: UserMessage | None = None
         self._awaiting_reply = False
 
     def reset(self) -> None:
         """Forget the last run's counts."""
-        self._in_a_row = self._unanswered_this_run = 0
+        self._in_a_row = self._budget_cuts_in_a_row = self._unanswered_this_run = 0
         self._nudge = None
         self._awaiting_reply = False
 
@@ -261,17 +294,29 @@ class OutputLimitNudges:
             if not message.tool_calls:
                 self._unanswered_this_run += 1
         if message.stop_reason != "length" or message.tool_calls:
-            self._in_a_row = 0
+            self._in_a_row = self._budget_cuts_in_a_row = 0
             return None
+        text = self._follow_up(message)
+        budget_cut = text in (BUDGET_CUT_NUDGE, BUDGET_CUT_WRITE_NUDGE)
         if (
             self._waiting()
-            or self._in_a_row >= MAX_OUTPUT_LIMIT_CONTINUATIONS
+            or self._in_a_row
+            >= (MAX_BUDGET_CUT_CONTINUATIONS if budget_cut else MAX_OUTPUT_LIMIT_CONTINUATIONS)
             or self._unanswered_this_run >= MAX_OUTPUT_LIMIT_CONTINUATIONS_PER_RUN
         ):
             return None
         self._in_a_row += 1
-        self._nudge = UserMessage(content=OUTPUT_LIMIT_NUDGE)
+        self._budget_cuts_in_a_row = self._budget_cuts_in_a_row + 1 if budget_cut else 0
+        self._nudge = UserMessage(content=text)
         return self._nudge
+
+    def _follow_up(self, message: AssistantMessage) -> str:
+        """What to ask after `message`, by how it was cut off."""
+        if reasoning_loop_cut(message):
+            return LOOP_CUT_NUDGE
+        if not any(d.type == REASONING_BUDGET_CUT for d in message.diagnostics or []):
+            return OUTPUT_LIMIT_NUDGE
+        return BUDGET_CUT_WRITE_NUDGE if self._budget_cuts_in_a_row else BUDGET_CUT_NUDGE
 
     def undelivered(self) -> UserMessage | None:
         """Take the nudge still waiting, if any, for the session to withdraw."""

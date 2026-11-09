@@ -12,6 +12,7 @@ from tau_coding.branding import BRANDING
 from tau_coding.context_window import parse_auto_compaction_threshold
 from tau_coding.prompt_templates import PromptTemplate
 from tau_coding.provider_catalog import BUILTIN_PROVIDER_CATALOG, builtin_provider_entry
+from tau_coding.reasoning_guard import ReasoningGuardSetting, parse_reasoning_guard
 from tau_coding.reload import CodingReloadSummary, ReloadCategorySummary
 from tau_coding.resources import ResourceDiagnostic
 from tau_coding.session_manager import (
@@ -74,6 +75,14 @@ class CommandSession(Protocol):
     def auto_compaction_enabled(self) -> bool: ...
 
     def set_auto_compact_token_threshold(self, threshold: int) -> None: ...
+
+    @property
+    def reasoning_guard(self) -> ReasoningGuardSetting: ...
+
+    @property
+    def reasoning_budget_chars(self) -> int | None: ...
+
+    def set_reasoning_guard(self, setting: ReasoningGuardSetting) -> None: ...
 
     def set_auto_compaction_enabled(self, enabled: bool) -> None: ...
 
@@ -268,6 +277,15 @@ def create_default_command_registry() -> CommandRegistry:
             description="Show or set the automatic compaction threshold.",
             handler=_autocompact_command,
             search_terms=("compact", "threshold", "context"),
+        )
+    )
+    registry.register(
+        SlashCommand(
+            name="reasoning-guard",
+            usage="/reasoning-guard [on|off|chars]",
+            description="Show or set the reasoning loop cut and budget.",
+            handler=_reasoning_guard_command,
+            search_terms=("budget", "loop"),
         )
     )
     registry.register(
@@ -488,6 +506,27 @@ def _autocompact_status(session: CommandSession) -> str:
     window = session.declared_context_window_tokens
     share = f" ({threshold * 100 // window}% of {window} context window)" if window else ""
     return f"Auto-compact threshold: {threshold} tokens{share}"
+
+
+def _reasoning_guard_command(context: CommandContext) -> CommandResult:
+    session = context.session
+    if context.args.strip():
+        try:
+            session.set_reasoning_guard(parse_reasoning_guard(context.args))
+        except ValueError as exc:
+            return CommandResult(
+                handled=True,
+                message=f"{exc}\nSetting unchanged. {_reasoning_guard_status(session)}",
+            )
+    return CommandResult(handled=True, message=_reasoning_guard_status(session))
+
+
+def _reasoning_guard_status(session: CommandSession) -> str:
+    if not session.reasoning_guard.enabled:
+        return "Reasoning guard: off"
+    budget = session.reasoning_budget_chars
+    in_force = f"{budget} characters of thinking per turn" if budget else "no thinking budget"
+    return f"Reasoning guard: on, {in_force}"
 
 
 def _export_command(context: CommandContext) -> CommandResult:
