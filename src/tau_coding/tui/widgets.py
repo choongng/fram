@@ -1699,6 +1699,7 @@ class TranscriptView(VerticalScroll):
         # method would mount them a second time.
         if state is not None and not paged_back:
             self._window_end = len(state.items)
+        claimed_end = self._window_end
         for widget in tuple(self._active_message_widgets):
             if widget.parent is self:
                 await widget.remove()
@@ -1712,9 +1713,15 @@ class TranscriptView(VerticalScroll):
             if widget.parent is None:
                 del self._item_widgets[item_id]
 
+        if state is not None and not paged_back and self._window_end != claimed_end:
+            # The reader paged back during the removals above, so the claimed
+            # items are now behind the later-messages boundary. Mounting them
+            # would show them above a boundary that also counts them.
+            self._redraw(scroll_end=False, preserve_window=True)
+            return
+
         if state is not None and paged_back:
             if should_follow:
-                self._window_end = 0
                 self._redraw(scroll_end=True)
             elif self._bottom_boundary is not None:
                 self._bottom_boundary.update_count(len(state.items) - self._window_end)
