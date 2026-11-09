@@ -40,6 +40,8 @@ features and fixes.
 | `tau --export <ref> [dest]` | Same as `tau export`, as a top-level flag |
 | `tau providers` | List configured providers and how each authenticates |
 | `tau [setup options] setup` | Create/update an OpenAI-compatible provider |
+| `tau probe [--provider P] [--model M]` | Send three short capped requests to a model and store its measured profile (decode and prefill speed, characters per token, whether `max_tokens` is honoured) in `~/.tau/model-profiles.json` |
+| `tau profile show [--provider P] [--model M] [--json]` | Print stored model profiles; `--json` prints the machine-readable document described below |
 
 ## Options
 
@@ -163,6 +165,50 @@ tau --provider local \
   --model qwen \
   setup
 ```
+
+### Model profiles
+
+Tau keeps a profile for each provider, endpoint (base URL), and model it talks
+to. The profile is updated after every response that reports usage. It holds:
+
+- decode tokens/s, split by prompt size (`lt_8k`, `8k_32k`, `ge_32k`)
+- uncached prefill tokens/s
+- characters per token, for thinking, for visible output, and combined
+- the limits seen
+- whether the server honours `max_tokens`
+
+Each value is a token-weighted moving average, stored with its sample count and
+last update time.
+
+`tau probe` gives a new model a starting estimate, usually in under a minute.
+Other programs can read the profiles with `tau profile show --json`:
+
+```json
+{
+  "version": 1,
+  "profiles": [
+    {
+      "provider": "local",
+      "endpoint": "http://localhost:8080/v1",
+      "model": "my-model",
+      "decode_tokens_per_second": {
+        "lt_8k": {"value": 31.2, "samples": 14, "weight": 4200.0, "updated_at_ms": 1761300000000},
+        "8k_32k": null,
+        "ge_32k": null
+      },
+      "prefill_tokens_per_second": {"value": 310.0, "samples": 9, "weight": 15400.0, "updated_at_ms": 1761300000000},
+      "chars_per_token": {"thinking": null, "output": null, "combined": {"value": 2.7, "samples": 20, "weight": 9800.0, "updated_at_ms": 1761300000000}},
+      "limits": {"context_window": 131072, "max_output_tokens": 16384, "largest_output_tokens": 15980},
+      "request_parameters": {"max_tokens_honoured": true},
+      "updated_at_ms": 1761300000000
+    }
+  ]
+}
+```
+
+A value with no samples yet is `null`. `weight` is the number of tokens behind a
+value: until it reaches about 10,000, the value is a plain token-weighted mean,
+so the first few replies cannot fix it. Timestamps are Unix milliseconds.
 
 See also: [RPC protocol](/reference/rpc/), [Slash commands](/reference/slash-commands/) (in-session), and
 [Keyboard shortcuts](/reference/keybindings/).

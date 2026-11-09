@@ -143,6 +143,11 @@ class TauPaths:
         slug = _slugify_path(resolved)
         return self.sessions_dir / f"{slug or 'project'}-{digest}"
 
+    @property
+    def model_profiles_path(self) -> Path:
+        """Return the measured per-model serving profiles (speed, chars per token)."""
+        return self.home / "model-profiles.json"
+
     def default_session_path(self, cwd: Path) -> Path:
         """Return the default JSONL session path for a project cwd."""
         path = self.project_session_dir(cwd) / "default.jsonl"

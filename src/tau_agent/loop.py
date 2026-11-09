@@ -368,6 +368,29 @@ async def _assistant_events(
             )
 
 
+async def timed_response(
+    provider: ModelProvider,
+    *,
+    model: str,
+    system: str,
+    messages: list[AgentMessage],
+) -> AssistantMessage | None:
+    """Send one tool-less request and return its final message, timed as the loop times it."""
+    final: AssistantMessage | None = None
+    async for event in _assistant_events(
+        provider=provider,
+        model=model,
+        system=system,
+        messages=messages,
+        tools=[],
+        signal=None,
+        session_id=None,
+    ):
+        if isinstance(event, MessageEndEvent) and isinstance(event.message, AssistantMessage):
+            final = event.message
+    return final
+
+
 def _response_timing(
     first_output_elapsed_ns: int | None,
     total_elapsed_ns: int,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import sys
 from collections.abc import Callable, Iterable, Sequence
 from functools import partial
@@ -27,6 +28,8 @@ from tau_coding.commands import format_reload_summary
 from tau_coding.credentials import FileCredentialStore
 from tau_coding.extension_installer import ExtensionInstallError, install_extension
 from tau_coding.extensions import StderrUiBridge
+from tau_coding.model_probe import run_probe
+from tau_coding.model_profiles import format_profile, profiles_json, read_model_profiles
 from tau_coding.models_dev_store import (
     ModelsDevRefreshError,
     ModelsDevRefreshResult,
@@ -117,7 +120,15 @@ _EPILOG = """Commands:
   {command} providers - List configured model providers.
 
   {command} setup - Configure an OpenAI-compatible provider.
+
+  {command} probe [--provider P] [--model M] - Measure a model's speed into its profile.
+
+  {command} profile show [--provider P] [--model M] [--json] - Print stored model profiles.
 """
+PROBE_USAGE = f"Usage: {BRANDING.command_name} probe [--provider P] [--model M]"
+PROFILE_SHOW_USAGE = (
+    f"Usage: {BRANDING.command_name} profile show [--provider P] [--model M] [--json]"
+)
 
 app = typer.Typer(
     name=BRANDING.command_name,
@@ -488,6 +499,24 @@ def main(
     if rpc_requested and export:
         raise typer.BadParameter("--export cannot be combined with --mode rpc")
 
+    if (
+        not rpc_requested
+        and not print_requested
+        and not export
+        and _probe_requested(positional_args)
+    ):
+        probe_command(positional_args[1:], provider=provider, model=model)
+        raise typer.Exit()
+
+    if (
+        not rpc_requested
+        and not print_requested
+        and not export
+        and positional_args[:2] == ["profile", "show"]
+    ):
+        profile_show_command(positional_args[2:], provider=provider, model=model)
+        raise typer.Exit()
+
     if not rpc_requested and not print_requested and not export and command == "update":
         positional_models = positional_args[1:] == ["--models"]
         if len(positional_args) != 1 and not positional_models:
@@ -739,6 +768,97 @@ def _deferred_startup_update_notice() -> Callable[[], str | None] | None:
         return notice.message if notice is not None else None
 
     return check
+
+
+def _model_selection_args(
+    args: Sequence[str],
+    *,
+    provider: str | None,
+    model: str | None,
+    usage: str,
+    flags: frozenset[str] = frozenset(),
+) -> tuple[str | None, str | None, set[str]]:
+    """Read ``--provider``/``--model`` and ``flags`` left among a subcommand's arguments.
+
+    Options written after ``tau probe`` or ``tau profile show`` reach the
+    subcommand as plain arguments, so they are read here.
+    """
+    seen: set[str] = set()
+    remaining = list(args)
+    while remaining:
+        arg = remaining.pop(0)
+        name, _, inline = arg.partition("=")
+        if name in {"--provider", "--model", "-m"}:
+            value = inline or (remaining.pop(0) if remaining else "")
+            if not value:
+                raise typer.BadParameter(usage)
+            if name == "--provider":
+                provider = value
+            else:
+                model = value
+        elif arg in flags:
+            seen.add(arg)
+        else:
+            raise typer.BadParameter(usage)
+    return provider, model, seen
+
+
+def _probe_requested(positional_args: Sequence[str]) -> bool:
+    """Whether the words are `probe` and options; `probe the auth bug` stays a prompt."""
+    return (
+        bool(positional_args)
+        and positional_args[0] == "probe"
+        and all(
+            arg.startswith("-") or arg in _option_values(positional_args)
+            for arg in positional_args[1:]
+        )
+    )
+
+
+def _option_values(positional_args: Sequence[str]) -> set[str]:
+    """The arguments that follow a `--provider`, `--model` or `-m` option."""
+    return {
+        value
+        for option, value in zip(positional_args, positional_args[1:], strict=False)
+        if option in {"--provider", "--model", "-m"}
+    }
+
+
+def probe_command(args: Sequence[str], *, provider: str | None, model: str | None) -> None:
+    """Probe a model with a few short requests and store its profile's warm start."""
+    provider, model, _ = _model_selection_args(
+        args, provider=provider, model=model, usage=PROBE_USAGE
+    )
+    try:
+        profile = anyio.run(partial(run_probe, provider, model))
+    except ProviderConfigError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    except Exception as exc:
+        typer.echo(f"Probe failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(json.dumps(profile.to_json(), indent=2))
+
+
+def profile_show_command(args: Sequence[str], *, provider: str | None, model: str | None) -> None:
+    """Print stored model profiles, as JSON with --json; `args` follow `profile show`."""
+    provider, model, flags = _model_selection_args(
+        args,
+        provider=provider,
+        model=model,
+        usage=PROFILE_SHOW_USAGE,
+        flags=frozenset({"--json"}),
+    )
+    profiles = read_model_profiles(provider=provider, model=model)
+    if "--json" in flags:
+        typer.echo(json.dumps(profiles_json(profiles), indent=2))
+        return
+    if not profiles:
+        typer.echo(
+            f"No model profiles recorded. Run `{BRANDING.command_name} probe` or a session first."
+        )
+        return
+    for profile in profiles:
+        typer.echo(format_profile(profile))
 
 
 def update_models_command() -> None:

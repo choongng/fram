@@ -26,7 +26,9 @@ After a successful model response, Tau uses the provider-reported token usage as
 the authoritative size of the context processed by that response, then estimates
 only messages added afterward. Before the first response, immediately after
 compaction, or when no valid usage is available, Tau falls back to a deterministic
-estimate (roughly `characters / 4` plus small per-message and per-tool overhead).
+estimate (roughly `characters / 4` plus small per-message and per-tool overhead;
+once the model's profile has measured its characters per token, that ratio
+replaces the 4).
 The fallback covers the system prompt, project context (`AGENTS.md`), skill
 metadata, active message history, and tool schemas.
 

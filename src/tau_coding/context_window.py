@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -15,6 +16,9 @@ from tau_agent.messages import (
 )
 from tau_agent.tools import AgentTool
 
+#: Characters a token when the served model's ratio is not measured. Every
+#: estimate below takes `chars_per_token`, which the session sets from the
+#: model's profile (`combined_chars_per_token`) once one is measured.
 CHARS_PER_TOKEN = 4
 MESSAGE_OVERHEAD_TOKENS = 4
 TOOL_OVERHEAD_TOKENS = 16
@@ -140,38 +144,43 @@ class ContextUsageEstimate:
         return self.provider_tokens > 0
 
 
-def estimate_text_tokens(text: str) -> int:
+def estimate_text_tokens(text: str, chars_per_token: float = CHARS_PER_TOKEN) -> int:
     """Return a deterministic rough token estimate for text."""
     if not text:
         return 0
-    return max(1, (len(text) + CHARS_PER_TOKEN - 1) // CHARS_PER_TOKEN)
+    if chars_per_token <= 0:
+        chars_per_token = CHARS_PER_TOKEN
+    return max(1, math.ceil(len(text) / chars_per_token))
 
 
-def estimate_message_tokens(message: AgentMessage) -> int:
+def estimate_message_tokens(message: AgentMessage, chars_per_token: float = CHARS_PER_TOKEN) -> int:
     """Return a rough token estimate for one provider-neutral message."""
-    tokens = MESSAGE_OVERHEAD_TOKENS + estimate_text_tokens(message_text(message))
+
+    def text_tokens(text: str) -> int:
+        return estimate_text_tokens(text, chars_per_token)
+
+    tokens = MESSAGE_OVERHEAD_TOKENS + text_tokens(message_text(message))
     if isinstance(message, AssistantMessage):
         tokens += sum(
-            estimate_text_tokens(block.thinking)
+            text_tokens(block.thinking)
             for block in message.content
             if isinstance(block, ThinkingContent)
         )
         tokens += sum(
-            estimate_text_tokens(call.name) + estimate_text_tokens(str(call.arguments))
-            for call in message.tool_calls
+            text_tokens(call.name) + text_tokens(str(call.arguments)) for call in message.tool_calls
         )
     elif isinstance(message, ToolResultMessage):
-        tokens += estimate_text_tokens(message.tool_name)
+        tokens += text_tokens(message.tool_name)
     return tokens
 
 
-def estimate_tool_tokens(tool: AgentTool) -> int:
+def estimate_tool_tokens(tool: AgentTool, chars_per_token: float = CHARS_PER_TOKEN) -> int:
     """Return a rough token estimate for one tool definition."""
     return (
         TOOL_OVERHEAD_TOKENS
-        + estimate_text_tokens(tool.name)
-        + estimate_text_tokens(tool.description)
-        + estimate_text_tokens(str(tool.input_schema))
+        + estimate_text_tokens(tool.name, chars_per_token)
+        + estimate_text_tokens(tool.description, chars_per_token)
+        + estimate_text_tokens(str(tool.input_schema), chars_per_token)
     )
 
 
@@ -180,9 +189,12 @@ def estimate_context_tokens(
     system: str,
     messages: tuple[AgentMessage, ...],
     tools: tuple[AgentTool, ...],
+    chars_per_token: float = CHARS_PER_TOKEN,
 ) -> int:
     """Return a rough estimate of the active provider context size."""
-    return estimate_context_usage(system=system, messages=messages, tools=tools).total_tokens
+    return estimate_context_usage(
+        system=system, messages=messages, tools=tools, chars_per_token=chars_per_token
+    ).total_tokens
 
 
 def auto_compaction_threshold_for_context_window(context_window_tokens: int) -> int | None:
@@ -268,20 +280,21 @@ def estimate_context_usage(
     system: str,
     messages: tuple[AgentMessage, ...],
     tools: tuple[AgentTool, ...],
+    chars_per_token: float = CHARS_PER_TOKEN,
 ) -> ContextUsageEstimate:
     """Return provider-anchored context accounting with a deterministic fallback.
 
     Provider usage is authoritative for the prefix represented by the latest successful
     assistant response. Only messages and dynamically added tools after that response
     are estimated. Without applicable usage, the whole request uses the character-based
-    fallback.
+    fallback, at `chars_per_token` characters a token.
     """
     usage_info = _last_applicable_provider_usage(messages)
     if usage_info is not None:
         usage_index, provider_tokens = usage_info
         trailing_messages = messages[usage_index + 1 :]
         trailing_message_tokens = sum(
-            estimate_message_tokens(message) for message in trailing_messages
+            estimate_message_tokens(message, chars_per_token) for message in trailing_messages
         )
         added_tool_names = {
             name
@@ -290,7 +303,9 @@ def estimate_context_usage(
             for name in message.added_tool_names
         }
         added_tool_tokens = sum(
-            estimate_tool_tokens(tool) for tool in tools if tool.name in added_tool_names
+            estimate_tool_tokens(tool, chars_per_token)
+            for tool in tools
+            if tool.name in added_tool_names
         )
         trailing_tokens = trailing_message_tokens + added_tool_tokens
         return ContextUsageEstimate(
@@ -304,9 +319,9 @@ def estimate_context_usage(
             trailing_tokens=trailing_tokens,
         )
 
-    system_tokens = estimate_text_tokens(system)
-    message_tokens = sum(estimate_message_tokens(message) for message in messages)
-    tool_tokens = sum(estimate_tool_tokens(tool) for tool in tools)
+    system_tokens = estimate_text_tokens(system, chars_per_token)
+    message_tokens = sum(estimate_message_tokens(message, chars_per_token) for message in messages)
+    tool_tokens = sum(estimate_tool_tokens(tool, chars_per_token) for tool in tools)
     return ContextUsageEstimate(
         total_tokens=system_tokens + message_tokens + tool_tokens,
         system_tokens=system_tokens,
