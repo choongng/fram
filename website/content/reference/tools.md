@@ -97,6 +97,9 @@ Applies exact text replacements to one file.
 | `path` | yes | string | File to edit (relative to `cwd`). |
 | `edits` | yes | array | One or more `{oldText, newText}` replacements. |
 
+If every edit names the same `path` and the top-level `path` is missing, that
+path is used.
+
 Each `oldText` must be non-empty, match exactly (whitespace included), appear
 **exactly once**, and not overlap another edit. All edits validate before
 anything is written — if any fails, the file is left unchanged. Line endings are

@@ -14,7 +14,7 @@ import difflib
 import json
 import os
 import signal
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from time import monotonic
@@ -59,8 +59,16 @@ class ToolInputError(ValueError):
     """Raised when a tool receives invalid structured arguments."""
 
 
-def _cut_off_arguments_error(name: str, text: str) -> str:
-    """Error for a call whose arguments arrived as unparsed `_raw_arguments`."""
+def _cut_off_arguments_error(name: str, text: str, required: Sequence[str] = ()) -> str:
+    """Why a call whose arguments are only unparsed text did not run.
+
+    Providers hand a call whose argument text is not valid JSON to the tool as
+    `{"_raw_arguments": text}`. Reporting the first argument the tool looks for
+    as a wrong type sends the model back to repeat the same call, so the error
+    says which arguments arrived, which string never closed and how it ends,
+    which required arguments never came, and how to send less in one call. A
+    call whose strings all closed but hold a bad escape is told that instead.
+    """
     try:
         json.loads(text)
     except ValueError as exc:
@@ -70,13 +78,102 @@ def _cut_off_arguments_error(name: str, text: str) -> str:
     outcome = f"the {name} tool did not run"
     if name == "write":
         outcome += " and nothing was written"
+    if not text.lstrip().startswith("{") or "Extra data" in error:
+        return (
+            f"The {name} call's arguments are not one JSON object of named arguments "
+            f"({error}), so {outcome}. Send the call again with a single JSON object."
+        )
+    closed, unclosed, length = _partial_arguments(text)
+    arrived = ""
+    if unclosed is not None and length == 0:
+        arrived = f" `{unclosed}` has no value."
+    elif unclosed is not None:
+        tail = text[-CUT_OFF_TAIL:].lstrip()
+        arrived = (
+            f' `{unclosed}` opened and never closed: it ran {length} characters, ending "…{tail}".'
+        )
+    missing = [key for key in required if key not in closed and key != unclosed]
+    if unclosed is None and not missing and closed and text.rstrip().endswith("}"):
+        return (
+            f"The {name} call's arguments are not valid JSON ({error}), so {outcome}. "
+            f"Every argument arrived ({_names(closed)}), but a string holds a character "
+            "JSON does not take as written: inside a string, a backslash is written "
+            "`\\\\` (so `\\d` is `\\\\d`), a newline `\\n` and a tab `\\t`. Send the call "
+            "again with those escaped."
+        )
+    if missing:
+        arrived += f" {_names(missing)} never came."
+    first = ""
+    if missing:
+        first = (
+            f"Send {_names(missing)} first, then each string holding only its own text, "
+            "with any reasoning before the call, not inside it. "
+        )
     return (
         f"The {name} call's arguments are not valid JSON after {len(text)} characters "
-        f"({error}), so {outcome}. The reply was probably cut off at the output limit. "
-        "Send less per call: write a long file in parts (write the first part, then "
-        "append with edit or bash; a second write replaces the file), or generate "
-        "repetitive data with a script through bash."
+        f"({error}), so {outcome}.{arrived} This is how a reply cut off at the output "
+        f"limit ends. {first}Send less in one call: write a long file in parts (write "
+        "the first part, then add the rest with edit or by appending through bash, "
+        "since a second write replaces the file), or generate patterned "
+        "data with a short script through bash."
     )
+
+
+#: Characters of an unclosed argument string `_cut_off_arguments_error` quotes.
+CUT_OFF_TAIL = 80
+
+
+def _names(keys: Sequence[str]) -> str:
+    return " and ".join(f"`{key}`" for key in keys)
+
+
+def _partial_arguments(text: str) -> tuple[list[str], str | None, int]:
+    """The arguments in object text `text` whose values closed, the one whose value
+    did not, and how many characters that value ran."""
+    decoder = json.JSONDecoder()
+    at = len(text) - len(text.lstrip())
+    if not text.startswith("{", at):
+        return [], None, 0
+    at += 1
+    closed: list[str] = []
+    while True:
+        while at < len(text) and text[at] in " \t\r\n,":
+            at += 1
+        if not text.startswith('"', at):
+            return closed, None, 0
+        try:
+            key, at = decoder.raw_decode(text, at)
+        except ValueError:
+            return closed, None, 0
+        while at < len(text) and text[at] in " \t\r\n:":
+            at += 1
+        try:
+            _, at = decoder.raw_decode(text, at)
+        except ValueError:
+            # A string with a bad escape (`\d`) or a raw newline closed, though
+            # it did not parse; only one with no closing quote ran on.
+            end = _string_end(text, at)
+            if end is None:
+                return closed, str(key), len(text) - at
+            at = end
+        closed.append(str(key))
+
+
+def _string_end(text: str, at: int) -> int | None:
+    """Where the JSON string opening at `at` ends, past its closing quote, read
+    leniently (any character after a backslash is skipped); None when it does
+    not close or `at` opens no string."""
+    if not text.startswith('"', at):
+        return None
+    index = at + 1
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+            continue
+        if text[index] == '"':
+            return index + 1
+        index += 1
+    return None
 
 
 @dataclass(slots=True)
@@ -153,8 +250,15 @@ class ToolDefinition:
         ) -> AgentToolResult:
             del tool_call_id, on_update
             if set(arguments) == {"_raw_arguments"}:
+                required = self.input_schema.get("required")
                 raise ToolInputError(
-                    _cut_off_arguments_error(self.name, str(arguments["_raw_arguments"]))
+                    _cut_off_arguments_error(
+                        self.name,
+                        str(arguments["_raw_arguments"]),
+                        [key for key in required if isinstance(key, str)]
+                        if isinstance(required, list)
+                        else (),
+                    )
                 )
             return await self.executor(arguments, signal)
 
@@ -1057,11 +1161,12 @@ def _truncation_result(
 
 
 def _str_arg(arguments: Mapping[str, JSONValue], name: str) -> str:
+    """`arguments[name]` as a string; an absent one is named as missing."""
     if name not in arguments:
-        sent = ", ".join(f"`{key}`" for key in arguments) or "no arguments"
+        carried = ", ".join(f"`{key}`" for key in arguments) or "no arguments"
         raise ToolInputError(
-            f"`{name}` is missing (the call sent {sent}); nothing was run. "
-            f"Send the call again with `{name}`."
+            f"`{name}` is missing: the call carried {carried}, and this tool needs "
+            f"`{name}` too; nothing was run. Send the call again with `{name}`."
         )
     value = arguments[name]
     if not isinstance(value, str):
@@ -1114,7 +1219,81 @@ def _prepare_edit_arguments(arguments: object) -> Mapping[str, JSONValue]:
         prepared["edits"] = [*edit_list, {"oldText": old_text, "newText": new_text}]
         prepared.pop("oldText", None)
         prepared.pop("newText", None)
+    _hoist_shared_edit_path(prepared)
+    # Refused here rather than in the tool: the loop checks prepared arguments
+    # against the schema before the tool runs, and its generic "missing
+    # required" would not show where `path` goes.
+    if "path" not in prepared:
+        raise ToolInputError(_edit_without_path_error(prepared))
+    edits = prepared.get("edits")
+    if isinstance(edits, list):
+        prepared["edits"] = [
+            {key: value for key, value in item.items() if key != "path"}
+            if isinstance(item, dict)
+            else item
+            for item in edits
+        ]
     return prepared
+
+
+#: The edit call's form, as the refusals of a misplaced `path` spell it out.
+EDIT_FORM_EXAMPLE = '{"path": "%s", "edits": [{"oldText": "...", "newText": "..."}]}'
+
+
+def _hoist_shared_edit_path(prepared: dict[str, JSONValue]) -> None:
+    """Move a `path` every edit object shares to the top level, where it belongs.
+
+    Only a call with no top-level `path`, whose edits are all objects naming the
+    same one file, is changed.
+    """
+    edits = prepared.get("edits")
+    if "path" in prepared or not isinstance(edits, list) or not edits:
+        return
+    if not all(isinstance(item, dict) for item in edits):
+        return
+    paths = {item.get("path") for item in edits if isinstance(item, dict)}
+    if len(paths) != 1:
+        return
+    (shared,) = paths
+    if not isinstance(shared, str) or not shared:
+        return
+    prepared["path"] = shared
+    prepared["edits"] = [
+        {key: value for key, value in item.items() if key != "path"}
+        for item in edits
+        if isinstance(item, dict)
+    ]
+
+
+def _edit_without_path_error(prepared: Mapping[str, JSONValue]) -> str:
+    """Why an edit call has no top-level `path`, and the form that has one.
+
+    A bare "`path` is missing" doesn't show where it goes when the path was sent
+    inside `edits`, so the model tends to resend the same call.
+    """
+    edits = prepared.get("edits")
+    items = edits if isinstance(edits, list) else []
+    strays = [item for item in items if not isinstance(item, dict)]
+    named = [item.get("path") for item in items if isinstance(item, dict) and "path" in item]
+    if strays:
+        shown = ", ".join(f"`{json.dumps(item)}`" for item in strays[:4])
+        problem = (
+            f"`edits` holds {len(strays)} value(s) that are not oldText/newText objects "
+            f"({shown}), and the call has no top-level `path`"
+        )
+    elif len(set(map(str, named))) > 1:
+        problem = "the edits name different files in `path`; one edit call changes one file"
+    else:
+        carried = ", ".join(f"`{key}`" for key in prepared) or "no arguments"
+        problem = f"`path` is missing: the call carried {carried}"
+    guess = next((item for item in strays if isinstance(item, str)), None)
+    if guess is None:
+        guess = next((item for item in named if isinstance(item, str)), "path/to/file")
+    example = EDIT_FORM_EXAMPLE % guess.replace('"', '\\"')
+    return (
+        f"{problem}; nothing was run. Put `path` at the top level, once, beside an "
+        f"`edits` list holding only oldText/newText objects: {example}"
+    )
 
 
 def _edits_arg(arguments: Mapping[str, JSONValue]) -> list[dict[str, str]]:
