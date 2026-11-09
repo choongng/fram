@@ -7420,6 +7420,21 @@ async def test_terminal_command_output_is_buffered_like_a_tool_result(tmp_path: 
     assert len((tmp_path / "session.jsonl").read_text()) < 100_000
 
 
+@pytest.mark.anyio
+async def test_adopted_session_binds_the_tool_result_hook_to_itself(tmp_path: Path) -> None:
+    storage = JsonlSessionStorage(tmp_path / "session.jsonl")
+    session = await CodingSession.load(_config(tmp_path, FakeProvider([]), storage))
+    replacement = await CodingSession.load(
+        _config(tmp_path, FakeProvider([]), JsonlSessionStorage(tmp_path / "next.jsonl"))
+    )
+
+    await session._adopt_replacement(replacement, reason="new")  # noqa: SLF001
+
+    hook = session._harness.config.after_tool_call  # noqa: SLF001
+    assert hook == session._after_tool_call  # noqa: SLF001
+    await session.aclose()
+
+
 def _fetch_tool(text: str) -> AgentTool:
     async def fetch(
         tool_call_id: object,

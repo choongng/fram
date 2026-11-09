@@ -3158,6 +3158,7 @@ class CodingSession:
         self._config = replacement._config
         self._state = replacement._state
         self._harness = replacement._harness
+        self._harness.config.after_tool_call = self._after_tool_call
         self._preview_model = None
         self._preview_thinking = None
         self._prompt_cache_misses = replacement._prompt_cache_misses

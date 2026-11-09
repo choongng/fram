@@ -762,8 +762,8 @@ def create_bash_tool_definition(
         name="bash",
         description=(
             "Execute a bash command in the current working directory. Returns stdout and stderr. "
-            "Long output is shortened to its end, and the full output is saved to a "
-            "file named in the result. Optionally provide a timeout in seconds"
+            "In a session, long output is shortened to its end and the full output is saved "
+            "to a file named in the result. Optionally provide a timeout in seconds"
             + (
                 f"; without one the command is killed after {default_timeout:g} seconds."
                 if default_timeout is not None

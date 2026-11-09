@@ -96,8 +96,8 @@ or for one run, in the environment:
 TAU_TOOL_RESULT_INLINE_TOKENS=8000 tau
 ```
 
-The environment variable wins over the settings file. Both apply to sessions
-started after the change.
+The environment variable wins over the settings file. The setting applies to
+sessions started after the change; the variable is read on each tool call.
 
 ## Manual compaction
 

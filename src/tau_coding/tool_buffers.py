@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from hashlib import sha256
+from itertools import count
 from pathlib import Path
 
 from tau_agent.messages import ImageContent, TextContent
@@ -131,12 +133,7 @@ _UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
 def output_file_name(tool_name: str, tool_call_id: str) -> str:
-    """The file a tool call's output is saved as, derived from the call alone.
-
-    Code that holds a recorded tool result (the history tool, the compaction
-    index) finds its file from the result's tool name and call id, with no path
-    stored anywhere.
-    """
+    """The file a tool call's output is saved as, derived from the call alone."""
     tool = _UNSAFE_NAME_CHARS.sub("_", tool_name).strip("._") or "tool"
     call = _UNSAFE_NAME_CHARS.sub("_", tool_call_id).strip("._") or "call"
     return f"{tool}-{call}.txt"
@@ -174,7 +171,7 @@ def buffer_tool_result(
     failure = ""
     if output_name is not None:
         try:
-            location = str(_write_output(buffer_dir / output_name, text))
+            location = str(_write_output(_unused_path(buffer_dir / output_name), text))
         except OSError as exc:
             failure = f"{type(exc).__name__}: {exc}"
     if len(text) <= limits.inline_chars:
@@ -369,7 +366,7 @@ def _is_section_title(title: str) -> bool:
 def _window(
     text: str, *, head: bool, limits: BufferLimits, max_lines: int | None
 ) -> tuple[str, int]:
-    """The kept part of `text` and how many of its lines it shows, whole or in part."""
+    """The kept part of `text` and how many whole lines it shows (at least 1)."""
     lines = text.split("\n")
     if max_lines is not None:
         lines = lines[:max_lines] if head else lines[-max_lines:]
@@ -379,7 +376,34 @@ def _window(
         # A few very long lines (minified JSON, an event stream) would defeat a
         # line window on their own, so the character cap always applies too.
         shown = shown[: limits.window_chars] if head else shown[-limits.window_chars :]
+        return shown, max(shown.count("\n"), 1)
     return shown, shown.count("\n") + 1
+
+
+def _unused_path(path: Path) -> Path:
+    """`path`, or a numbered sibling if it is taken.
+
+    Some providers reuse short call ids across responses, and an earlier
+    transcript marker must keep pointing at the output it named.
+    """
+    candidate = path
+    for number in count(2):
+        if not candidate.exists():
+            return candidate
+        candidate = path.with_name(f"{path.stem}-{number}{path.suffix}")
+    raise AssertionError("unreachable")
+
+
+def _require_own_directory(directory: Path) -> None:
+    """Refuse a directory another user made, or a symlink planted in its place.
+
+    The default buffer directory has a predictable name in the shared temp
+    directory, and outputs can hold secrets.
+    """
+    info = os.lstat(directory)
+    getuid = getattr(os, "getuid", None)
+    if stat.S_ISLNK(info.st_mode) or (getuid is not None and info.st_uid != getuid()):
+        raise PermissionError(f"not a directory owned by this user: {directory}")
 
 
 def _write_buffer(buffer_dir: Path, text: str) -> Path:
@@ -395,6 +419,7 @@ def _write_output(path: Path, text: str) -> Path:
     data = text.encode("utf-8", "replace")
     buffer_dir = path.parent
     buffer_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _require_own_directory(buffer_dir)
     fd, tmp = tempfile.mkstemp(dir=buffer_dir, prefix=".buffer-", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as file:

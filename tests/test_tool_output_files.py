@@ -123,3 +123,51 @@ def test_an_oversized_result_names_its_per_call_file(tmp_path: Path) -> None:
     assert (tmp_path / "bash-c1.txt").read_text() == text
     assert f"Full output: {tmp_path / 'bash-c1.txt'}" in shown.content[0].text  # type: ignore[union-attr]
     assert list(tmp_path.iterdir()) == [tmp_path / "bash-c1.txt"]
+
+
+def test_a_reused_call_id_does_not_overwrite_the_earlier_output(tmp_path: Path) -> None:
+    limits = BufferLimits.for_context_window(200_000)
+    for text in ("first", "second"):
+        buffer_tool_result(
+            AgentToolResult(content=[TextContent(text=text)]),
+            tool_name="bash",
+            buffer_dir=tmp_path,
+            limits=limits,
+            output_name="bash-call_0.txt",
+        )
+
+    assert (tmp_path / "bash-call_0.txt").read_text() == "first"
+    assert (tmp_path / "bash-call_0-2.txt").read_text() == "second"
+
+
+def test_a_symlinked_buffer_directory_is_refused(tmp_path: Path) -> None:
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    link = tmp_path / "buffers"
+    link.symlink_to(target)
+    text = "x" * 200_000
+
+    shown = buffer_tool_result(
+        AgentToolResult(content=[TextContent(text=text)]),
+        tool_name="bash",
+        buffer_dir=link,
+        limits=BufferLimits.for_context_window(200_000),
+        output_name="bash-c1.txt",
+    )
+
+    assert list(target.iterdir()) == []
+    assert "could not be saved" in shown.content[0].text  # type: ignore[union-attr]
+
+
+def test_a_tail_cut_inside_a_line_does_not_count_the_fragment(tmp_path: Path) -> None:
+    text = "\n".join("y" * 300 for _ in range(1_000))
+    limits = BufferLimits(inline_chars=100, window_chars=500, window_lines=60)
+
+    shown = buffer_tool_result(
+        AgentToolResult(content=[TextContent(text=text)]),
+        tool_name="bash",
+        buffer_dir=tmp_path,
+        limits=limits,
+    )
+
+    assert "the last 1 of 1,000 lines" in shown.content[0].text  # type: ignore[union-attr]
