@@ -195,6 +195,16 @@ Like Pi, Tau's loop does not impose a default turn limit. It continues until the
 
 Callers that want a safety cap can pass `max_turns`. If that configured limit is reached, the loop emits a recoverable error.
 
+With `report_at_max_turns`, the cap is a budget the model is told about. Two
+turns before it (when the cap is above two), a note says how many are left. Past
+the cap, one more request goes out with a note asking for a final report, and
+the run ends on that reply. The note is an ordinary user message appended to the
+conversation, and the request keeps its tool definitions (some providers reject
+tool history without them, and dropping them would change the cached prefix). A
+tool call in the reply is answered as not run, which keeps the history valid on
+resume. Coding sessions always use this mode; `tau -p --max-turns N` sets the
+budget.
+
 ## Important boundary
 
 The loop executes registered tools, but it does not define coding tools itself.

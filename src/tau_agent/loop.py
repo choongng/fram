@@ -29,6 +29,7 @@ from tau_agent.messages import (
     TextContent,
     ToolCall,
     ToolResultMessage,
+    UserMessage,
 )
 from tau_agent.provider import CancellationToken, ModelProvider
 from tau_agent.provider_events import (
@@ -65,6 +66,7 @@ async def run_agent_loop(
     prompts: Sequence[AgentMessage] = (),
     prelude_messages: Sequence[AgentMessage] = (),
     max_turns: int | None = None,
+    report_at_max_turns: bool = False,
     signal: CancellationToken | None = None,
     session_id: str | None = None,
     get_steering_messages: Callable[[], Sequence[AgentMessage]] | None = None,
@@ -74,6 +76,13 @@ async def run_agent_loop(
     long_lived: bool = False,
 ) -> AsyncIterator[AgentEvent]:
     """Run the provider/tool loop and emit Pi-compatible agent events.
+
+    With `report_at_max_turns`, `max_turns` is a budget the model is told
+    about: a note goes in TURN_CAP_WARN_AHEAD turns before the cap, and past
+    the cap one last request asks for a report, so the run ends with that
+    reply instead of an error. Tools stay on that request, since some
+    providers reject tool history without definitions and dropping them would
+    change the cached prefix; a call in the reply is not run.
 
     `long_lived` marks every request as from a long-lived conversation (an
     interactive session that waits on its user), so a provider with a longer
@@ -123,7 +132,9 @@ async def run_agent_loop(
                 yield MessageEndEvent(message=message)
             pending = ()
 
-            if max_turns is not None and turn > max_turns:
+            final_report = report_at_max_turns and max_turns is not None and turn > max_turns
+
+            if max_turns is not None and turn > max_turns and not final_report:
                 error = _error_message(model, f"Agent stopped after max_turns={max_turns}")
                 messages.append(error)
                 new_messages.append(error)
@@ -143,6 +154,14 @@ async def run_agent_loop(
                 yield TurnEndEvent(message=aborted)
                 yield AgentEndEvent(messages=new_messages)
                 return
+
+            if report_at_max_turns and max_turns is not None:
+                cap_note = _turn_cap_note(turn, max_turns)
+                if cap_note is not None:
+                    messages.append(cap_note)
+                    new_messages.append(cap_note)
+                    yield MessageStartEvent(message=cap_note)
+                    yield MessageEndEvent(message=cap_note)
 
             # Python async generators cannot pass a yielding callback through a
             # normal await cleanly, so consume the assistant sub-generator and
@@ -190,7 +209,13 @@ async def run_agent_loop(
                     signal,
                     before_tool_call,
                     after_tool_call,
-                    cut_note=_cut_tool_call_note(call) if call is cut else None,
+                    cut_note=(
+                        TURN_CAP_REFUSAL
+                        if final_report
+                        else _cut_tool_call_note(call)
+                        if call is cut
+                        else None
+                    ),
                 ):
                     yield event
                     if isinstance(event, MessageEndEvent) and isinstance(
@@ -209,6 +234,9 @@ async def run_agent_loop(
                             stop_note = event.message.text or None
 
             yield TurnEndEvent(message=assistant, tool_results=tool_results)
+            if final_report:
+                yield AgentEndEvent(messages=new_messages)
+                return
             turn += 1
             pending = tuple(get_steering_messages() if get_steering_messages else ())
 
@@ -219,6 +247,27 @@ async def run_agent_loop(
         break
 
     yield AgentEndEvent(messages=new_messages)
+
+
+TURN_CAP_WARN_AHEAD = 2
+TURN_CAP_REFUSAL = "Not run: the turn limit for this run was reached."
+
+
+def _turn_cap_note(turn: int, max_turns: int) -> UserMessage | None:
+    """The steering note for `turn` under a reported turn cap, if one is due."""
+    if turn > max_turns:
+        return UserMessage(
+            content=(
+                f"Turn limit reached ({max_turns} used): no more tool calls. "
+                "Write your final report now: what you did, and what is left."
+            )
+        )
+    left = max_turns - turn + 1
+    if left == TURN_CAP_WARN_AHEAD and max_turns > TURN_CAP_WARN_AHEAD:
+        return UserMessage(
+            content=(f"{left} turns left: finish what you are doing and write your report.")
+        )
+    return None
 
 
 def provider_context(messages: list[AgentMessage]) -> list[AgentMessage]:
