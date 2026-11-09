@@ -81,3 +81,12 @@ tool call as text and end the turn, so nothing runs.
   A reply that only names `<tool_call>` in prose is left alone.
 
 Refusing a leaked call counts toward the eight-refusal stop like any other.
+
+## Output-limit continuation
+
+`OutputLimitNudges` decides when a reply cut off before it acted gets a
+follow-up: at most twice in a row and six times a run, counting only asks whose
+reply made no tool call. The reply to a nudge is the turn after the loop
+delivers it, because a steering message queued beside it goes first. A nudge the
+run ended without sending is withdrawn at the end of the run. Empty cut-off
+replies are left out of provider context, like empty failed ones.

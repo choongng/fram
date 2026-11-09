@@ -103,7 +103,7 @@ from tau_coding.events import (
 from tau_coding.extensions.provider_registry import DynamicProviderRegistry
 from tau_coding.extensions.providers import DynamicProvider, ProviderModel
 from tau_coding.extensions.runtime import ExtensionRuntime
-from tau_coding.guards import TEXT_TOOL_CALL_NUDGE, ToolCallGuards
+from tau_coding.guards import TEXT_TOOL_CALL_NUDGE, OutputLimitNudges, ToolCallGuards
 from tau_coding.history_index import (
     INDEX_MAX_CHARS,
     IndexNode,
@@ -581,6 +581,9 @@ class CodingSession:
         self._prompt_cache_misses = PromptCacheMissDetector()
         self._recall_source = LateRecallSource()
         self._text_call_nudge: UserMessage | None = None
+        self._output_limit_nudges = OutputLimitNudges(
+            queued=lambda: self._harness.queued_messages.follow_up
+        )
         self._tool_guards = ToolCallGuards(
             tools=lambda: self._harness.config.tools, stop_run=lambda: self._harness.cancel()
         )
@@ -1800,11 +1803,19 @@ class CodingSession:
         self._message_origins.pop(id(message), None)
         return message_text(message)
 
-    def _follow_up_text_tool_call(self, event: TurnEndEvent) -> None:
-        """Ask again when a reply wrote its tool call as text instead of making it."""
+    def _follow_up_unfinished_turn(self, event: TurnEndEvent) -> None:
+        """Ask again when a reply was cut off, or wrote its tool call as text."""
         message = event.message
         if not isinstance(message, AssistantMessage) or self._harness.cancel_requested:
             return
+        if message.stop_reason != "length" or message.tool_calls:
+            # Another queued message went first, and this reply settled the turn
+            # a waiting nudge was about.
+            self._drop_undelivered_nudge()
+        nudge = self._output_limit_nudges.after_turn(message)
+        if nudge is not None:
+            self._record_message_origin(nudge, delivery="follow_up", source="extension")
+            self._harness.follow_up_message(nudge)
         if self._tool_guards.wants_text_call_follow_up(message):
             nudge = UserMessage(content=TEXT_TOOL_CALL_NUDGE)
             self._record_message_origin(nudge, delivery="follow_up", source="extension")
@@ -1819,13 +1830,23 @@ class CodingSession:
         a reply that is no longer the last one.
         """
         if self._text_call_nudge is not None:
-            self._harness.discard_follow_up(self._text_call_nudge)
+            self._withdraw_follow_up(self._text_call_nudge)
             self._text_call_nudge = None
+        if (nudge := self._output_limit_nudges.undelivered()) is not None:
+            self._withdraw_follow_up(nudge)
+
+    def _withdraw_follow_up(self, message: UserMessage) -> None:
+        if message in self._harness.queued_messages.follow_up:
+            self._harness.discard_follow_up(message)
+            self._message_origins.pop(id(message), None)
 
     async def _signals_after(self, event: AgentEvent) -> AsyncIterator[CodingSessionEvent]:
         """Yield session diagnostics that one agent event gives rise to."""
         if isinstance(event, AgentStartEvent):
             self._tool_guards.reset()
+            self._output_limit_nudges.reset()
+        if isinstance(event, MessageEndEvent):
+            self._output_limit_nudges.sent(event.message)
         if isinstance(event, AgentEndEvent):
             self._drop_undelivered_nudge()
         if isinstance(event, MessageEndEvent) and isinstance(event.message, AssistantMessage):
@@ -1834,7 +1855,7 @@ class CodingSession:
                 await self._extension_runtime.emit_event(cache_miss)
                 yield cache_miss
         if isinstance(event, TurnEndEvent):
-            self._follow_up_text_tool_call(event)
+            self._follow_up_unfinished_turn(event)
         if isinstance(event, TurnEndEvent) and self._run_continues_after(event):
             async for signal in self._compact_between_turns():
                 yield signal
