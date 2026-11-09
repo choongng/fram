@@ -55,7 +55,7 @@ from tau_ai.retry import (
     retry_delay_seconds,
     wait_for_retry,
 )
-from tau_ai.stream import canonicalize_provider_stream
+from tau_ai.stream import canonicalize_provider_stream, responses_status
 
 DEFAULT_OPENAI_CODEX_BASE_URL = "https://chatgpt.com/backend-api"
 DEFAULT_OPENAI_CODEX_CLIENT_VERSION = "0.153.4"
@@ -864,10 +864,7 @@ def _finish_reason_from_response(event: Mapping[str, Any]) -> str | None:
     response = event.get("response")
     if not isinstance(response, Mapping):
         return None
-    status = response.get("status")
-    if isinstance(status, str):
-        return status
-    return None
+    return responses_status(response)
 
 
 def _int_or_zero(value: object) -> int:

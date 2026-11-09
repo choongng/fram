@@ -60,7 +60,7 @@ from tau_ai.retry import (
     wait_for_retry,
 )
 from tau_ai.stall import StreamStallError, stall_guarded, stream_stall_seconds
-from tau_ai.stream import canonicalize_provider_stream
+from tau_ai.stream import FILTERED_INCOMPLETE, canonicalize_provider_stream, responses_status
 from tau_ai.tool_call_ids import portable_tool_call_id
 
 # Models that reject function tools + reasoning_effort on /chat/completions and
@@ -1141,17 +1141,17 @@ def _ordered_builders(
 def _responses_finish_reason(chunk: Mapping[str, Any]) -> str | None:
     response = chunk.get("response")
     if isinstance(response, Mapping):
-        status = response.get("status")
-        if isinstance(status, str):
-            return status
+        return responses_status(response)
     return None
 
 
 def _normalize_finish_reason(status: str | None, *, has_tool_calls: bool) -> str:
     """Map a Responses-API status to chat-completions-style finish reasons."""
+    if status == "incomplete":
+        return "length"
     if has_tool_calls:
         return "tool_calls"
-    if status == "incomplete":
+    if status == FILTERED_INCOMPLETE:
         return "length"
     return "stop"
 
