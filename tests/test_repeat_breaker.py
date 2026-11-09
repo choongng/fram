@@ -220,6 +220,33 @@ async def test_a_repeated_change_is_still_caught_and_told_to_check_it(tmp_path: 
 
 
 @pytest.mark.anyio
+async def test_a_repeated_failed_change_quotes_the_failure(tmp_path: Path) -> None:
+    ran: list[str] = []
+    change: Args = {"path": "a.py"}
+
+    async def fail(
+        tool_call_id: object, arguments: object, signal: object = None, on_update: object = None
+    ) -> AgentToolResult:
+        ran.append("change")
+        raise ValueError("old text not found")
+
+    tool = AgentTool(
+        name="change",
+        label="change",
+        description="Change something.",
+        parameters={"type": "object"},
+        execute_fn=fail,
+        changes_workspace=True,
+    )
+
+    session, _ = await _run(tmp_path, [tool], [("change", change)] * 3)
+
+    assert ran == ["change", "change"]
+    assert "It said: old text not found" in _results(session)[2]
+    assert "already made" not in _results(session)[2]
+
+
+@pytest.mark.anyio
 async def test_a_repeated_empty_result_asks_for_a_different_step(tmp_path: Path) -> None:
     ran: list[str] = []
     same: Args = {"where": "logs"}
