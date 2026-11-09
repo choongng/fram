@@ -151,6 +151,11 @@ class AgentHarness:
     def pop_latest_follow_up(self) -> AgentMessage | None:
         return self._follow_up_queue.pop() if self._follow_up_queue else None
 
+    def discard_follow_up(self, message: AgentMessage) -> None:
+        """Drop `message` from the follow-up queue if it is still waiting there."""
+        if message in self._follow_up_queue:
+            self._follow_up_queue.remove(message)
+
     def pop_latest_steering(self) -> AgentMessage | None:
         return self._steering_queue.pop() if self._steering_queue else None
 
