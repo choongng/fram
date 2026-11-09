@@ -41,6 +41,16 @@ auto-compaction is off).
 {"id":"t","type":"set_auto_compaction_threshold","threshold":"80%"}
 ```
 
+`set_reasoning_guard` is a Tau extension that switches the reasoning guard of a
+running session. Its `value` is `"on"`, `"off"`, or a whole number of characters
+for the per-turn budget. The next provider request uses the new value. The
+response and `get_state` report `reasoningGuardEnabled` and
+`reasoningBudgetChars` (`null` when no budget applies).
+
+```json
+{"id":"g","type":"set_reasoning_guard","value":20000}
+```
+
 Use `agent_settled`, not `agent_end`, to decide that a run is fully idle: retries, overflow
 compaction, or queued continuations can follow `agent_end`.
 
