@@ -20,6 +20,7 @@ from tau_agent.messages import (
 )
 from tau_agent.provider import ModelProvider
 from tau_agent.tools import AgentTool
+from tau_agent.turns import FinishTurn
 
 EventListener = Callable[[AgentEvent], Awaitable[None] | None]
 QueueMode = Literal["one_at_a_time", "all"]
@@ -49,6 +50,7 @@ class AgentHarnessConfig:
     after_tool_call: AfterToolCall | None = None
     long_lived: bool = False
     """An interactive conversation that waits on its user: prefer a long prompt cache."""
+    finish_turn: FinishTurn | None = None
 
 
 class SimpleCancellationToken:
@@ -203,6 +205,7 @@ class AgentHarness:
                 before_tool_call=self._config.before_tool_call,
                 after_tool_call=self._config.after_tool_call,
                 long_lived=self._config.long_lived,
+                finish_turn=self._config.finish_turn,
             ):
                 await self._notify(event)
                 yield event
