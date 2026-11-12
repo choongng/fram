@@ -152,9 +152,12 @@ uv run pytest packaging/fram/tests
 ```
 
 The root test suite does not collect these tests, because its `testpaths` is
-`tests/`. The end-to-end test builds the wheel into a small `file://` simple
-index, runs `uv tool install fram-agent --index ...` into a temporary tool
-directory, then checks:
+`tests/` and adding this directory would load two `conftest` modules under one
+name. `.github/workflows/fram-ci.yml` runs them on every push to `main` and on
+pull requests, so a merge that leaves the version behind fails there. The
+end-to-end test builds the wheel into a small `file://` simple index, runs
+`uv tool install fram-agent --index ...` into a temporary tool directory, then
+checks:
 
 - `fram --version` and `fram --help` work, and the help says "Fram" and
   `fram install`, not `tau install`.
