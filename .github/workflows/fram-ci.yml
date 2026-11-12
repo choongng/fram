@@ -1,9 +1,14 @@
-name: Fram packaging
+name: Fram checks
 
+# Checks for Fram's own files, which Tau's ci.yml does not run.
+#
 # The fram packaging tests live apart from Tau's, with their own conftest, so
 # the plain `uv run pytest` in ci.yml does not collect them. They check that
 # Fram's version names the Tau release it is built on, which an upstream merge
 # can leave behind. See dev-notes/fram-packaging.md.
+#
+# The Markdown wrap check holds the prose Fram changed to 80 columns, compared
+# with the upstream commit Fram last merged. See dev-notes/markdown-wrap.md.
 
 on:
   pull_request:
@@ -43,3 +48,25 @@ jobs:
 
       - name: Run packaging tests
         run: uv run pytest packaging/fram/tests
+
+  markdown-wrap:
+    permissions:
+      contents: read
+    name: Markdown wrap
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream Tau
+        run: git fetch --no-tags https://github.com/huggingface/tau.git main:refs/remotes/upstream/main
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: .python-version
+
+      - name: Check Markdown wrapping
+        run: python scripts/check_md_wrap.py

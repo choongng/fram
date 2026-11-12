@@ -32,3 +32,15 @@ it lives, and what an upstream merge must check.
   `uv run pytest packaging/fram/tests`; its scan fails on new display text that
   spells out "Tau" (`dev-notes/branding.md` says how to fix it).
 - **Details:** `dev-notes/branding.md`, `dev-notes/fram-packaging.md`.
+
+## 3. The Markdown wrap check
+
+- **What:** Markdown prose Fram writes or edits wraps at 80 columns, and CI
+  checks it.
+- **Where:** `scripts/check_md_wrap.py`, the `markdown-wrap` job in
+  `.github/workflows/fram-ci.yml`, and a paragraph at the end of `AGENTS.md`.
+- **Touches Tau at:** `AGENTS.md` only. The check compares with the upstream
+  commit Fram last merged, so it never asks for upstream's text to be rewrapped.
+- **On each upstream merge:** nothing, unless Fram's own paragraphs conflicted;
+  run the check after resolving them.
+- **Details:** `dev-notes/markdown-wrap.md`.

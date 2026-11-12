@@ -79,3 +79,8 @@ Each substantial phase should leave behind beginner-friendly notes under `dev-no
 When a phase adds or changes user-facing behavior, also update the published docs
 under `website/content/` (the "Use Tau" guides and reference).
 
+
+Markdown prose wraps at 80 columns. Rewrap the paragraphs you edit, and only
+those, so that text from upstream Tau, and later merges of it, are left alone.
+`uv run python scripts/check_md_wrap.py` lists the changed paragraphs that need
+it, and `--fix` rewraps them.
