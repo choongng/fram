@@ -354,8 +354,7 @@ Provider preferences live in `~/.tau/providers.json`:
   A third, `max_concurrent_requests` (integer ≥ 1), queues this process's
   requests to the provider beyond that many in flight and tells the waiting
   session. Tau writes these back only when set. See [Single-slot local
-  servers]({{< relref
-  "../guides/providers-and-models.md#single-slot-local-servers" >}}).
+  servers](../guides/providers-and-models.md#single-slot-local-servers).
 - API keys and OAuth credentials are **not** stored here — they live in
   `~/.tau/credentials.json` (private but not encrypted). OAuth objects may contain
   provider metadata such as a GitHub Enterprise domain and are refreshed
