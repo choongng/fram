@@ -798,7 +798,7 @@ class TranscriptMessageWidget(Horizontal):
         foreground, background = _split_rich_style_colors(self._role_style.body)
         self._body_foreground = foreground
         self._body_background = background
-        self.styles.border_left = ("tall", self._role_style.border)
+        self.styles.border_left = ("solid", self._role_style.border)
         if background:
             self.styles.background = background
         self._markdown_text = _transcript_item_markdown(
@@ -2495,7 +2495,13 @@ def render_chat_item(
     table.add_column(width=1, style=role_style.border)
     table.add_column(ratio=1, style=role_style.body)
     table.add_row(
-        Align.left(Text("▌", style=role_style.border)),
+        # U+2502 LIGHT VERTICAL instead of U+258C LEFT HALF BLOCK: half-block
+        # glyphs are drawn at their natural glyph height, which is shorter
+        # than the line cell in some terminal fonts (e.g. Menlo in Apple
+        # Terminal.app), so the gutter reads as broken bar segments with
+        # gaps. Box-drawing verticals are designed to span the full cell
+        # height in every terminal font.
+        Align.left(Text("│", style=role_style.border)),
         Padding(body, (0, 1, 0, 1), style=role_style.body),
     )
     return Padding(table, (1, 1, 1, 0), style=role_style.body)

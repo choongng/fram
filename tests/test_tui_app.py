@@ -1319,7 +1319,7 @@ def test_chat_items_render_as_unlabeled_blocks() -> None:
     assert "you:" not in output
     assert "assistant:" not in output
     assert "tool:" not in output
-    assert "▌ Read the file" in output
+    assert "│ Read the file" in output
 
 
 def test_chat_items_use_left_accent_instead_of_box_border() -> None:
@@ -1328,7 +1328,7 @@ def test_chat_items_use_left_accent_instead_of_box_border() -> None:
     console.print(render_chat_item(ChatItem(role="assistant", text="Done.")))
     output = console.export_text()
 
-    assert "▌ Done." in output
+    assert "│ Done." in output
     assert "┌" not in output
     assert "└" not in output
 

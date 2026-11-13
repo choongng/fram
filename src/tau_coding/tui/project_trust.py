@@ -46,7 +46,7 @@ class ProjectTrustScreen(ModalScreen[TrustChoice | None]):
         padding: 1 2;
         background: #000000;
         color: #d8dee9;
-        border: tall #141922;
+        border: solid #141922;
     }
     #project-trust-title {
         height: 1;
@@ -72,7 +72,7 @@ class ProjectTrustScreen(ModalScreen[TrustChoice | None]):
         max-height: 7;
         background: #000000;
         color: #d8dee9;
-        border: tall #141922;
+        border: solid #141922;
     }
     #project-trust-list ListItem.-highlight,
     #project-trust-list ListItem.-highlight Label {
