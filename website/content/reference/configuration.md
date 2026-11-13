@@ -396,9 +396,12 @@ See the [Providers & models guide](/guides/providers-and-models/) for usage.
 ## Shell settings
 
 Tau runs shell commands in a **non-interactive** shell — both terminal-input
-commands (`! gst`, `!! ll`) and the agent's `bash` tool. Non-interactive shells
-don't load your aliases from `~/.zshrc` or `~/.bashrc`, and Tau deliberately
-never reads those files (they can hold tokens and side effects).
+commands (`! gst`, `!! ll`) and the agent's `bash` tool. On macOS and Linux that
+shell is `bash` from your `PATH`. Only when bash is not installed does Tau fall
+back to `/bin/sh`, and the tool's description then tells the model to avoid
+bash-only syntax. Non-interactive shells don't load your aliases from `~/.zshrc`
+or `~/.bashrc`, and Tau deliberately never reads those files (they can hold
+tokens and side effects).
 
 To make your own aliases available, opt in with a `shellCommandPrefix` in
 `~/.tau/settings.json` that loads a small Tau-specific alias file:
@@ -420,7 +423,8 @@ Then start a new session and try `! gst`. Notes:
 
 - Commands run through bash-style non-interactive execution, so keep aliases
   POSIX/bash-compatible (zsh-only syntax, functions, or interactive startup
-  logic may not work).
+  logic may not work). Without bash, the fallback shell has no `shopt`, so the
+  prefix above prints an error and the aliases are not defined.
 - Changing `settings.json` affects **new** sessions; an already-running session
   keeps the prefix it started with.
 - The snake_case key `shell_command_prefix` is also accepted.

@@ -120,6 +120,8 @@ Runs a shell command in the working directory.
 | `description` | no | string | Short summary of the command's purpose, shown as the call's label. |
 | `timeout` | no | number | Max runtime in seconds (> 0). Default `600`. |
 
+Runs under `bash` from `PATH` on macOS and Linux, or `/bin/sh` when bash is not
+installed (see [Shell settings](/reference/configuration/#shell-settings)).
 Combines stdout and stderr and succeeds on exit code `0`. Large output is
 reduced to its **tail**, and the full text is saved to a file named in the
 result (see [Large tool results](/guides/context/#large-tool-results)). On
