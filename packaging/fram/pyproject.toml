@@ -13,7 +13,7 @@ build-backend = "hatchling.build"
 [project]
 name = "fram-agent"
 dynamic = ["version"]
-description = "Fram: a fork of the Tau coding-agent harness."
+description = "A modular, hackable terminal coding agent built for long-running tasks and local models."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
