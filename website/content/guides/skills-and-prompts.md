@@ -57,6 +57,11 @@ Steps to review the current diff for security problems...
 Any supporting files (references, snippets) can live alongside `SKILL.md`
 inside the same directory.
 
+The system prompt lists each skill on one line, with only the first sentence of
+its description, cut to 100 characters. Put what the skill does in that first
+sentence. The model sees the rest of the description, such as when to use the
+skill, only when it reads the file.
+
 > [!TIP]
 > Bare `.md` files at the root of a skills directory (for example
 > `~/.tau/skills/review.md`) are **not** loaded as skills. Tau will surface a

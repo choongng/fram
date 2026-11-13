@@ -4,6 +4,7 @@ from pathlib import Path
 from tau_agent import AgentTool, AgentToolResult
 from tau_coding import Skill
 from tau_coding.system_prompt import (
+    SKILL_SUMMARY_MAX_CHARS,
     BuildSystemPromptOptions,
     ProjectContextFile,
     PromptSection,
@@ -12,6 +13,7 @@ from tau_coding.system_prompt import (
     collect_prompt_guidelines,
     format_available_tools,
     format_skills_for_prompt,
+    skill_summary,
 )
 from tau_coding.tools import create_coding_tools
 
@@ -172,21 +174,92 @@ def test_empty_custom_prompt_is_still_custom(tmp_path: Path) -> None:
     assert "Current date: 2026-06-17" in prompt
 
 
-def test_skills_are_formatted_as_xml_and_escaped(tmp_path: Path) -> None:
-    skill_path = tmp_path / "skills" / "review" / "SKILL.md"
-    skill = Skill(
-        name="review&check",
-        path=skill_path,
-        content="ignored",
-        description="Review <code>",
+def test_skills_are_indexed_by_directory_and_escaped(tmp_path: Path) -> None:
+    skills = [
+        Skill(
+            name="review&check",
+            path=tmp_path / "skills" / "review&check" / "SKILL.md",
+            content="ignored",
+            description="Review <code>.",
+        ),
+        Skill(name="loose", path=tmp_path / "loose.md", content="", description=None),
+        Skill(
+            name="testing",
+            path=tmp_path / "skills" / "testing" / "SKILL.md",
+            content="",
+            description="Write tests, e.g. unit tests. Use when adding a feature.",
+        ),
+    ]
+
+    formatted = format_skills_for_prompt(skills)
+
+    assert formatted.endswith(
+        "<available_skills>\n"
+        f"In {tmp_path}/skills/, each at <name>/SKILL.md:\n"
+        "- review&amp;check: Review &lt;code&gt;\n"
+        "- testing: Write tests, e.g. unit tests\n"
+        "Elsewhere:\n"
+        f"- loose: No description ({tmp_path}/loose.md)\n"
+        "</available_skills>"
     )
 
-    formatted = format_skills_for_prompt([skill])
 
-    assert "<available_skills>" in formatted
-    assert "<name>review&amp;check</name>" in formatted
-    assert "<description>Review &lt;code&gt;</description>" in formatted
-    assert f"<location>{skill_path}</location>" in formatted
+def test_a_long_skill_description_is_cut_to_its_summary() -> None:
+    long = "Run heavy, long, or fork-prone tools inside a resource-capped systemd scope " * 3
+
+    summary = skill_summary(long + ". Use when building.")
+
+    assert len(summary) <= SKILL_SUMMARY_MAX_CHARS
+    assert summary.endswith("…") and long.startswith(summary[:-1])
+    assert skill_summary("A short summary line. Use when.") == "A short summary line"
+
+
+def test_skill_summary_handles_abbreviations_other_endings_and_empty_text() -> None:
+    assert (
+        skill_summary("A tool for many things, e.g. unit tests and more. Use when.")
+        == "A tool for many things, e.g. unit tests and more"
+    )
+    assert skill_summary("Does this skill apply here? Yes. Use when.") == (
+        "Does this skill apply here?"
+    )
+    assert skill_summary("   ") == "No description"
+    assert skill_summary(".") == "No description"
+    assert skill_summary(None) == "No description"
+    word = "x" * 300
+    assert skill_summary(word) == "x" * (SKILL_SUMMARY_MAX_CHARS - 1) + "…"
+
+
+def test_skill_index_groups_directories_in_order_and_lists_odd_layouts_elsewhere(
+    tmp_path: Path,
+) -> None:
+    skills = [
+        Skill(name="b", path=tmp_path / "two" / "b" / "SKILL.md", content="", description="B."),
+        Skill(name="a", path=tmp_path / "one" / "a" / "SKILL.md", content="", description="A."),
+        Skill(name="c", path=tmp_path / "one" / "c" / "SKILL.md", content="", description="C."),
+        Skill(
+            name="renamed",
+            path=tmp_path / "one" / "dir" / "SKILL.md",
+            content="",
+            description="R.",
+        ),
+        Skill(name="root", path=Path("/root/SKILL.md"), content="", description="Top."),
+    ]
+
+    formatted = format_skills_for_prompt(skills)
+
+    assert formatted.endswith(
+        "<available_skills>\n"
+        f"In {tmp_path}/one/, each at <name>/SKILL.md:\n"
+        "- a: A\n"
+        "- c: C\n"
+        f"In {tmp_path}/two/, each at <name>/SKILL.md:\n"
+        "- b: B\n"
+        "In /, each at <name>/SKILL.md:\n"
+        "- root: Top\n"
+        "Elsewhere:\n"
+        f"- renamed: R ({tmp_path}/one/dir/SKILL.md)\n"
+        "</available_skills>"
+    )
 
 
 def test_format_skills_for_prompt_excludes_disabled_skills(tmp_path: Path) -> None:
@@ -206,7 +279,7 @@ def test_format_skills_for_prompt_excludes_disabled_skills(tmp_path: Path) -> No
 
     formatted = format_skills_for_prompt([visible, hidden])
 
-    assert "<name>visible</name>" in formatted
+    assert "- visible: Visible skill" in formatted
     assert "hidden" not in formatted
 
     assert format_skills_for_prompt([hidden]) == ""
