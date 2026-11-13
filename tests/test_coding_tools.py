@@ -1,6 +1,8 @@
 import asyncio
 import base64
+import os
 import shlex
+import shutil
 from io import BytesIO
 from pathlib import Path
 from time import monotonic
@@ -8,6 +10,7 @@ from time import monotonic
 import pytest
 from PIL import Image
 
+import tau_coding.tools
 from tau_agent import ImageContent
 from tau_agent.tool_arguments import argument_problems
 from tau_coding import (
@@ -461,6 +464,39 @@ async def test_bash_tool_applies_opt_in_shell_command_prefix(tmp_path: Path) -> 
     assert result.details is not None
     assert result.details["shell_command_prefix_applied"] is True
     assert not marker.exists()
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(
+    os.name != "posix" or shutil.which("bash") is None, reason="needs bash on a POSIX system"
+)
+async def test_bash_tool_runs_bash_so_bashisms_work(tmp_path: Path) -> None:
+    tool = create_bash_tool(cwd=tmp_path)
+
+    result = await tool.execute(
+        "test-call",
+        {"command": 'false | true; echo "${PIPESTATUS[0]}"; [[ a == a ]] && echo ok'},
+    )
+
+    assert result.text.strip() == "1\nok"
+    assert "Execute a bash command" in create_bash_tool_definition(cwd=tmp_path).description
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell resolution")
+async def test_bash_tool_falls_back_to_sh_and_says_so_without_bash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tau_coding.tools.shutil, "which", lambda name: None)
+    definition = create_bash_tool_definition(cwd=tmp_path)
+
+    result = await definition.to_agent_tool().execute("test-call", {"command": "printf ok"})
+
+    assert result.text == "ok"
+    assert "not bash" in definition.description
+    assert "Execute a bash command" not in definition.description
+    assert "bash" not in (definition.prompt_snippet or "")
 
 
 @pytest.mark.anyio

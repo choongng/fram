@@ -13,6 +13,7 @@ import asyncio
 import difflib
 import json
 import os
+import shutil
 import signal
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -53,6 +54,22 @@ BASH_TIMEOUT_ENV_VAR = "TAU_BASH_TIMEOUT_SECONDS"
 NO_OUTPUT = "(no output)"
 IMAGE_SNIFF_BYTES = 64 * 1024
 UTF8_BOM = "\ufeff"
+
+
+def _resolve_posix_shell() -> tuple[str | None, bool]:
+    """Return the shell the bash tool runs on POSIX and whether it is bash.
+
+    The tool is named and described as bash, so models write bashisms such as
+    `${PIPESTATUS[0]}` or `[[ ... ]]`. `create_subprocess_shell` defaults to
+    `/bin/sh`, which is dash on Debian-family systems and rejects them. Bash is
+    therefore resolved from `PATH`; only when it is absent does the tool fall
+    back to the system shell (`None` lets Python choose it, usually `/bin/sh`)
+    and say so in its description.
+    """
+    bash = shutil.which("bash")
+    if bash is not None:
+        return bash, True
+    return None, False
 
 
 class ToolInputError(ValueError):
@@ -772,15 +789,17 @@ def create_bash_tool_definition(
 ) -> ToolDefinition:
     """Create a definition for the `bash` tool.
 
-    The tool runs a shell command with `cwd` as the subprocess working
-    directory, disconnects stdin, and combines stdout and stderr into one UTF-8
-    decoded output stream. Disconnecting stdin keeps interactive programs from
-    competing with Tau for terminal input. The optional `timeout` argument must
-    be positive when supplied; without it the command gets `default_timeout`
-    seconds, and `None` there leaves it unbounded. On timeout, POSIX commands
-    are started in a new session and the entire process group is killed so
-    shell children from pipelines or compound commands do not continue running;
-    non-POSIX platforms fall back to killing the direct subprocess.
+    On POSIX the tool runs a command under bash (or the system shell when bash
+    is absent; see `_resolve_posix_shell`), and on Windows under `cmd.exe`,
+    with `cwd` as the subprocess working directory. It disconnects stdin and
+    combines stdout and stderr into one UTF-8 decoded output stream.
+    Disconnecting stdin keeps interactive programs from competing with Tau for
+    terminal input. The optional `timeout` argument must be positive when
+    supplied; without it the command gets `default_timeout` seconds, and `None`
+    there leaves it unbounded. On timeout, POSIX commands are started in a new
+    session and the entire process group is killed so shell children from
+    pipelines or compound commands do not continue running; non-POSIX platforms
+    fall back to killing the direct subprocess.
 
     Output is returned whole; a coding session windows an oversized result and
     saves the full text (see `tau_coding.tool_buffers`). Successful and failed
@@ -790,6 +809,11 @@ def create_bash_tool_definition(
     prefix = shell_command_prefix.strip() if shell_command_prefix else None
     if default_timeout is not None and default_timeout <= 0:
         raise ValueError("default_timeout must be greater than 0")
+    if os.name == "posix":
+        shell_executable, runs_bash = _resolve_posix_shell()
+    else:
+        # Windows runs `cmd.exe` as before; only POSIX resolves bash.
+        shell_executable, runs_bash = None, True
 
     async def execute(
         arguments: Mapping[str, JSONValue],
@@ -815,7 +839,7 @@ def create_bash_tool_definition(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 start_new_session=True,
-                executable="bash" if prefix else None,
+                executable=shell_executable,
             )
         else:
             process = await asyncio.create_subprocess_shell(
@@ -869,7 +893,13 @@ def create_bash_tool_definition(
     return ToolDefinition(
         name="bash",
         description=(
-            "Execute a bash command in the current working directory. Returns stdout and stderr. "
+            (
+                "Execute a bash command in the current working directory. "
+                if runs_bash
+                else "Execute a shell command in the current working directory. It runs "
+                "under the system shell, not bash, so avoid bash-only syntax. "
+            )
+            + "Returns stdout and stderr. "
             "In a session, long output is shortened to its end and the full output is saved "
             "to a file named in the result. Optionally provide a timeout in seconds"
             + (
@@ -878,7 +908,11 @@ def create_bash_tool_definition(
                 else "."
             )
         ),
-        prompt_snippet="Execute bash commands (ls, grep, find, etc.)",
+        prompt_snippet=(
+            "Execute bash commands (ls, grep, find, etc.)"
+            if runs_bash
+            else "Execute shell commands (ls, grep, find, etc.)"
+        ),
         prompt_guidelines=(
             "When using bash, include a brief present-participle description of the "
             "command's purpose (for example, 'Running tests').",
@@ -886,7 +920,12 @@ def create_bash_tool_definition(
         input_schema={
             "type": "object",
             "properties": {
-                "command": {"type": "string", "description": "Bash command to execute"},
+                "command": {
+                    "type": "string",
+                    "description": "Bash command to execute"
+                    if runs_bash
+                    else "Shell command to execute",
+                },
                 "description": {
                     "type": "string",
                     "description": (
