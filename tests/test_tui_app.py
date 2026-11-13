@@ -20,6 +20,8 @@ from textual.color import Color
 from textual.containers import Container, VerticalScroll
 from textual.content import Content
 from textual.content import Style as TextualStyle
+from textual.dom import NoScreen
+from textual.errors import NoWidget
 from textual.geometry import Offset
 from textual.screen import Screen
 from textual.selection import SELECT_ALL, Selection
@@ -1317,7 +1319,7 @@ def test_chat_items_render_as_unlabeled_blocks() -> None:
     assert "you:" not in output
     assert "assistant:" not in output
     assert "tool:" not in output
-    assert "▌ Read the file" in output
+    assert "│ Read the file" in output
 
 
 def test_chat_items_use_left_accent_instead_of_box_border() -> None:
@@ -1326,7 +1328,7 @@ def test_chat_items_use_left_accent_instead_of_box_border() -> None:
     console.print(render_chat_item(ChatItem(role="assistant", text="Done.")))
     output = console.export_text()
 
-    assert "▌ Done." in output
+    assert "│ Done." in output
     assert "┌" not in output
     assert "└" not in output
 
@@ -1790,8 +1792,7 @@ async def test_textual_markdown_widget_uses_theme_link_style() -> None:
 
 
 @pytest.mark.anyio
-async def test_transcript_markdown_paragraphs_keep_bottom_margin() -> None:
-    """Paragraphs stay separated, but the last one adds no trailing blank line."""
+async def test_transcript_markdown_paragraph_space_between_but_not_after() -> None:
     app = TauTuiApp(
         FakeSession([AssistantMessage(content="First paragraph.\n\nSecond paragraph.")]),
     )
@@ -1805,8 +1806,33 @@ async def test_transcript_markdown_paragraphs_keep_bottom_margin() -> None:
         paragraph_gap = blocks[1].region.y - blocks[0].region.y
 
     assert len(blocks) == 2
+    # The gap between paragraphs belongs to the earlier one. The last paragraph
+    # keeps none: the transcript box has no bottom padding to absorb it, so a
+    # trailing margin there renders as a blank row inside the box.
     assert margins == [1, 0]
     assert paragraph_gap == 2
+
+
+@pytest.mark.anyio
+async def test_status_row_renders_no_blank_row_of_its_own() -> None:
+    app = TauTuiApp(FakeSession())
+
+    async with app.run_test(size=(80, 30)) as pilot:
+        for index in range(3):
+            app.state.add_item("status", f"… status {index}")
+        app._refresh()
+        await pilot.pause()
+
+        rows = [row for row in app.query(TranscriptMessageWidget) if row.item.role == "status"]
+        assert [row.item.text for row in rows] == [
+            "… status 0",
+            "… status 1",
+            "… status 2",
+        ]
+        # Each status row is exactly its one text row: no blank row is folded
+        # inside the box, which is what made a run of them read as pairs.
+        assert [row.region.height for row in rows] == [1, 1, 1]
+        assert [block.styles.margin.bottom for block in app.query(TauMarkdownBlock)] == [0] * 3
 
 
 @pytest.mark.anyio
@@ -1871,8 +1897,8 @@ async def test_whitespace_only_assistant_blocks_leave_no_transcript_row() -> Non
 
     assert [item.role for item in app.state.items] == ["tool", "tool"]
     assert [widget.item.role for widget in rows] == ["tool", "tool"]
-    # One blank row between the tool rows, not three.
-    assert row_gap == row_height + 1
+    # Consecutive tool rows run together, with no blank row between them.
+    assert row_gap == row_height
 
 
 @pytest.mark.anyio
@@ -2813,7 +2839,7 @@ async def test_transcript_message_widget_renders_full_height_role_block() -> Non
     async with app.run_test(size=(60, 30)) as pilot:
         await pilot.pause()
         widget = app.query_one(TranscriptMessageWidget)
-        body = widget.query_one(".transcript-message-body")
+        body = widget.query_one(".transcript-plain-body")
 
         # A multi-line message must occupy more than a single row so the accent
         # and background have to span the full message height.
@@ -2823,14 +2849,47 @@ async def test_transcript_message_widget_renders_full_height_role_block() -> Non
         # block is rectangular and the accent spans every wrapped line.
         assert widget.styles.background == background
         assert body.styles.background == background
+        # The row pads its top interior row (the user box); the box's bottom
+        # interior row lives on the body.
         assert widget.styles.padding.top == 1
-        assert widget.styles.padding.bottom == 1
+        assert widget.styles.padding.bottom == 0
+        assert body.styles.padding.bottom == 1
         edge_type, edge_color = widget.styles.border_left
         assert edge_type != "none"
         assert edge_color == border
 
         # Selecting the whole message still yields the original plain text.
         assert widget.get_selection(SELECT_ALL) == (plain_text, "\n")
+
+
+@pytest.mark.anyio
+async def test_transcript_right_edge_insets() -> None:
+    app = TauTuiApp(FakeSession())
+
+    async with app.run_test(size=(80, 30)) as pilot:
+        await pilot.pause()
+        transcript = app.query_one("#transcript", TranscriptView)
+        app.state.add_item("user", "question " * 30)
+        app.state.add_item("assistant", "answer " * 40)
+        transcript.update_from_state(app.state, theme=TAU_DARK_THEME)
+        await transcript.append_assistant_delta("streamed " * 30, theme=TAU_DARK_THEME)
+        await pilot.pause()
+
+        # The transcript fills the main pane: a `1fr` width would lose the
+        # widest sibling margin (two columns) down its right edge.
+        assert transcript.region.right == app.query_one("#main-pane").region.right
+        user, assistant = (
+            w for w in app.query(TranscriptMessageWidget) if w.item.role in {"user", "assistant"}
+        )
+        # A highlighted box stops one plain column short of the edge...
+        assert user.region.right == transcript.region.right - 1
+        # ...while free text, finalized or streaming, may use the last column,
+        # and both start in the same column so finalizing does not reflow.
+        streaming = app.query_one(StreamingTranscriptMessageWidget)
+        finalized_text = assistant.query_one(".transcript-message-body").content_region
+        assert finalized_text.right == transcript.region.right
+        assert streaming.content_region.right == transcript.region.right
+        assert streaming.content_region.x == finalized_text.x
 
 
 @pytest.mark.anyio
@@ -3413,6 +3472,172 @@ async def test_long_transcript_incremental_appends_keep_mounted_window_bounded()
         assert len(mounted) <= TRANSCRIPT_WINDOW_ITEMS + TRANSCRIPT_WINDOW_OVERSCAN_ITEMS
         assert mounted[-1].item.text == f"new message {TRANSCRIPT_WINDOW_OVERSCAN_ITEMS}"
         assert len(app.state.items) == initial_count + TRANSCRIPT_WINDOW_OVERSCAN_ITEMS + 1
+
+
+def _window_rows(transcript: TranscriptView) -> list[tuple[str, str]]:
+    return [
+        (type(child).__name__, getattr(child, "selection_text", "").strip())
+        for child in transcript.children
+        if isinstance(
+            child,
+            TranscriptMessageWidget | StreamingTranscriptMessageWidget | TranscriptWindowBoundary,
+        )
+    ]
+
+
+async def _assert_matches_a_rebuild(pilot, transcript: TranscriptView) -> None:
+    trimmed = _window_rows(transcript)
+    window = (transcript._window_start, transcript._window_end)
+    from tau_coding.tui import widgets as tui_widgets
+
+    # Rebuild this exact window, which may hold up to the overscan beyond WINDOW.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(tui_widgets, "TRANSCRIPT_WINDOW_ITEMS", window[1] - window[0])
+        transcript._redraw(scroll_end=False, preserve_window=True)
+    await pilot.pause()
+    assert (transcript._window_start, transcript._window_end) == window
+    assert _window_rows(transcript) == trimmed
+
+
+@pytest.mark.anyio
+async def test_window_overflow_on_append_keeps_the_rows_still_in_the_window() -> None:
+    """Outgrowing the window unmounts only the oldest rows. Rebuilding it
+    remounted every row, and remounted rows draw on later ticks: the
+    scrollback flashed blank for a frame."""
+    initial_count = TRANSCRIPT_WINDOW_ITEMS + TRANSCRIPT_WINDOW_OVERSCAN_ITEMS
+    app = TauTuiApp(
+        FakeSession(
+            messages=[UserMessage(content=f"message {index}") for index in range(initial_count)]
+        )
+    )
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        transcript = app.query_one("#transcript", TranscriptView)
+        before = {id(widget.item): widget for widget in app.query(TranscriptMessageWidget)}
+        for index in range(TRANSCRIPT_WINDOW_OVERSCAN_ITEMS + 1):
+            app.state.add_item("user", f"new message {index}")
+            await transcript.append_item(app.state.items[-1], scroll_end=True)
+        await pilot.pause()
+
+        assert transcript._window_start == len(app.state.items) - TRANSCRIPT_WINDOW_ITEMS
+        survivors = app.state.items[transcript._window_start : initial_count]
+        assert survivors
+        assert all(transcript._item_widgets[id(item)] is before[id(item)] for item in survivors)
+        assert all(
+            widget.parent is None for widget in before.values() if widget.item not in survivors
+        )
+        await _assert_matches_a_rebuild(pilot, transcript)
+
+
+@pytest.mark.anyio
+async def test_window_overflow_at_message_end_keeps_the_rows_still_in_the_window() -> None:
+    from test_tui_thinking_toggle import _streamer, _turn_events
+
+    app = TauTuiApp(FakeSession())
+    stream = _streamer(app)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        transcript = app.query_one("#transcript", TranscriptView)
+        seen: dict[int, object] = {}
+        remounted = []
+        trims = 0
+        for index in range(60):
+            start = transcript._window_start
+            for event in _turn_events(index, with_tool=False):
+                await stream(event)
+            await pilot.pause()
+            window = app.state.items[transcript._window_start : transcript._window_end]
+            for item in window:
+                widget = transcript._item_widgets.get(id(item))
+                if widget is None:
+                    continue
+                if seen.setdefault(id(item), widget) is not widget:
+                    remounted.append(item.text)
+            if transcript._window_start > start:
+                trims += 1
+        # Three items a turn against a 16-item overscan: the overflow lands on
+        # the prompt's append in some turns and on the reply's end in others.
+        assert trims >= 3
+        assert remounted == []
+        await _assert_matches_a_rebuild(pilot, transcript)
+
+
+@pytest.mark.anyio
+async def test_window_overflow_keeps_rows_a_scrolled_up_reader_is_reading() -> None:
+    """A reader at the top of the window keeps their rows; the window grows."""
+    initial_count = TRANSCRIPT_WINDOW_ITEMS + TRANSCRIPT_WINDOW_OVERSCAN_ITEMS
+    app = TauTuiApp(
+        FakeSession(
+            messages=[UserMessage(content=f"message {index}") for index in range(initial_count)]
+        )
+    )
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        transcript = app.query_one("#transcript", TranscriptView)
+        start = transcript._window_start
+        reading = transcript._item_widgets[id(app.state.items[start])]
+        transcript.scroll_to(y=reading.virtual_region.y, animate=False, immediate=True)
+        await pilot.pause()
+        assert not transcript._should_follow_output
+        offset = reading.virtual_region.y - transcript.scroll_y
+
+        for index in range(TRANSCRIPT_WINDOW_OVERSCAN_ITEMS + 1):
+            app.state.add_item("user", f"new message {index}")
+            await transcript.append_item(app.state.items[-1])
+        await pilot.pause()
+
+        assert transcript._window_start == start
+        assert reading.parent is transcript
+        assert reading.virtual_region.y - transcript.scroll_y == offset
+
+
+@pytest.mark.anyio
+async def test_window_boundary_with_nothing_to_count_takes_no_row() -> None:
+    app = TauTuiApp(FakeSession())
+
+    async with app.run_test() as pilot:
+        boundary = TranscriptWindowBoundary("later", 0)
+        await app.query_one("#transcript", TranscriptView).mount(boundary)
+        await pilot.pause()
+        assert not boundary.display
+        assert boundary.region.height == 0
+
+        boundary.update_count(3)
+        await pilot.pause()
+        assert boundary.display
+        assert boundary.region.height == 1
+
+
+@pytest.mark.anyio
+async def test_window_overflow_keeps_a_scrolled_up_view_in_place() -> None:
+    initial_count = TRANSCRIPT_WINDOW_ITEMS + TRANSCRIPT_WINDOW_OVERSCAN_ITEMS
+    app = TauTuiApp(
+        FakeSession(
+            messages=[UserMessage(content=f"message {index}") for index in range(initial_count)]
+        )
+    )
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        transcript = app.query_one("#transcript", TranscriptView)
+        reading = transcript._item_widgets[id(app.state.items[initial_count - 20])]
+        transcript.scroll_to(y=reading.virtual_region.y, animate=False, immediate=True)
+        await pilot.pause()
+        assert not transcript._should_follow_output
+        offset = reading.virtual_region.y - transcript.scroll_y
+
+        for index in range(TRANSCRIPT_WINDOW_OVERSCAN_ITEMS + 1):
+            app.state.add_item("user", f"new message {index}")
+            await transcript.append_item(app.state.items[-1])
+        await pilot.pause()
+        await pilot.pause()
+
+        assert transcript._window_start > 0
+        assert reading.parent is transcript
+        assert reading.virtual_region.y - transcript.scroll_y == offset
 
 
 @pytest.mark.anyio
@@ -11405,6 +11630,55 @@ async def test_hidden_thinking_line_is_not_stranded_by_a_thinking_only_message()
 
 
 @pytest.mark.anyio
+async def test_consecutive_tool_rows_run_together_with_a_gap_around_the_run() -> None:
+    app = TauTuiApp(FakeSession())
+
+    async def stream(event: AgentEvent) -> None:
+        app.adapter.apply(event)
+        await app._apply_streaming_transcript_event(event)
+
+    def gaps() -> list[tuple[str, int]]:
+        rows = [
+            child
+            for child in app.query_one("#transcript", TranscriptView).children
+            if isinstance(child, TranscriptMessageWidget | StreamingTranscriptMessageWidget)
+        ]
+        return [
+            (row.item.role, row.region.y - (previous.region.y + previous.region.height))
+            for previous, row in zip(rows, rows[1:], strict=False)
+        ]
+
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        await stream(AgentStartEvent())
+        await stream(MessageEndEvent(message=AssistantMessage(content="Starting.")))
+        # Calls from separate messages land in separate rows; calls from one
+        # message share a row. Either way a burst of tool work is one block.
+        for index in range(3):
+            call = ToolCall(
+                id=f"call-{index}",
+                name="bash",
+                arguments={"command": "ls", "description": f"Step {index}"},
+            )
+            for event in _thinking_message_events(f"plan {index}", (call,)):
+                await stream(event)
+        await stream(MessageEndEvent(message=AssistantMessage(content="Done.")))
+        await pilot.pause()
+
+        assert gaps() == [("tool", 1), ("tool", 0), ("tool", 0), ("assistant", 1)]
+
+        # Revealed thinking sits between the calls, so they are no longer a
+        # run: every row is separated again.
+        await pilot.press("ctrl+t")
+        await pilot.pause()
+        assert {gap for _, gap in gaps()} == {1}
+
+        await pilot.press("ctrl+t")
+        await pilot.pause()
+        assert gaps() == [("tool", 1), ("tool", 0), ("tool", 0), ("assistant", 1)]
+
+
+@pytest.mark.anyio
 async def test_tui_app_restored_thinking_toggles_in_persisted_order() -> None:
     app = TauTuiApp(
         FakeSession(
@@ -13814,6 +14088,21 @@ async def test_page_keys_page_across_the_bounded_transcript_window(
         assert transcript.is_vertical_scroll_end
 
 
+# --- Sidebar file editor component styles -----------------------------------
+#
+# Opening a sidebar file mounts a fresh TextArea into the main slot. Textual
+# clears a widget's component styles when it is removed, so a repaint that
+# still reached the removed editor raised
+# ``KeyError: No 'text-area--gutter' key in COMPONENT_CLASSES`` out of
+# ``TextAreaTheme.apply_css``. The tests below cover the open, switch, close
+# and reopen sequences the owner hit, plus the removal order that crashed.
+
+_SIDEBAR_STYLE_SKILL_TEXT = {
+    "deploy": "# Deploy\nShip it.\n",
+    "review": "# Review\nReview the diff.\n",
+}
+
+
 @pytest.mark.anyio
 async def test_page_keys_jump_transcript_while_prompt_has_focus() -> None:
     app = TauTuiApp(
@@ -13871,6 +14160,236 @@ async def test_tui_app_down_arrow_returns_to_blank_after_recalling_prompt() -> N
         await pilot.pause()
         assert prompt.text == ""
         assert prompt.cursor_location == (0, 0)
+
+
+def _sidebar_component_styles_session(
+    tmp_path: Path,
+) -> tuple[FakeSession, dict[str, Path]]:
+    """A session with two skills, one prompt template and one context file."""
+    paths = {
+        "deploy": tmp_path / ".agents" / "skills" / "deploy" / "SKILL.md",
+        "review": tmp_path / ".agents" / "skills" / "review" / "SKILL.md",
+        "explain": tmp_path / ".tau" / "prompts" / "explain.md",
+        "context": tmp_path / "AGENTS.md",
+    }
+    for path, text in (
+        (paths["deploy"], _SIDEBAR_STYLE_SKILL_TEXT["deploy"]),
+        (paths["review"], _SIDEBAR_STYLE_SKILL_TEXT["review"]),
+        (paths["explain"], "Explain this.\n"),
+        (paths["context"], "Project rules.\n"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    session = FakeSession()
+    session.cwd = tmp_path
+    session.skills = (
+        Skill("review", paths["review"], "# Review\nReview the diff.", "Review changes"),
+        Skill("deploy", paths["deploy"], "# Deploy\nShip it.", "Deploy changes"),
+    )
+    session.prompt_templates = (
+        PromptTemplate("explain", paths["explain"], "Explain this.", "Explain code"),
+    )
+    session.context_files = (
+        ProjectContextFile(path=str(paths["context"]), content="Project rules."),
+    )
+    return session, paths
+
+
+_SIDEBAR_STYLE_COMPONENTS = sorted(set(TextArea.COMPONENT_CLASSES) | {"text-area--gutter"})
+
+
+def _sidebar_file_items(app: TauTuiApp, section: str) -> dict[str, SidebarFileItem]:
+    """The sidebar entries of one section, keyed by label.
+
+    Context files sit in an always-visible list; skills and prompts are in
+    collapsible sections that have to be expanded before their items exist.
+    """
+    if section != "context":
+        app.query_one(f"#sidebar-{section}", Collapsible).collapsed = False
+    return {
+        item.file_label: item
+        for item in app.query(f"#sidebar-{section}-content .sidebar-file-item")
+    }
+
+
+async def _open_sidebar_item(app: TauTuiApp, pilot, section: str, label: str) -> None:
+    """Open one sidebar file by its label, whatever its position in the list."""
+    item = _sidebar_file_items(app, section)[label]
+    item.post_message(SidebarFileItem.OpenRequested(item))
+    await pilot.pause()
+    await pilot.pause()
+
+
+def _assert_sidebar_editor_component_styles_resolve(app: TauTuiApp) -> TextArea:
+    """Every component class TextArea declares must resolve while editing."""
+    editor = app.query_one("#sidebar-file-editor", SidebarFileEditor)
+    editor_input = editor.query_one("#sidebar-file-editor-input", TextArea)
+    for component in _SIDEBAR_STYLE_COMPONENTS:
+        editor_input.get_component_styles(component)
+        editor_input.get_component_rich_style(component)
+    return editor_input
+
+
+@pytest.mark.anyio
+async def test_sidebar_file_editor_component_styles_open_skill(tmp_path: Path) -> None:
+    session, paths = _sidebar_component_styles_session(tmp_path)
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        # The app lists skills sorted by name inside their origin.
+        assert sorted(_sidebar_file_items(app, "skills")) == ["deploy", "review"]
+
+        await _open_sidebar_item(app, pilot, "skills", "review")
+        editor = app.query_one("#sidebar-file-editor", SidebarFileEditor)
+        assert editor.kind == "Skill"
+        assert editor.path == paths["review"]
+        editor_input = _assert_sidebar_editor_component_styles_resolve(app)
+        assert editor_input.text == _SIDEBAR_STYLE_SKILL_TEXT["review"]
+
+        # A resize restyles the editor; the component classes must still resolve.
+        await pilot.resize_terminal(100, 30)
+        await pilot.pause()
+        _assert_sidebar_editor_component_styles_resolve(app)
+    assert app._exception is None
+
+
+@pytest.mark.anyio
+async def test_sidebar_file_editor_component_styles_switch_between_files(
+    tmp_path: Path,
+) -> None:
+    session, paths = _sidebar_component_styles_session(tmp_path)
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        for label in ("deploy", "review", "deploy"):
+            await _open_sidebar_item(app, pilot, "skills", label)
+            editor = app.query_one("#sidebar-file-editor", SidebarFileEditor)
+            assert editor.kind == "Skill"
+            assert editor.path == paths[label]
+            editor_input = _assert_sidebar_editor_component_styles_resolve(app)
+            assert editor_input.text == _SIDEBAR_STYLE_SKILL_TEXT[label]
+    assert app._exception is None
+
+
+@pytest.mark.anyio
+async def test_sidebar_file_editor_component_styles_switch_across_kinds(
+    tmp_path: Path,
+) -> None:
+    session, paths = _sidebar_component_styles_session(tmp_path)
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        # Context entries are labelled with their file name, resources with
+        # their skill or prompt-template name.
+        for section, label, kind, path in (
+            ("skills", "deploy", "Skill", paths["deploy"]),
+            ("prompts", "explain", "Prompt", paths["explain"]),
+            ("context", "AGENTS.md", "Context", paths["context"]),
+            ("skills", "review", "Skill", paths["review"]),
+        ):
+            await _open_sidebar_item(app, pilot, section, label)
+            editor = app.query_one("#sidebar-file-editor", SidebarFileEditor)
+            assert editor.kind == kind
+            assert editor.path == path
+            _assert_sidebar_editor_component_styles_resolve(app)
+    assert app._exception is None
+
+
+@pytest.mark.anyio
+async def test_sidebar_file_editor_component_styles_close_and_reopen(tmp_path: Path) -> None:
+    session, paths = _sidebar_component_styles_session(tmp_path)
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _open_sidebar_item(app, pilot, "skills", "review")
+        _assert_sidebar_editor_component_styles_resolve(app)
+
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+        assert app.query_one("#transcript", TranscriptView).display
+        assert app.query_one("#prompt", PromptInput).has_focus
+
+        await _open_sidebar_item(app, pilot, "prompts", "explain")
+        editor = app.query_one("#sidebar-file-editor", SidebarFileEditor)
+        assert editor.path == paths["explain"]
+        _assert_sidebar_editor_component_styles_resolve(app)
+
+        await _open_sidebar_item(app, pilot, "skills", "deploy")
+        editor = app.query_one("#sidebar-file-editor", SidebarFileEditor)
+        assert editor.path == paths["deploy"]
+        _assert_sidebar_editor_component_styles_resolve(app)
+
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+        assert app.query_one("#transcript", TranscriptView).display
+
+        await _open_sidebar_item(app, pilot, "skills", "review")
+        editor = app.query_one("#sidebar-file-editor", SidebarFileEditor)
+        assert editor.path == paths["review"]
+        _assert_sidebar_editor_component_styles_resolve(app)
+    assert app._exception is None
+
+
+@pytest.mark.anyio
+async def test_closed_sidebar_editor_leaves_the_layout_before_it_unmounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pruning clears a widget's component styles; no repaint may reach it after.
+
+    Textual re-lays out a removed widget's parent only once the widget has
+    finished pruning, so a repaint in between (a theme change repaints
+    everything) rendered the pruned TextArea from the old layout and raised
+    ``KeyError: No 'text-area--gutter' key in COMPONENT_CLASSES``. The editor
+    must already be out of the screen's layout when it unmounts.
+    """
+    session, _ = _sidebar_component_styles_session(tmp_path)
+    app = TauTuiApp(session)
+    still_laid_out: list[str] = []
+    original_unmount = TextArea._on_unmount
+
+    def record_unmount(self: TextArea) -> None:
+        try:
+            self.screen.find_widget(self)
+        except (NoWidget, NoScreen):
+            pass
+        else:
+            still_laid_out.append(str(self.id))
+        original_unmount(self)
+
+    monkeypatch.setattr(TextArea, "_on_unmount", record_unmount)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _open_sidebar_item(app, pilot, "skills", "deploy")
+        await _open_sidebar_item(app, pilot, "skills", "review")
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+        assert app.query_one("#transcript", TranscriptView).display
+
+    assert "sidebar-file-editor-input" not in still_laid_out
+    assert app._exception is None
+
+
+@pytest.mark.anyio
+async def test_drop_from_layout_gives_up_waiting_on_a_screen_that_never_refreshes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TauTuiApp(FakeSession())
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        widget = app.query_one("#transcript", TranscriptView)
+
+        async def never_refreshes() -> bool:
+            await asyncio.Event().wait()
+            return True
+
+        monkeypatch.setattr(widget.screen, "wait_for_refresh", never_refreshes)
+        await asyncio.wait_for(app._drop_from_layout(widget), timeout=5)
+
+        assert not widget.display
 
 
 @pytest.mark.anyio

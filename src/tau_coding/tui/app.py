@@ -3825,6 +3825,22 @@ class TauTuiApp(App[None]):
         color: $tau-accent;
     }
 
+    /* Textual's Toast severity classes use the 'outer' box, whose edges are
+       half-block glyphs (▌▛▜) that some terminal fonts draw shorter than the
+       full cell, leaving gaps in the left bar. Use solid box-drawing borders
+       with the same severity colors. */
+    Toast.-information {
+        border-left: solid $success;
+    }
+
+    Toast.-warning {
+        border-left: solid $warning;
+    }
+
+    Toast.-error {
+        border-left: solid $error;
+    }
+
     #workspace {
         height: 1fr;
     }
@@ -3941,24 +3957,24 @@ class TauTuiApp(App[None]):
         display: none;
     }
 
-    TauTuiApp.-hide-sidebar #main-pane {
-        padding-left: 1;
-    }
-
     TauTuiApp.-sidebar-right #sidebar {
         dock: right;
     }
 
     #main-pane {
         width: 1fr;
-        padding: 1 1 0 1;
     }
 
     #transcript {
+        /* `100%`, not the default `1fr`: in a vertical layout Textual sizes
+           `1fr` widths against the container minus the widest sibling
+           margin (#above-prompt-slot's `0 1`), which left two dead columns
+           down the transcript's right edge. */
+        width: 100%;
         height: 1fr;
         border: none;
         background: $tau-transcript-background;
-        padding: 0 0 0 2;
+        padding: 0;
         overflow-x: auto;
         scrollbar-size-vertical: 0;
         scrollbar-size-horizontal: 1;
@@ -4046,6 +4062,9 @@ class TauTuiApp(App[None]):
         text-style: bold;
     }
 
+    /* The input keeps 1 column of left padding (the caret sits at the
+       border+padding edge and would otherwise cover the box edge); with the
+       box at x=3 its typed text lands at x=4. */
     #prompt {
         width: 1fr;
         height: auto;
@@ -4079,7 +4098,7 @@ class TauTuiApp(App[None]):
         padding: 0 1;
         background: $tau-autocomplete-background;
         color: $tau-screen-text;
-        border: tall $tau-border;
+        border: solid $tau-border;
         overflow-y: auto;
     }
 
@@ -4105,7 +4124,7 @@ class TauTuiApp(App[None]):
         max-height: 70%;
         padding: 1 2;
         background: $tau-chrome-background;
-        border: tall $tau-border;
+        border: solid $tau-border;
     }
 
     #session-picker-title,
@@ -4128,7 +4147,7 @@ class TauTuiApp(App[None]):
         margin-bottom: 1;
         background: $tau-prompt-background;
         color: $tau-prompt-text;
-        border: tall $tau-prompt-border;
+        border: solid $tau-prompt-border;
     }
 
     #tools-reference-header {
@@ -4151,7 +4170,7 @@ class TauTuiApp(App[None]):
         height: 1fr;
         background: $tau-prompt-background;
         color: $tau-prompt-text;
-        border: tall $tau-prompt-border;
+        border: solid $tau-prompt-border;
     }
 
     #session-picker-list,
@@ -4162,7 +4181,7 @@ class TauTuiApp(App[None]):
         height: auto;
         max-height: 16;
         background: $tau-transcript-background;
-        border: tall $tau-border;
+        border: solid $tau-border;
     }
 
     ListView,
@@ -4251,7 +4270,7 @@ class TauTuiApp(App[None]):
         max-height: 70%;
         padding: 1 2;
         background: $tau-chrome-background;
-        border: tall $tau-border;
+        border: solid $tau-border;
     }
 
     #extension-select-title,
@@ -4274,12 +4293,12 @@ class TauTuiApp(App[None]):
         height: auto;
         max-height: 16;
         background: $tau-transcript-background;
-        border: tall $tau-border;
+        border: solid $tau-border;
     }
 
     #extension-input-field {
         background: $tau-transcript-background;
-        border: tall $tau-border;
+        border: solid $tau-border;
     }
 
     #extension-select-help,
@@ -4302,7 +4321,7 @@ class TauTuiApp(App[None]):
         max-height: 82%;
         padding: 1 2;
         background: $tau-chrome-background;
-        border: tall $tau-border;
+        border: solid $tau-border;
     }
 
     #local-backend-picker-title,
@@ -4337,7 +4356,7 @@ class TauTuiApp(App[None]):
     #local-configure-screen Select,
     #local-model-action-input {
         background: $tau-transcript-background;
-        border: tall $tau-border;
+        border: solid $tau-border;
         margin-top: 1;
     }
 
@@ -4358,7 +4377,7 @@ class TauTuiApp(App[None]):
 
     #local-model-list:focus,
     #local-action-menu:focus {
-        border: tall $tau-accent;
+        border: solid $tau-accent;
     }
 
     #local-model-list.local-section-inactive > ListItem.-highlight,
@@ -4417,7 +4436,7 @@ class TauTuiApp(App[None]):
         padding: 1 2;
         background: $tau-chrome-background;
         color: $tau-chrome-text;
-        border: tall $tau-border;
+        border: solid $tau-border;
     }
 
     #project-trust-title {
@@ -4434,7 +4453,7 @@ class TauTuiApp(App[None]):
     #project-trust-list {
         background: $tau-transcript-background;
         color: $tau-screen-text;
-        border: tall $tau-border;
+        border: solid $tau-border;
     }
 
     #project-trust-list ListItem.-highlight,
@@ -4451,7 +4470,7 @@ class TauTuiApp(App[None]):
         padding: 1 2;
         background: $tau-chrome-background;
         color: $tau-chrome-text;
-        border: tall $tau-border;
+        border: solid $tau-border;
     }
 
     #command-output-title {
@@ -4465,7 +4484,7 @@ class TauTuiApp(App[None]):
         height: auto;
         max-height: 18;
         background: $tau-transcript-background;
-        border: tall $tau-border;
+        border: solid $tau-border;
     }
 
     #command-output-body {
@@ -4497,7 +4516,7 @@ class TauTuiApp(App[None]):
         padding: 1 2;
         background: $tau-chrome-background;
         color: $tau-chrome-text;
-        border: tall $tau-border;
+        border: solid $tau-border;
     }
 
     #login-method-title,
@@ -4524,7 +4543,7 @@ class TauTuiApp(App[None]):
         max-height: 12;
         background: $tau-transcript-background;
         color: $tau-screen-text;
-        border: tall $tau-border;
+        border: solid $tau-border;
     }
 
     #login-method-list ListItem Label,
@@ -4563,7 +4582,7 @@ class TauTuiApp(App[None]):
         margin-bottom: 1;
         background: $tau-prompt-background;
         color: $tau-prompt-text;
-        border: tall $tau-prompt-border;
+        border: solid $tau-prompt-border;
     }
 
     #login-method-help,
@@ -4593,7 +4612,7 @@ class TauTuiApp(App[None]):
         overflow-y: auto;
         padding: 1 2;
         background: $tau-chrome-background;
-        border: tall $tau-border;
+        border: solid $tau-border;
     }
 
     #login-title {
@@ -4621,7 +4640,7 @@ class TauTuiApp(App[None]):
     #custom-provider-api-key {
         background: $tau-prompt-background;
         color: $tau-prompt-text;
-        border: tall $tau-prompt-border;
+        border: solid $tau-prompt-border;
         margin-bottom: 1;
     }
 
@@ -5727,6 +5746,8 @@ class TauTuiApp(App[None]):
             mounted = self._extension_slot_mounted.get(key)
             if mounted is not None and mounted is not target:
                 with suppress(Exception):
+                    await self._drop_from_layout(mounted)
+                with suppress(Exception):
                     await mounted.remove()
                 if self._extension_slot_mounted.get(key) is mounted:
                     self._extension_slot_mounted.pop(key, None)
@@ -5877,6 +5898,8 @@ class TauTuiApp(App[None]):
                 if self._extension_sidebar_widgets.get(owner) is mounted:
                     continue
                 with suppress(Exception):
+                    await self._drop_from_layout(mounted)
+                with suppress(Exception):
                     await mounted.remove()
                 if self._extension_sidebar_mounted.get(owner) is mounted:
                     self._extension_sidebar_mounted.pop(owner, None)
@@ -5955,6 +5978,8 @@ class TauTuiApp(App[None]):
             mounted = self._extension_main_view_mounted
             if mounted is not None and mounted is not target_widget:
                 with suppress(Exception):
+                    await self._drop_from_layout(mounted)
+                with suppress(Exception):
                     await mounted.remove()
                 if self._extension_main_view_mounted is mounted:
                     self._extension_main_view_mounted = None
@@ -5979,6 +6004,26 @@ class TauTuiApp(App[None]):
             elif self._extension_main_view is None and self._extension_main_view_mounted is None:
                 # A close (target cleared) with nothing left to show.
                 self._restore_main_transcript()
+
+    async def _drop_from_layout(self, widget: Widget) -> None:
+        """Take a widget out of the screen's layout before it is removed.
+
+        Textual re-lays out a removed widget's parent only once the widget has
+        finished pruning, and pruning clears its component styles. A repaint in
+        between (a theme change repaints everything) still finds the widget in
+        the old layout and renders it, and a ``TextArea`` then raises
+        ``KeyError: No 'text-area--gutter' key in COMPONENT_CLASSES``. Hiding it
+        and waiting for the screen to re-lay out first means no repaint can
+        reach it once it starts pruning.
+
+        The wait is bounded: a screen that is closing never runs the refresh
+        callback, and the removal must not hang on it.
+        """
+        screen = widget.screen
+        widget.display = False
+        screen.refresh(layout=True)
+        with suppress(TimeoutError):
+            await asyncio.wait_for(screen.wait_for_refresh(), timeout=1.0)
 
     def _close_extension_main_view(self, handle: _MainViewHandle) -> None:
         """Unmount a main view and restore the main transcript (sequenced)."""

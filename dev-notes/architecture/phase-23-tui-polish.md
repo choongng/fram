@@ -207,6 +207,14 @@ These changes live in `tau_coding.tui`. The command registry still owns command
 metadata, and `tau_agent` remains unaware of Textual, keybindings, slash
 commands, and rendering.
 
+**Later change: line glyphs and tighter rows.** Borders and accents now use
+box-drawing lines (`solid` borders, `│` accents) instead of the half-block
+glyphs behind `tall` borders and `▌`. Many terminal fonts draw half blocks
+shorter than a full cell, which left gaps in vertical bars. Transcript rows also
+lost their spare blank rows: the last paragraph of a message adds no trailing
+margin, consecutive tool rows run together with one gap around the run, the main
+pane drops its padding, and rows keep a one-column inset from the right edge.
+
 ## Still deferred
 
 Phase 21 extensions remain intentionally unimplemented. Future polish may add
