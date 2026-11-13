@@ -42,6 +42,13 @@ messages. Thinking signatures are opaque provider-owned state; forwarding an
 OpenAI or Google signature as an Anthropic signature would simply move the
 cross-provider validation failure from the tool ID to the thinking block.
 
+Some providers can stream a tool call without an ID. The adapters then use
+`fallback_tool_call_id()`, a fresh `call_<24 lowercase hex characters>`, rather
+than a counter over the response's calls. A counter restarts at zero in every
+response, so two turns would both hold a `tool-call-0`, and a tool result could
+be matched to the wrong call on replay. The fallback is already portable, so the
+outbound conversion leaves it unchanged.
+
 ## Architecture
 
 The provider-neutral transcript remains in `tau_agent`. Provider constraints and

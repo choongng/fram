@@ -14,7 +14,8 @@ from tau_agent import (
 )
 from tau_ai.anthropic import _build_messages_payload
 from tau_ai.env import CACHE_RETENTION_NONE
-from tau_ai.tool_call_ids import portable_tool_call_id
+from tau_ai.openai_codex import _tool_builder_from_item
+from tau_ai.tool_call_ids import fallback_tool_call_id, portable_tool_call_id
 
 
 def test_portable_tool_call_id_preserves_safe_ids_and_hashes_native_ids() -> None:
@@ -27,6 +28,23 @@ def test_portable_tool_call_id_preserves_safe_ids_and_hashes_native_ids() -> Non
     assert first == portable_tool_call_id("call_1|fc_1")
     assert first != second
     assert len(first) <= 64
+
+
+def test_fallback_tool_call_ids_are_unique_and_already_portable() -> None:
+    ids = {fallback_tool_call_id() for _ in range(100)}
+
+    assert len(ids) == 100
+    for call_id in ids:
+        assert re.fullmatch(r"call_[0-9a-f]{24}", call_id)
+        assert portable_tool_call_id(call_id) == call_id
+
+
+def test_codex_items_without_call_id_get_distinct_fallback_ids() -> None:
+    first = _tool_builder_from_item({"type": "function_call", "name": "read"})
+    second = _tool_builder_from_item({"type": "function_call", "name": "read"})
+
+    assert first.call_id.startswith("call_")
+    assert first.call_id != second.call_id
 
 
 def test_anthropic_compiles_codex_tool_history_with_portable_ids() -> None:

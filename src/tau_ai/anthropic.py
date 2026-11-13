@@ -57,7 +57,7 @@ from tau_ai.retry import (
     wait_for_retry,
 )
 from tau_ai.stream import canonicalize_provider_stream
-from tau_ai.tool_call_ids import portable_tool_call_id
+from tau_ai.tool_call_ids import fallback_tool_call_id, portable_tool_call_id
 
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MAX_TOKENS = 4096
@@ -393,7 +393,7 @@ class AnthropicProvider:
                             continue
 
                         tool_calls = [
-                            builder.build(index) for index, builder in sorted(tool_builders.items())
+                            builder.build() for _, builder in sorted(tool_builders.items())
                         ]
                         for tool_call in tool_calls:
                             yield ProviderToolCallEvent(tool_call=tool_call)
@@ -486,13 +486,13 @@ class _AnthropicToolBuilder:
         self.name = ""
         self.arguments_parts: list[str] = []
 
-    def build(self, index: int) -> ToolCall:
+    def build(self) -> ToolCall:
         arguments_text = "".join(self.arguments_parts)
         arguments = _loads_object(arguments_text) if arguments_text else {}
         if arguments is None:
             arguments = {"_raw_arguments": arguments_text}
         return ToolCall(
-            id=self.id or f"tool-call-{index}",
+            id=self.id or fallback_tool_call_id(),
             name=self.name,
             arguments=arguments,
         )

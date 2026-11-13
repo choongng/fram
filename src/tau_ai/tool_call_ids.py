@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from hashlib import sha256
+from uuid import uuid4
 
 # Anthropic has the strictest documented identifier alphabet among Tau's
 # providers. Keeping translated IDs within this common subset also avoids
@@ -22,3 +23,13 @@ def portable_tool_call_id(value: str) -> str:
         return value
     digest = sha256(value.encode("utf-8")).hexdigest()
     return f"tc_{digest[:40]}"
+
+
+def fallback_tool_call_id() -> str:
+    """Return a fresh ID for a tool call the provider streamed without one.
+
+    Unique across the whole session, not just the response: a call's ID names
+    its saved output file and pairs it with its result, so a per-response
+    counter would reuse the same ID on every turn.
+    """
+    return f"call_{uuid4().hex[:24]}"

@@ -62,7 +62,7 @@ from tau_ai.retry import (
 )
 from tau_ai.stall import StreamStallError, stall_guarded, stream_stall_seconds
 from tau_ai.stream import FILTERED_INCOMPLETE, canonicalize_provider_stream, responses_status
-from tau_ai.tool_call_ids import portable_tool_call_id
+from tau_ai.tool_call_ids import fallback_tool_call_id, portable_tool_call_id
 
 # Models that reject function tools + reasoning_effort on /chat/completions and
 # must use the /v1/responses endpoint instead.
@@ -579,9 +579,7 @@ class _ChatStreamParser:
         return events, False
 
     def finalize(self) -> list[ProviderEvent]:
-        tool_calls = [
-            builder.build(index) for index, builder in sorted(self._tool_call_builders.items())
-        ]
+        tool_calls = [builder.build() for _, builder in sorted(self._tool_call_builders.items())]
         events: list[ProviderEvent] = [
             ProviderToolCallEvent(tool_call=tool_call) for tool_call in tool_calls
         ]
@@ -706,10 +704,7 @@ class _ResponsesStreamParser:
         return [], False
 
     def finalize(self) -> list[ProviderEvent]:
-        tool_calls = [
-            builder.build(index)
-            for index, builder in enumerate(_ordered_builders(self._tool_call_builders))
-        ]
+        tool_calls = [builder.build() for builder in _ordered_builders(self._tool_call_builders)]
         events: list[ProviderEvent] = [
             ProviderToolCallEvent(tool_call=tool_call) for tool_call in tool_calls
         ]
@@ -808,14 +803,14 @@ class _ToolCallBuilder:
             self.arguments_parts.append(arguments)
             self._chars += len(arguments)
 
-    def build(self, index: int) -> ToolCall:
+    def build(self) -> ToolCall:
         arguments_text = "".join(self.arguments_parts)
         arguments = _loads_object(arguments_text) if arguments_text else {}
         if arguments is None:
             arguments = {"_raw_arguments": arguments_text}
 
         return ToolCall(
-            id=self.id or f"tool-call-{index}",
+            id=self.id or fallback_tool_call_id(),
             name=self.name,
             arguments=arguments,
         )
@@ -858,7 +853,7 @@ class _ResponsesToolCallBuilder:
         if output_index is not None:
             self.output_index = output_index
 
-    def build(self, index: int) -> ToolCall:
+    def build(self) -> ToolCall:
         arguments_text = (
             self.arguments_final
             if self.arguments_final is not None
@@ -869,7 +864,7 @@ class _ResponsesToolCallBuilder:
             arguments = {"_raw_arguments": arguments_text}
 
         return ToolCall(
-            id=self.call_id or f"tool-call-{index}",
+            id=self.call_id or fallback_tool_call_id(),
             name=self.name,
             arguments=arguments,
         )
