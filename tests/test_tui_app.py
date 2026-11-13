@@ -20,6 +20,8 @@ from textual.color import Color
 from textual.containers import Container, VerticalScroll
 from textual.content import Content
 from textual.content import Style as TextualStyle
+from textual.dom import NoScreen
+from textual.errors import NoWidget
 from textual.geometry import Offset
 from textual.screen import Screen
 from textual.selection import SELECT_ALL, Selection
@@ -13814,6 +13816,21 @@ async def test_page_keys_page_across_the_bounded_transcript_window(
         assert transcript.is_vertical_scroll_end
 
 
+# --- Sidebar file editor component styles -----------------------------------
+#
+# Opening a sidebar file mounts a fresh TextArea into the main slot. Textual
+# clears a widget's component styles when it is removed, so a repaint that
+# still reached the removed editor raised
+# ``KeyError: No 'text-area--gutter' key in COMPONENT_CLASSES`` out of
+# ``TextAreaTheme.apply_css``. The tests below cover the open, switch, close
+# and reopen sequences the owner hit, plus the removal order that crashed.
+
+_SIDEBAR_STYLE_SKILL_TEXT = {
+    "deploy": "# Deploy\nShip it.\n",
+    "review": "# Review\nReview the diff.\n",
+}
+
+
 @pytest.mark.anyio
 async def test_page_keys_jump_transcript_while_prompt_has_focus() -> None:
     app = TauTuiApp(
@@ -13871,6 +13888,236 @@ async def test_tui_app_down_arrow_returns_to_blank_after_recalling_prompt() -> N
         await pilot.pause()
         assert prompt.text == ""
         assert prompt.cursor_location == (0, 0)
+
+
+def _sidebar_component_styles_session(
+    tmp_path: Path,
+) -> tuple[FakeSession, dict[str, Path]]:
+    """A session with two skills, one prompt template and one context file."""
+    paths = {
+        "deploy": tmp_path / ".agents" / "skills" / "deploy" / "SKILL.md",
+        "review": tmp_path / ".agents" / "skills" / "review" / "SKILL.md",
+        "explain": tmp_path / ".tau" / "prompts" / "explain.md",
+        "context": tmp_path / "AGENTS.md",
+    }
+    for path, text in (
+        (paths["deploy"], _SIDEBAR_STYLE_SKILL_TEXT["deploy"]),
+        (paths["review"], _SIDEBAR_STYLE_SKILL_TEXT["review"]),
+        (paths["explain"], "Explain this.\n"),
+        (paths["context"], "Project rules.\n"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    session = FakeSession()
+    session.cwd = tmp_path
+    session.skills = (
+        Skill("review", paths["review"], "# Review\nReview the diff.", "Review changes"),
+        Skill("deploy", paths["deploy"], "# Deploy\nShip it.", "Deploy changes"),
+    )
+    session.prompt_templates = (
+        PromptTemplate("explain", paths["explain"], "Explain this.", "Explain code"),
+    )
+    session.context_files = (
+        ProjectContextFile(path=str(paths["context"]), content="Project rules."),
+    )
+    return session, paths
+
+
+_SIDEBAR_STYLE_COMPONENTS = sorted(set(TextArea.COMPONENT_CLASSES) | {"text-area--gutter"})
+
+
+def _sidebar_file_items(app: TauTuiApp, section: str) -> dict[str, SidebarFileItem]:
+    """The sidebar entries of one section, keyed by label.
+
+    Context files sit in an always-visible list; skills and prompts are in
+    collapsible sections that have to be expanded before their items exist.
+    """
+    if section != "context":
+        app.query_one(f"#sidebar-{section}", Collapsible).collapsed = False
+    return {
+        item.file_label: item
+        for item in app.query(f"#sidebar-{section}-content .sidebar-file-item")
+    }
+
+
+async def _open_sidebar_item(app: TauTuiApp, pilot, section: str, label: str) -> None:
+    """Open one sidebar file by its label, whatever its position in the list."""
+    item = _sidebar_file_items(app, section)[label]
+    item.post_message(SidebarFileItem.OpenRequested(item))
+    await pilot.pause()
+    await pilot.pause()
+
+
+def _assert_sidebar_editor_component_styles_resolve(app: TauTuiApp) -> TextArea:
+    """Every component class TextArea declares must resolve while editing."""
+    editor = app.query_one("#sidebar-file-editor", SidebarFileEditor)
+    editor_input = editor.query_one("#sidebar-file-editor-input", TextArea)
+    for component in _SIDEBAR_STYLE_COMPONENTS:
+        editor_input.get_component_styles(component)
+        editor_input.get_component_rich_style(component)
+    return editor_input
+
+
+@pytest.mark.anyio
+async def test_sidebar_file_editor_component_styles_open_skill(tmp_path: Path) -> None:
+    session, paths = _sidebar_component_styles_session(tmp_path)
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        # The app lists skills sorted by name inside their origin.
+        assert sorted(_sidebar_file_items(app, "skills")) == ["deploy", "review"]
+
+        await _open_sidebar_item(app, pilot, "skills", "review")
+        editor = app.query_one("#sidebar-file-editor", SidebarFileEditor)
+        assert editor.kind == "Skill"
+        assert editor.path == paths["review"]
+        editor_input = _assert_sidebar_editor_component_styles_resolve(app)
+        assert editor_input.text == _SIDEBAR_STYLE_SKILL_TEXT["review"]
+
+        # A resize restyles the editor; the component classes must still resolve.
+        await pilot.resize_terminal(100, 30)
+        await pilot.pause()
+        _assert_sidebar_editor_component_styles_resolve(app)
+    assert app._exception is None
+
+
+@pytest.mark.anyio
+async def test_sidebar_file_editor_component_styles_switch_between_files(
+    tmp_path: Path,
+) -> None:
+    session, paths = _sidebar_component_styles_session(tmp_path)
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        for label in ("deploy", "review", "deploy"):
+            await _open_sidebar_item(app, pilot, "skills", label)
+            editor = app.query_one("#sidebar-file-editor", SidebarFileEditor)
+            assert editor.kind == "Skill"
+            assert editor.path == paths[label]
+            editor_input = _assert_sidebar_editor_component_styles_resolve(app)
+            assert editor_input.text == _SIDEBAR_STYLE_SKILL_TEXT[label]
+    assert app._exception is None
+
+
+@pytest.mark.anyio
+async def test_sidebar_file_editor_component_styles_switch_across_kinds(
+    tmp_path: Path,
+) -> None:
+    session, paths = _sidebar_component_styles_session(tmp_path)
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        # Context entries are labelled with their file name, resources with
+        # their skill or prompt-template name.
+        for section, label, kind, path in (
+            ("skills", "deploy", "Skill", paths["deploy"]),
+            ("prompts", "explain", "Prompt", paths["explain"]),
+            ("context", "AGENTS.md", "Context", paths["context"]),
+            ("skills", "review", "Skill", paths["review"]),
+        ):
+            await _open_sidebar_item(app, pilot, section, label)
+            editor = app.query_one("#sidebar-file-editor", SidebarFileEditor)
+            assert editor.kind == kind
+            assert editor.path == path
+            _assert_sidebar_editor_component_styles_resolve(app)
+    assert app._exception is None
+
+
+@pytest.mark.anyio
+async def test_sidebar_file_editor_component_styles_close_and_reopen(tmp_path: Path) -> None:
+    session, paths = _sidebar_component_styles_session(tmp_path)
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _open_sidebar_item(app, pilot, "skills", "review")
+        _assert_sidebar_editor_component_styles_resolve(app)
+
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+        assert app.query_one("#transcript", TranscriptView).display
+        assert app.query_one("#prompt", PromptInput).has_focus
+
+        await _open_sidebar_item(app, pilot, "prompts", "explain")
+        editor = app.query_one("#sidebar-file-editor", SidebarFileEditor)
+        assert editor.path == paths["explain"]
+        _assert_sidebar_editor_component_styles_resolve(app)
+
+        await _open_sidebar_item(app, pilot, "skills", "deploy")
+        editor = app.query_one("#sidebar-file-editor", SidebarFileEditor)
+        assert editor.path == paths["deploy"]
+        _assert_sidebar_editor_component_styles_resolve(app)
+
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+        assert app.query_one("#transcript", TranscriptView).display
+
+        await _open_sidebar_item(app, pilot, "skills", "review")
+        editor = app.query_one("#sidebar-file-editor", SidebarFileEditor)
+        assert editor.path == paths["review"]
+        _assert_sidebar_editor_component_styles_resolve(app)
+    assert app._exception is None
+
+
+@pytest.mark.anyio
+async def test_closed_sidebar_editor_leaves_the_layout_before_it_unmounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pruning clears a widget's component styles; no repaint may reach it after.
+
+    Textual re-lays out a removed widget's parent only once the widget has
+    finished pruning, so a repaint in between (a theme change repaints
+    everything) rendered the pruned TextArea from the old layout and raised
+    ``KeyError: No 'text-area--gutter' key in COMPONENT_CLASSES``. The editor
+    must already be out of the screen's layout when it unmounts.
+    """
+    session, _ = _sidebar_component_styles_session(tmp_path)
+    app = TauTuiApp(session)
+    still_laid_out: list[str] = []
+    original_unmount = TextArea._on_unmount
+
+    def record_unmount(self: TextArea) -> None:
+        try:
+            self.screen.find_widget(self)
+        except (NoWidget, NoScreen):
+            pass
+        else:
+            still_laid_out.append(str(self.id))
+        original_unmount(self)
+
+    monkeypatch.setattr(TextArea, "_on_unmount", record_unmount)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _open_sidebar_item(app, pilot, "skills", "deploy")
+        await _open_sidebar_item(app, pilot, "skills", "review")
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.pause()
+        assert app.query_one("#transcript", TranscriptView).display
+
+    assert "sidebar-file-editor-input" not in still_laid_out
+    assert app._exception is None
+
+
+@pytest.mark.anyio
+async def test_drop_from_layout_gives_up_waiting_on_a_screen_that_never_refreshes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = TauTuiApp(FakeSession())
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        widget = app.query_one("#transcript", TranscriptView)
+
+        async def never_refreshes() -> bool:
+            await asyncio.Event().wait()
+            return True
+
+        monkeypatch.setattr(widget.screen, "wait_for_refresh", never_refreshes)
+        await asyncio.wait_for(app._drop_from_layout(widget), timeout=5)
+
+        assert not widget.display
 
 
 @pytest.mark.anyio

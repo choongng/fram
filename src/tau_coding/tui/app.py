@@ -5727,6 +5727,8 @@ class TauTuiApp(App[None]):
             mounted = self._extension_slot_mounted.get(key)
             if mounted is not None and mounted is not target:
                 with suppress(Exception):
+                    await self._drop_from_layout(mounted)
+                with suppress(Exception):
                     await mounted.remove()
                 if self._extension_slot_mounted.get(key) is mounted:
                     self._extension_slot_mounted.pop(key, None)
@@ -5877,6 +5879,8 @@ class TauTuiApp(App[None]):
                 if self._extension_sidebar_widgets.get(owner) is mounted:
                     continue
                 with suppress(Exception):
+                    await self._drop_from_layout(mounted)
+                with suppress(Exception):
                     await mounted.remove()
                 if self._extension_sidebar_mounted.get(owner) is mounted:
                     self._extension_sidebar_mounted.pop(owner, None)
@@ -5955,6 +5959,8 @@ class TauTuiApp(App[None]):
             mounted = self._extension_main_view_mounted
             if mounted is not None and mounted is not target_widget:
                 with suppress(Exception):
+                    await self._drop_from_layout(mounted)
+                with suppress(Exception):
                     await mounted.remove()
                 if self._extension_main_view_mounted is mounted:
                     self._extension_main_view_mounted = None
@@ -5979,6 +5985,26 @@ class TauTuiApp(App[None]):
             elif self._extension_main_view is None and self._extension_main_view_mounted is None:
                 # A close (target cleared) with nothing left to show.
                 self._restore_main_transcript()
+
+    async def _drop_from_layout(self, widget: Widget) -> None:
+        """Take a widget out of the screen's layout before it is removed.
+
+        Textual re-lays out a removed widget's parent only once the widget has
+        finished pruning, and pruning clears its component styles. A repaint in
+        between (a theme change repaints everything) still finds the widget in
+        the old layout and renders it, and a ``TextArea`` then raises
+        ``KeyError: No 'text-area--gutter' key in COMPONENT_CLASSES``. Hiding it
+        and waiting for the screen to re-lay out first means no repaint can
+        reach it once it starts pruning.
+
+        The wait is bounded: a screen that is closing never runs the refresh
+        callback, and the removal must not hang on it.
+        """
+        screen = widget.screen
+        widget.display = False
+        screen.refresh(layout=True)
+        with suppress(TimeoutError):
+            await asyncio.wait_for(screen.wait_for_refresh(), timeout=1.0)
 
     def _close_extension_main_view(self, handle: _MainViewHandle) -> None:
         """Unmount a main view and restore the main transcript (sequenced)."""
