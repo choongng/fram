@@ -508,12 +508,18 @@ class TranscriptWindowBoundary(Static):
     def __init__(self, direction: Literal["earlier", "later"], count: int) -> None:
         self.direction = direction
         super().__init__(self._label(count), classes=f"transcript-window-{direction}")
+        # A boundary with nothing left to count takes no row: an empty Static
+        # still reserves its line, a blank row in the transcript.
+        self.display = count > 0
 
     def update_count(self, count: int) -> None:
         """Update the hidden-item count without scheduling a layout pass."""
         self.update(self._label(count), layout=False)
+        self.display = count > 0
 
     def _label(self, count: int) -> str:
+        if count <= 0:
+            return ""
         noun = "message" if count == 1 else "messages"
         arrow = "↑" if self.direction == "earlier" else "↓"
         return f"{arrow} Scroll for {count} {self.direction} {noun}"
@@ -1392,6 +1398,75 @@ class TranscriptView(VerticalScroll):
         if scroll_end:
             self._request_follow_scroll()
 
+    def _trim_window_start(self, *, scroll_end: bool) -> None:
+        """Shrink a window that outgrew its overscan back to the latest items.
+
+        Only the rows that fell out of the window are unmounted. Rebuilding
+        the window instead remounted every row, and remounted rows draw on
+        later ticks, so the scrollback flashed blank for a frame. A window
+        with a later-messages boundary is not at the end, so it is rebuilt.
+        """
+        state = self._render_state
+        if state is None:
+            return
+        old_start = self._window_start
+        self._window_end = len(state.items)
+        self._window_start = max(0, self._window_end - TRANSCRIPT_WINDOW_ITEMS)
+        if self._bottom_boundary is not None or self._window_start <= old_start:
+            self._redraw(scroll_end=scroll_end, preserve_window=True)
+            return
+        surviving = {
+            id(self._item_widgets[id(item)])
+            for item in state.items[self._window_start :]
+            if id(item) in self._item_widgets
+        }
+        dropped: list[Widget] = []
+        for item in state.items[old_start : self._window_start]:
+            widget = self._item_widgets.get(id(item))
+            if widget is not None and id(widget) not in surviving and widget not in dropped:
+                dropped.append(widget)
+        if not scroll_end and any(
+            widget.virtual_region.bottom > self.scroll_y for widget in dropped
+        ):
+            # The reader is looking at rows the trim would drop. Let the
+            # window grow for now; a later append trims it once they move on.
+            self._window_start = old_start
+            return
+        for item in state.items[old_start : self._window_start]:
+            self._item_widgets.pop(id(item), None)
+        anchor = next(
+            (
+                self._item_widgets[id(item)]
+                for item in state.items[self._window_start :]
+                if id(item) in self._item_widgets
+            ),
+            None,
+        )
+        anchor_offset = (
+            anchor.virtual_region.y - self.scroll_y
+            if anchor is not None and not scroll_end
+            else None
+        )
+        if dropped:
+            self.remove_children(dropped)
+        if self._top_boundary is None:
+            self._top_boundary = TranscriptWindowBoundary("earlier", self._window_start)
+            self.mount(self._top_boundary, before=0)
+        else:
+            self._top_boundary.update_count(self._window_start)
+        self.refresh(layout=True)
+        if scroll_end:
+            self._request_follow_scroll()
+        elif anchor is not None and anchor_offset is not None:
+            kept, offset = anchor, anchor_offset
+
+            # Rows above the reader went away; keep what they were reading in place.
+            def restore_anchor() -> None:
+                if kept.parent is self:
+                    self.scroll_to(y=kept.virtual_region.y - offset, animate=False, immediate=True)
+
+            self.call_after_refresh(restore_anchor)
+
     async def append_item(
         self,
         item: ChatItem,
@@ -1452,9 +1527,7 @@ class TranscriptView(VerticalScroll):
             and self._window_end - self._window_start
             > TRANSCRIPT_WINDOW_ITEMS + TRANSCRIPT_WINDOW_OVERSCAN_ITEMS
         ):
-            self._window_end = len(state.items)
-            self._window_start = max(0, self._window_end - TRANSCRIPT_WINDOW_ITEMS)
-            self._redraw(scroll_end=should_follow, preserve_window=True)
+            self._trim_window_start(scroll_end=should_follow)
             widget = self._item_widgets.get(id(item), widget)
         elif self._top_boundary is not None:
             self._top_boundary.update_count(self._window_start)
@@ -1750,8 +1823,7 @@ class TranscriptView(VerticalScroll):
             and self._window_end - self._window_start
             > TRANSCRIPT_WINDOW_ITEMS + TRANSCRIPT_WINDOW_OVERSCAN_ITEMS
         ):
-            self._window_start = max(0, self._window_end - TRANSCRIPT_WINDOW_ITEMS)
-            self._redraw(scroll_end=should_follow, preserve_window=True)
+            self._trim_window_start(scroll_end=should_follow)
         elif should_follow:
             self._request_follow_scroll()
 

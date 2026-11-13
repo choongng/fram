@@ -3417,6 +3417,172 @@ async def test_long_transcript_incremental_appends_keep_mounted_window_bounded()
         assert len(app.state.items) == initial_count + TRANSCRIPT_WINDOW_OVERSCAN_ITEMS + 1
 
 
+def _window_rows(transcript: TranscriptView) -> list[tuple[str, str]]:
+    return [
+        (type(child).__name__, getattr(child, "selection_text", "").strip())
+        for child in transcript.children
+        if isinstance(
+            child,
+            TranscriptMessageWidget | StreamingTranscriptMessageWidget | TranscriptWindowBoundary,
+        )
+    ]
+
+
+async def _assert_matches_a_rebuild(pilot, transcript: TranscriptView) -> None:
+    trimmed = _window_rows(transcript)
+    window = (transcript._window_start, transcript._window_end)
+    from tau_coding.tui import widgets as tui_widgets
+
+    # Rebuild this exact window, which may hold up to the overscan beyond WINDOW.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(tui_widgets, "TRANSCRIPT_WINDOW_ITEMS", window[1] - window[0])
+        transcript._redraw(scroll_end=False, preserve_window=True)
+    await pilot.pause()
+    assert (transcript._window_start, transcript._window_end) == window
+    assert _window_rows(transcript) == trimmed
+
+
+@pytest.mark.anyio
+async def test_window_overflow_on_append_keeps_the_rows_still_in_the_window() -> None:
+    """Outgrowing the window unmounts only the oldest rows. Rebuilding it
+    remounted every row, and remounted rows draw on later ticks: the
+    scrollback flashed blank for a frame."""
+    initial_count = TRANSCRIPT_WINDOW_ITEMS + TRANSCRIPT_WINDOW_OVERSCAN_ITEMS
+    app = TauTuiApp(
+        FakeSession(
+            messages=[UserMessage(content=f"message {index}") for index in range(initial_count)]
+        )
+    )
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        transcript = app.query_one("#transcript", TranscriptView)
+        before = {id(widget.item): widget for widget in app.query(TranscriptMessageWidget)}
+        for index in range(TRANSCRIPT_WINDOW_OVERSCAN_ITEMS + 1):
+            app.state.add_item("user", f"new message {index}")
+            await transcript.append_item(app.state.items[-1], scroll_end=True)
+        await pilot.pause()
+
+        assert transcript._window_start == len(app.state.items) - TRANSCRIPT_WINDOW_ITEMS
+        survivors = app.state.items[transcript._window_start : initial_count]
+        assert survivors
+        assert all(transcript._item_widgets[id(item)] is before[id(item)] for item in survivors)
+        assert all(
+            widget.parent is None for widget in before.values() if widget.item not in survivors
+        )
+        await _assert_matches_a_rebuild(pilot, transcript)
+
+
+@pytest.mark.anyio
+async def test_window_overflow_at_message_end_keeps_the_rows_still_in_the_window() -> None:
+    from test_tui_thinking_toggle import _streamer, _turn_events
+
+    app = TauTuiApp(FakeSession())
+    stream = _streamer(app)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        transcript = app.query_one("#transcript", TranscriptView)
+        seen: dict[int, object] = {}
+        remounted = []
+        trims = 0
+        for index in range(60):
+            start = transcript._window_start
+            for event in _turn_events(index, with_tool=False):
+                await stream(event)
+            await pilot.pause()
+            window = app.state.items[transcript._window_start : transcript._window_end]
+            for item in window:
+                widget = transcript._item_widgets.get(id(item))
+                if widget is None:
+                    continue
+                if seen.setdefault(id(item), widget) is not widget:
+                    remounted.append(item.text)
+            if transcript._window_start > start:
+                trims += 1
+        # Three items a turn against a 16-item overscan: the overflow lands on
+        # the prompt's append in some turns and on the reply's end in others.
+        assert trims >= 3
+        assert remounted == []
+        await _assert_matches_a_rebuild(pilot, transcript)
+
+
+@pytest.mark.anyio
+async def test_window_overflow_keeps_rows_a_scrolled_up_reader_is_reading() -> None:
+    """A reader at the top of the window keeps their rows; the window grows."""
+    initial_count = TRANSCRIPT_WINDOW_ITEMS + TRANSCRIPT_WINDOW_OVERSCAN_ITEMS
+    app = TauTuiApp(
+        FakeSession(
+            messages=[UserMessage(content=f"message {index}") for index in range(initial_count)]
+        )
+    )
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        transcript = app.query_one("#transcript", TranscriptView)
+        start = transcript._window_start
+        reading = transcript._item_widgets[id(app.state.items[start])]
+        transcript.scroll_to(y=reading.virtual_region.y, animate=False, immediate=True)
+        await pilot.pause()
+        assert not transcript._should_follow_output
+        offset = reading.virtual_region.y - transcript.scroll_y
+
+        for index in range(TRANSCRIPT_WINDOW_OVERSCAN_ITEMS + 1):
+            app.state.add_item("user", f"new message {index}")
+            await transcript.append_item(app.state.items[-1])
+        await pilot.pause()
+
+        assert transcript._window_start == start
+        assert reading.parent is transcript
+        assert reading.virtual_region.y - transcript.scroll_y == offset
+
+
+@pytest.mark.anyio
+async def test_window_boundary_with_nothing_to_count_takes_no_row() -> None:
+    app = TauTuiApp(FakeSession())
+
+    async with app.run_test() as pilot:
+        boundary = TranscriptWindowBoundary("later", 0)
+        await app.query_one("#transcript", TranscriptView).mount(boundary)
+        await pilot.pause()
+        assert not boundary.display
+        assert boundary.region.height == 0
+
+        boundary.update_count(3)
+        await pilot.pause()
+        assert boundary.display
+        assert boundary.region.height == 1
+
+
+@pytest.mark.anyio
+async def test_window_overflow_keeps_a_scrolled_up_view_in_place() -> None:
+    initial_count = TRANSCRIPT_WINDOW_ITEMS + TRANSCRIPT_WINDOW_OVERSCAN_ITEMS
+    app = TauTuiApp(
+        FakeSession(
+            messages=[UserMessage(content=f"message {index}") for index in range(initial_count)]
+        )
+    )
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        transcript = app.query_one("#transcript", TranscriptView)
+        reading = transcript._item_widgets[id(app.state.items[initial_count - 20])]
+        transcript.scroll_to(y=reading.virtual_region.y, animate=False, immediate=True)
+        await pilot.pause()
+        assert not transcript._should_follow_output
+        offset = reading.virtual_region.y - transcript.scroll_y
+
+        for index in range(TRANSCRIPT_WINDOW_OVERSCAN_ITEMS + 1):
+            app.state.add_item("user", f"new message {index}")
+            await transcript.append_item(app.state.items[-1])
+        await pilot.pause()
+        await pilot.pause()
+
+        assert transcript._window_start > 0
+        assert reading.parent is transcript
+        assert reading.virtual_region.y - transcript.scroll_y == offset
+
+
 @pytest.mark.anyio
 async def test_transcript_resize_preserves_mounted_message_widgets() -> None:
     app = TauTuiApp(
