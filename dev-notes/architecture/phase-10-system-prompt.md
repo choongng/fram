@@ -111,6 +111,27 @@ Skills are formatted in Pi's XML-style skill index:
 </available_skills>
 ```
 
+**Later change: a compact index.** Pi's form repeats each skill's whole
+description and path on every request, which for a set of about 30 skills is
+around 18K characters. Tau now lists each skill on one line, with the first
+sentence of its description cut to `SKILL_SUMMARY_MAX_CHARS` (100). Skills laid
+out as `<dir>/<name>/SKILL.md` are grouped under their directory, so the path is
+written once; any other file keeps its own path:
+
+```text
+<available_skills>
+In /home/user/.tau/skills/, each at <name>/SKILL.md:
+- python-testing: Write and run Python tests
+Elsewhere:
+- notes: Keep notes (/home/user/notes.md)
+</available_skills>
+```
+
+The same set takes about 3.4K characters. The whole description is still in the
+skill file, which the model reads when a task may match. The cost is that
+trigger phrases after the first sentence ("Use when ...") no longer reach the
+model unprompted, so skill authors should lead with what the skill does.
+
 Tau includes the skills section only when the `read` tool is enabled. This mirrors Pi: the model should use `read` to load the full skill file when a task matches a skill description.
 
 Prompt templates are not inserted into the system prompt. They are user prompt expansion resources.

@@ -2805,7 +2805,7 @@ async def test_session_builds_system_prompt_when_system_is_omitted(tmp_path: Pat
     assert '<project_instructions path="' in provider.calls[0][1]
     assert "Follow project rules." in provider.calls[0][1]
     assert "<available_skills>" in provider.calls[0][1]
-    assert "<name>testing</name>" in provider.calls[0][1]
+    assert "- testing: Test code" in provider.calls[0][1]
     assert [Path(context_file.path).name for context_file in session.context_files] == ["AGENTS.md"]
 
 
@@ -3598,7 +3598,8 @@ async def test_session_skill_index_lets_agent_read_relevant_skill_file(tmp_path:
     _events = await _collect_session_events(session.prompt("Add tests."))
 
     assert "<available_skills>" in provider.calls[0][1]
-    assert f"<location>{skill_path}</location>" in provider.calls[0][1]
+    index = f"In {skill_path.parent.parent}/, each at <name>/SKILL.md:\n"
+    assert index + "- testing: Use when writing tests" in provider.calls[0][1]
     assert len(provider.calls) == 2
     tool_result = provider.calls[1][2][-1]
     assert isinstance(tool_result, ToolResultMessage)
@@ -3888,7 +3889,7 @@ async def test_session_reload_refreshes_resources_and_system_prompt(tmp_path: Pa
     assert {skill.name for skill in session.skills} == {"testing"}
     assert [Path(context_file.path).name for context_file in session.context_files] == ["AGENTS.md"]
     assert "Reloaded project rules." in provider.calls[0][1]
-    assert "<name>testing</name>" in provider.calls[0][1]
+    assert "- testing: Test code" in provider.calls[0][1]
 
 
 @pytest.mark.anyio
@@ -3912,7 +3913,7 @@ async def test_session_reload_detects_disable_model_invocation_change(tmp_path: 
             resource_paths=TauResourcePaths(root=resource_root, agents_root=None),
         )
     )
-    assert "<name>testing</name>" in session.system_prompt
+    assert "- testing: Test code" in session.system_prompt
 
     skill_path.write_text(
         "---\ndescription: Test code\ndisable-model-invocation: true\n---\n# Testing\nRun pytest.",
@@ -3921,7 +3922,7 @@ async def test_session_reload_detects_disable_model_invocation_change(tmp_path: 
     summary = await session.reload()
 
     assert summary.system_prompt_rebuilt is True
-    assert "<name>testing</name>" not in session.system_prompt
+    assert "- testing:" not in session.system_prompt
     # The skill stays loaded for explicit /skill:testing invocation.
     assert {skill.name for skill in session.skills} == {"testing"}
 

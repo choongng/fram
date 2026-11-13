@@ -19,7 +19,12 @@ Tau loads user and project skills in increasing precedence:
 
 Tau's own product knowledge is regular packaged documentation, not a built-in skill, so it does not appear in the user's skill list or compete with user skill names.
 
-A higher-precedence skill with the same name overrides the lower one. Tau places only each skill's name, description, and path in the system prompt; the model reads the full file when its description matches the task. Use `/skill:<name>` for explicit invocation.
+A higher-precedence skill with the same name overrides the lower one. Tau lists
+skills in the system prompt as a compact index: each skill's name and the first
+sentence of its description, cut to 100 characters, grouped by skills directory.
+The model reads the full file when that summary matches the task, so lead a
+description with what the skill does. Use `/skill:<name>` for explicit
+invocation.
 
 A skill with `disable-model-invocation: true` in its `SKILL.md` frontmatter is excluded from the system prompt entirely, so the model cannot invoke it on its own. The skill stays loaded and remains available through explicit `/skill:<name>` invocation and the `/skills` picker.
 

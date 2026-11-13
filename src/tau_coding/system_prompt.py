@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
@@ -318,77 +319,103 @@ def _project_context_sources(
     return tuple(sources)
 
 
-def _skill_sources(skills: Sequence[Skill]) -> tuple[SystemPromptSource, ...]:
-    visible_skills = sorted(
+#: How much of a skill's description its index line carries. The whole of it
+#: is in the skill's file, which the model reads when the task may match.
+SKILL_SUMMARY_MAX_CHARS = 100
+
+_SKILLS_PREAMBLE = (
+    "\n\nThe following skills provide specialized instructions for specific tasks.\n"
+    "Each is listed by name with the start of its description. Read a skill's file "
+    "when the task may match it; the file says when it applies.\n"
+    "When a skill file references a relative path, resolve it against the skill directory "
+    "(parent of SKILL.md / dirname of the path) and use that absolute path in tool "
+    "commands.\n\n"
+    "<available_skills>"
+)
+
+
+#: Abbreviations whose full stop does not end a sentence.
+_ABBREVIATIONS = frozenset({"e.g", "i.e", "etc", "vs", "cf", "approx"})
+
+#: A sentence this short is more likely a fragment than the description's point.
+_MIN_SENTENCE_CHARS = 20
+
+
+def skill_summary(description: str | None) -> str:
+    """The first sentence of a skill's description, cut to the index's length."""
+    text = " ".join((description or "").split())
+    sentence = text
+    for end in re.finditer(r"[.?!](?=\s|$)", text):
+        head = text[: end.start()]
+        last_word = head.rsplit(" ", 1)[-1].lower()
+        if len(head) >= _MIN_SENTENCE_CHARS and last_word not in _ABBREVIATIONS:
+            sentence = head if text[end.start()] == "." else head + text[end.start()]
+            break
+    else:
+        sentence = text.removesuffix(".")
+    if not sentence.strip(" .?!"):
+        return "No description"
+    if len(sentence) <= SKILL_SUMMARY_MAX_CHARS:
+        return sentence
+    cut = sentence[: SKILL_SUMMARY_MAX_CHARS - 1].rsplit(" ", 1)[0]
+    return cut.rstrip(" ,;:—-") + "…"
+
+
+def _skill_index_lines(skills: Sequence[Skill]) -> list[tuple[Skill, str]]:
+    """Each visible skill with the index text it adds, header lines included.
+
+    Skills laid out as ``<dir>/<name>/SKILL.md`` are listed under their
+    directory, named once; any other file is listed with its own path, last.
+    """
+    visible = sorted(
         (skill for skill in skills if not skill.disable_model_invocation),
         key=lambda item: item.name,
     )
-    if not visible_skills:
-        return ()
-    prefix = (
-        "\n\nThe following skills provide specialized instructions for specific tasks.\n"
-        "Read the full skill file when the task matches its description.\n"
-        "When a skill file references a relative path, resolve it against the skill directory "
-        "(parent of SKILL.md / dirname of the path) and use that absolute path in tool "
-        "commands.\n\n"
-        "<available_skills>\n"
+    grouped: dict[Path | None, list[Skill]] = {}
+    for skill in visible:
+        standard = skill.path.name == "SKILL.md" and skill.path.parent.name == skill.name
+        grouped.setdefault(skill.path.parent.parent if standard else None, []).append(skill)
+    entries: list[tuple[Skill, str]] = []
+    for directory in sorted(grouped, key=lambda key: key is None):
+        for index, skill in enumerate(grouped[directory]):
+            line = f"- {escape(skill.name)}: {escape(skill_summary(skill.description))}"
+            if directory is None:
+                line += f" ({escape(_format_path(skill.path))})"
+            if index == 0:
+                header = (
+                    f"In {escape(_format_path(directory).rstrip('/'))}/, each at <name>/SKILL.md:"
+                    if directory is not None
+                    else "Elsewhere:"
+                )
+                line = f"{header}\n{line}"
+            entries.append((skill, line))
+    return entries
+
+
+def _skill_sources(skills: Sequence[Skill]) -> tuple[SystemPromptSource, ...]:
+    entries = _skill_index_lines(skills)
+    return tuple(
+        SystemPromptSource(
+            kind="skill",
+            label=f"Skill: {skill.name}",
+            source=str(skill.path),
+            content=(_SKILLS_PREAMBLE if index == 0 else "")
+            + f"\n{line}"
+            + ("\n</available_skills>" if index == len(entries) - 1 else ""),
+        )
+        for index, (skill, line) in enumerate(entries)
     )
-    sources: list[SystemPromptSource] = []
-    for index, skill in enumerate(visible_skills):
-        description = skill.description or "No description"
-        entry = "\n".join(
-            (
-                "  <skill>",
-                f"    <name>{escape(skill.name)}</name>",
-                f"    <description>{escape(description)}</description>",
-                f"    <location>{escape(str(skill.path))}</location>",
-                "  </skill>",
-            )
-        )
-        sources.append(
-            SystemPromptSource(
-                kind="skill",
-                label=f"Skill: {skill.name}",
-                source=str(skill.path),
-                content=(prefix if index == 0 else "\n")
-                + entry
-                + ("\n</available_skills>" if index == len(visible_skills) - 1 else ""),
-            )
-        )
-    return tuple(sources)
 
 
 def format_skills_for_prompt(skills: Sequence[Skill]) -> str:
-    """Format skills for inclusion in a system prompt using Pi's XML style.
+    """Format skills as a compact index for the system prompt.
 
-    Skills with ``disable_model_invocation`` set are excluded from the prompt;
-    they remain invocable explicitly via ``/skill:<name>``.
+    Pi lists each skill's whole description; Tau lists its first sentence, cut
+    to ``SKILL_SUMMARY_MAX_CHARS``, so a large skill set stays cheap on every
+    request. Skills with ``disable_model_invocation`` set are excluded from the
+    prompt; they remain invocable explicitly via ``/skill:<name>``.
     """
-    visible_skills = [skill for skill in skills if not skill.disable_model_invocation]
-    if not visible_skills:
-        return ""
-
-    lines = [
-        "\n\nThe following skills provide specialized instructions for specific tasks.",
-        "Read the full skill file when the task matches its description.",
-        "When a skill file references a relative path, resolve it against the skill directory "
-        "(parent of SKILL.md / dirname of the path) and use that absolute path in tool commands.",
-        "",
-        "<available_skills>",
-    ]
-    for skill in sorted(visible_skills, key=lambda item: item.name):
-        description = skill.description or "No description"
-        lines.extend(
-            [
-                "  <skill>",
-                f"    <name>{escape(skill.name)}</name>",
-                f"    <description>{escape(description)}</description>",
-                f"    <location>{escape(str(skill.path))}</location>",
-                "  </skill>",
-            ]
-        )
-    lines.append("</available_skills>")
-    return "\n".join(lines)
+    return "".join(source.content for source in _skill_sources(skills))
 
 
 def _has_tool(tools: Sequence[AgentTool], name: str) -> bool:
