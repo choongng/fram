@@ -866,6 +866,47 @@ async def test_google_provider_round_trips_thought_signature() -> None:
 
 
 @pytest.mark.anyio
+async def test_google_provider_gives_id_less_tool_calls_ids_unique_across_responses() -> None:
+    """Gemini often omits functionCall ids; a per-response counter repeated them.
+
+    A call's id names its saved output file, so a repeat overwrote an earlier
+    turn's output and pointed recall at the wrong one.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text=(
+                'data: {"candidates":[{"content":{"parts":[{"functionCall":'
+                '{"name":"bash","args":{"command":"ls"}}}]},"finishReason":"STOP"}]}\n\n'
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = GoogleGenerativeAIProvider(
+            OpenAICompatibleConfig(
+                api_key="test-key",
+                base_url="https://generativelanguage.googleapis.com/v1beta",
+            ),
+            client=client,
+        )
+        ids = []
+        for _ in range(2):
+            events = await _collect(
+                provider.stream_response(
+                    model="gemini-2.5-flash",
+                    system="",
+                    messages=[UserMessage(content="List files")],
+                    tools=[],
+                )
+            )
+            ids.append(events[-1].message.tool_calls[0].id)
+
+    assert ids[0] != ids[1]
+
+
+@pytest.mark.anyio
 async def test_google_provider_strips_unsupported_schema_keywords_from_tools() -> None:
     requests: list[httpx.Request] = []
 
@@ -1311,6 +1352,45 @@ async def test_openai_compatible_provider_streams_tool_calls() -> None:
         ToolCall(id="call-1", name="read", arguments={"path": "README.md"}),
     )
     assert events[-1].reason == "toolUse"
+
+
+@pytest.mark.anyio
+async def test_openai_compatible_provider_gives_id_less_tool_calls_unique_ids() -> None:
+    """Some local servers stream tool calls without ids; each needs its own."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text=(
+                'data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+                '"function":{"name":"read","arguments":"{\\"path\\":\\"a\\"}"}},'
+                '{"index":1,"function":{"name":"read","arguments":"{\\"path\\":\\"b\\"}"}}'
+                ']},"finish_reason":"tool_calls"}]}\n\n'
+                "data: [DONE]\n\n"
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenAICompatibleProvider(
+            OpenAICompatibleConfig(api_key="test-key", base_url="https://example.test/v1"),
+            client=client,
+        )
+        ids: list[str] = []
+        for _ in range(2):
+            events = await _collect(
+                provider.stream_response(
+                    model="test-model",
+                    system="",
+                    messages=[UserMessage(content="Read a and b")],
+                    tools=[],
+                )
+            )
+            assert isinstance(events[-1], AssistantDoneEvent)
+            ids.extend(call.id for call in events[-1].message.tool_calls)
+
+    assert len(ids) == 4
+    assert len(set(ids)) == 4
 
 
 @pytest.mark.anyio

@@ -46,7 +46,7 @@ from tau_ai.retry import (
     wait_for_retry,
 )
 from tau_ai.stream import canonicalize_provider_stream
-from tau_ai.tool_call_ids import portable_tool_call_id
+from tau_ai.tool_call_ids import fallback_tool_call_id, portable_tool_call_id
 
 
 class GoogleGenerativeAIProvider:
@@ -271,7 +271,7 @@ class _GoogleStreamParser:
             function_call = part.get("functionCall")
             if isinstance(function_call, Mapping):
                 self.emitted_content = True
-                default_id = f"tool-call-{len(self._tool_calls)}"
+                default_id = fallback_tool_call_id()
                 thought_signature = part.get("thoughtSignature")
                 tool_call = ToolCall(
                     id=_string_or_default(function_call.get("id"), default_id),

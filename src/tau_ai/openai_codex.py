@@ -56,6 +56,7 @@ from tau_ai.retry import (
     wait_for_retry,
 )
 from tau_ai.stream import canonicalize_provider_stream, responses_status
+from tau_ai.tool_call_ids import fallback_tool_call_id
 
 DEFAULT_OPENAI_CODEX_BASE_URL = "https://chatgpt.com/backend-api"
 DEFAULT_OPENAI_CODEX_CLIENT_VERSION = "0.153.4"
@@ -743,7 +744,7 @@ def _tool_builder_from_item(item: Mapping[str, Any]) -> _ToolCallBuilder:
     name = item.get("name")
     item_id = item.get("id")
     return _ToolCallBuilder(
-        call_id=call_id if isinstance(call_id, str) and call_id else "call_0",
+        call_id=call_id if isinstance(call_id, str) and call_id else fallback_tool_call_id(),
         item_id=item_id if isinstance(item_id, str) and item_id else None,
         name=name if isinstance(name, str) else "",
     )
