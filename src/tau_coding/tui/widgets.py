@@ -30,7 +30,8 @@ from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.content import Content, Span
 from textual.content import Style as TextualStyle  # type: ignore[attr-defined]
 from textual.css.query import NoMatches
-from textual.geometry import Offset
+from textual.geometry import Offset, Spacing
+from textual.layout import Layout
 from textual.message import Message
 from textual.selection import Selection
 from textual.widget import Widget
@@ -635,25 +636,66 @@ class TranscriptMessageWidget(Horizontal):
 
     DEFAULT_CSS = """
     TranscriptMessageWidget {
-        width: 1fr;
+        /* No width rule on purpose. An explicit `1fr` resolves under
+           border-box against the container minus the row's own margins,
+           so the box stopped one column short of the space it was given
+           and left a screen-background column down its right edge. With
+           no width rule the row fills its container exactly. The left
+           margin keeps the history inset; the right margin is the one plain
+           column between a highlighted box and the edge of the transcript.
+           Borderless rows drop it (below). */
         height: auto;
-        margin: 1 1 1 0;
+        margin: 1 1 0 1;
     }
 
+    /* Free text (assistant, thinking) has no right inset at all: it may run
+       to the transcript's last column, like the streaming block does. */
+    TranscriptMessageWidget.-borderless {
+        margin: 1 0 0 1;
+    }
+
+    /* One padding column at each side, inside the highlighted box, for every
+       bordered role. Bordered rows (user, tool, status) spend one more column
+       on their pipe, so their text sits two columns from the row's left edge;
+       borderless rows (assistant, thinking) sit one column in and keep no
+       right padding. The padding lives on the body, not on the inner markdown
+       blocks: those inherit the markdown widget's styles, and padding on both
+       would double up. The bottom padding row — the box's blank interior row
+       — is user-only (see the constructor): the summary-style rows (tools,
+       status) read better sitting close to what follows them. */
     TranscriptMessageWidget > .transcript-message-body {
-        width: 1fr;
         height: auto;
         padding: 0 1 0 1;
     }
 
-    TranscriptMessageWidget > .transcript-markdown-body > MarkdownParagraph {
+    TranscriptMessageWidget.-borderless > .transcript-message-body {
+        padding: 0 0 0 1;
+    }
+
+    TranscriptMessageWidget.-user > .transcript-plain-body {
+        padding: 0 1 1 1;
+    }
+
+    /* Textual's default MarkdownParagraph rule is `margin: 0 0 1 0`. Inside a
+       transcript box there is no bottom padding to absorb that trailing row, so
+       it renders as a blank line under the text — for a one-line status or
+       summary row, a blank row inside its own box. Transcript rows end at
+       their text; inter-paragraph space belongs to the paragraphs *between*
+       text (see the prose rule below), not to the last one. */
+    TranscriptMessageWidget > .transcript-markdown-body > TauMarkdownBlock {
+        margin: 0;
+    }
+
+    /* Assistant prose keeps one blank row between its paragraphs. The class is
+       on the rows whose body is free-flowing markdown rather than a one-line
+       summary (see `_transcript_prose_spacing`). The last block loses it again
+       because the body has no bottom padding to absorb it. */
+    TranscriptMessageWidget.-prose > .transcript-markdown-body > TauMarkdownBlock {
         margin: 0 0 1 0;
     }
 
-    /* The final paragraph reserves no trailing blank line; the widget margin
-       below already separates blocks, matching plain-body rows. */
-    TranscriptMessageWidget > .transcript-markdown-body > MarkdownParagraph:last-child {
-        margin: 0;
+    TranscriptMessageWidget.-prose > .transcript-markdown-body > TauMarkdownBlock:last-child {
+        margin-bottom: 0;
     }
 
     """
@@ -687,6 +729,7 @@ class TranscriptMessageWidget(Horizontal):
         )
         self._theme = theme
         self._role_style = _chat_item_role_style(item, theme)
+        self._joined_to_previous = False
         self._plain_render_key = (
             self.selection_text,
             self._role_style,
@@ -694,20 +737,52 @@ class TranscriptMessageWidget(Horizontal):
             self._result_markup,
         )
         super().__init__(classes="transcript-message")
+        # The user box is the only one with blank interior rows, and its body
+        # is always a plain Static (see `_use_plain_transcript_body`), which
+        # is what the interior-padding CSS rule selects on.
         if item.role == "user":
-            self.styles.padding = (1, 0)
+            self.add_class("-user")
+        # Top padding is the user box's blank interior row and must not move
+        # its pipe glyph down; the bottom interior row lives on the body (see
+        # the CSS), and only the user box has one. The side insets are
+        # margins (outside the box) and body padding (inside it).
+        self.styles.padding = (1, 0, 0, 0) if item.role == "user" else (0, 0, 0, 0)
         foreground, background = _split_rich_style_colors(self._role_style.body)
         self._body_foreground = foreground
+        if _transcript_prose_spacing(item):
+            self.add_class("-prose")
         if item.role in _BORDERLESS_TRANSCRIPT_ROLES or item.system_prompt_sources is not None:
             self._body_background = None
+            self.add_class("-borderless")
         else:
             self._body_background = background
-            self.styles.border_left = ("tall", self._role_style.border)
-            if background:
-                self.styles.background = background
+            self.styles.border_left = ("solid", self._role_style.border)
+            self.add_class("-bordered")
+        # Bordered rows carry their role background on the row itself, so
+        # the highlight, the right padding column, and the body's bottom
+        # interior padding row all paint edge to edge. Borderless rows stay
+        # transparent: they are plain prose, and any fill would be visible.
+        if background and self._body_background:
+            self.styles.background = background
 
     def compose(self) -> Any:
         yield self._body_widget()
+
+    def set_joined_to_previous(self, joined: bool) -> None:
+        """Drop the blank row above this row when it continues a run of rows.
+
+        An inline style, not a class: the transcript calls this from its
+        `pre_layout`, and a class change would only restyle on a later frame,
+        while an inline margin is read by the layout that is about to run.
+        """
+        if joined == self._joined_to_previous:
+            return
+        self._joined_to_previous = joined
+        if joined:
+            margin = self.styles.margin
+            self.styles.margin = Spacing(0, margin.right, margin.bottom, margin.left)
+        else:
+            self.styles.clear_rule("margin")
 
     def _body_widget(self) -> Widget:
         body: Static | ThemedMarkdownWidget
@@ -898,20 +973,22 @@ class StreamingTranscriptMessageWidget(ThemedMarkdownWidget):
 
     DEFAULT_CSS = """
     StreamingTranscriptMessageWidget {
-        width: 1fr;
+        /* No width rule: see TranscriptMessageWidget about the border-box
+           `1fr` column-shrink. Same text columns as the finalized borderless
+           row: a left margin and one padding column, nothing on the right. */
         height: auto;
-        margin: 1 1 1 1;
-        padding: 0 1 0 0;
+        margin: 1 0 0 1;
+        padding: 0 0 0 1;
     }
 
-    StreamingTranscriptMessageWidget > MarkdownParagraph {
+    /* Same contract as a finalized row (see TranscriptMessageWidget): space
+       between paragraphs, none trailing after the last one. */
+    StreamingTranscriptMessageWidget > TauMarkdownBlock {
         margin: 0 0 1 0;
     }
 
-    /* The final paragraph reserves no trailing blank line; the widget margin
-       below already separates blocks, matching plain-body rows. */
-    StreamingTranscriptMessageWidget > MarkdownParagraph:last-child {
-        margin: 0;
+    StreamingTranscriptMessageWidget > TauMarkdownBlock:last-child {
+        margin-bottom: 0;
     }
 
     StreamingTranscriptMessageWidget.-streaming MarkdownFence {
@@ -1031,6 +1108,29 @@ class TranscriptView(VerticalScroll):
     def on_mount(self) -> None:
         """Follow new transcript content until the user scrolls away."""
         self.follow_output()
+
+    def pre_layout(self, layout: Layout) -> None:
+        """Run consecutive tool rows together; keep the gap around the run.
+
+        Calls from one assistant message already share a row, so a burst of
+        tool work split across messages showed as one row with no gaps next to
+        several rows with gaps. A tool row that directly follows another loses
+        its top margin, so the whole burst reads as one block, separated by the
+        usual blank row from whatever comes before and after it. This runs at
+        every layout rather than at each mount, because rows are mounted,
+        removed and reordered along many paths (streaming, windowing, the
+        thinking toggle), and adjacency is only certain here.
+        """
+        del layout
+        previous_is_tool = False
+        for child in self.children:
+            if not isinstance(child, TranscriptMessageWidget | StreamingTranscriptMessageWidget):
+                continue
+            if isinstance(child, TranscriptMessageWidget) and child.item.role == "tool":
+                child.set_joined_to_previous(previous_is_tool)
+                previous_is_tool = True
+            else:
+                previous_is_tool = False
 
     def follow_output(self) -> None:
         """Return to follow mode for a user-driven turn or explicit jump to bottom."""
@@ -1941,6 +2041,17 @@ def _split_rich_style_colors(style: str) -> tuple[str | None, str | None]:
     foreground = text_style.color.name if text_style.color is not None else None
     background = text_style.bgcolor.name if text_style.bgcolor is not None else None
     return foreground, background
+
+
+def _transcript_prose_spacing(item: ChatItem) -> bool:
+    """Whether a row's markdown keeps a blank row between its paragraphs.
+
+    Assistant text is prose and reads wrong with its paragraphs run together.
+    Every other markdown role in the transcript — status, thinking, the summary
+    rows — is a one-line note whose body ends at its text, so the blank row
+    Textual's paragraph margin would leave lands inside the row as a gap.
+    """
+    return item.role == "assistant" and item.highlight is None
 
 
 def _use_plain_transcript_body(item: ChatItem) -> bool:

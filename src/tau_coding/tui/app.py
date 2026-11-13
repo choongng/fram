@@ -3957,24 +3957,24 @@ class TauTuiApp(App[None]):
         display: none;
     }
 
-    TauTuiApp.-hide-sidebar #main-pane {
-        padding-left: 1;
-    }
-
     TauTuiApp.-sidebar-right #sidebar {
         dock: right;
     }
 
     #main-pane {
         width: 1fr;
-        padding: 1 1 0 1;
     }
 
     #transcript {
+        /* `100%`, not the default `1fr`: in a vertical layout Textual sizes
+           `1fr` widths against the container minus the widest sibling
+           margin (#above-prompt-slot's `0 1`), which left two dead columns
+           down the transcript's right edge. */
+        width: 100%;
         height: 1fr;
         border: none;
         background: $tau-transcript-background;
-        padding: 0 0 0 2;
+        padding: 0;
         overflow-x: auto;
         scrollbar-size-vertical: 0;
         scrollbar-size-horizontal: 1;
@@ -4062,6 +4062,9 @@ class TauTuiApp(App[None]):
         text-style: bold;
     }
 
+    /* The input keeps 1 column of left padding (the caret sits at the
+       border+padding edge and would otherwise cover the box edge); with the
+       box at x=3 its typed text lands at x=4. */
     #prompt {
         width: 1fr;
         height: auto;

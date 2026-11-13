@@ -1792,8 +1792,7 @@ async def test_textual_markdown_widget_uses_theme_link_style() -> None:
 
 
 @pytest.mark.anyio
-async def test_transcript_markdown_paragraphs_keep_bottom_margin() -> None:
-    """Paragraphs stay separated, but the last one adds no trailing blank line."""
+async def test_transcript_markdown_paragraph_space_between_but_not_after() -> None:
     app = TauTuiApp(
         FakeSession([AssistantMessage(content="First paragraph.\n\nSecond paragraph.")]),
     )
@@ -1807,8 +1806,33 @@ async def test_transcript_markdown_paragraphs_keep_bottom_margin() -> None:
         paragraph_gap = blocks[1].region.y - blocks[0].region.y
 
     assert len(blocks) == 2
+    # The gap between paragraphs belongs to the earlier one. The last paragraph
+    # keeps none: the transcript box has no bottom padding to absorb it, so a
+    # trailing margin there renders as a blank row inside the box.
     assert margins == [1, 0]
     assert paragraph_gap == 2
+
+
+@pytest.mark.anyio
+async def test_status_row_renders_no_blank_row_of_its_own() -> None:
+    app = TauTuiApp(FakeSession())
+
+    async with app.run_test(size=(80, 30)) as pilot:
+        for index in range(3):
+            app.state.add_item("status", f"… status {index}")
+        app._refresh()
+        await pilot.pause()
+
+        rows = [row for row in app.query(TranscriptMessageWidget) if row.item.role == "status"]
+        assert [row.item.text for row in rows] == [
+            "… status 0",
+            "… status 1",
+            "… status 2",
+        ]
+        # Each status row is exactly its one text row: no blank row is folded
+        # inside the box, which is what made a run of them read as pairs.
+        assert [row.region.height for row in rows] == [1, 1, 1]
+        assert [block.styles.margin.bottom for block in app.query(TauMarkdownBlock)] == [0] * 3
 
 
 @pytest.mark.anyio
@@ -1873,8 +1897,8 @@ async def test_whitespace_only_assistant_blocks_leave_no_transcript_row() -> Non
 
     assert [item.role for item in app.state.items] == ["tool", "tool"]
     assert [widget.item.role for widget in rows] == ["tool", "tool"]
-    # One blank row between the tool rows, not three.
-    assert row_gap == row_height + 1
+    # Consecutive tool rows run together, with no blank row between them.
+    assert row_gap == row_height
 
 
 @pytest.mark.anyio
@@ -2815,7 +2839,7 @@ async def test_transcript_message_widget_renders_full_height_role_block() -> Non
     async with app.run_test(size=(60, 30)) as pilot:
         await pilot.pause()
         widget = app.query_one(TranscriptMessageWidget)
-        body = widget.query_one(".transcript-message-body")
+        body = widget.query_one(".transcript-plain-body")
 
         # A multi-line message must occupy more than a single row so the accent
         # and background have to span the full message height.
@@ -2825,14 +2849,47 @@ async def test_transcript_message_widget_renders_full_height_role_block() -> Non
         # block is rectangular and the accent spans every wrapped line.
         assert widget.styles.background == background
         assert body.styles.background == background
+        # The row pads its top interior row (the user box); the box's bottom
+        # interior row lives on the body.
         assert widget.styles.padding.top == 1
-        assert widget.styles.padding.bottom == 1
+        assert widget.styles.padding.bottom == 0
+        assert body.styles.padding.bottom == 1
         edge_type, edge_color = widget.styles.border_left
         assert edge_type != "none"
         assert edge_color == border
 
         # Selecting the whole message still yields the original plain text.
         assert widget.get_selection(SELECT_ALL) == (plain_text, "\n")
+
+
+@pytest.mark.anyio
+async def test_transcript_right_edge_insets() -> None:
+    app = TauTuiApp(FakeSession())
+
+    async with app.run_test(size=(80, 30)) as pilot:
+        await pilot.pause()
+        transcript = app.query_one("#transcript", TranscriptView)
+        app.state.add_item("user", "question " * 30)
+        app.state.add_item("assistant", "answer " * 40)
+        transcript.update_from_state(app.state, theme=TAU_DARK_THEME)
+        await transcript.append_assistant_delta("streamed " * 30, theme=TAU_DARK_THEME)
+        await pilot.pause()
+
+        # The transcript fills the main pane: a `1fr` width would lose the
+        # widest sibling margin (two columns) down its right edge.
+        assert transcript.region.right == app.query_one("#main-pane").region.right
+        user, assistant = (
+            w for w in app.query(TranscriptMessageWidget) if w.item.role in {"user", "assistant"}
+        )
+        # A highlighted box stops one plain column short of the edge...
+        assert user.region.right == transcript.region.right - 1
+        # ...while free text, finalized or streaming, may use the last column,
+        # and both start in the same column so finalizing does not reflow.
+        streaming = app.query_one(StreamingTranscriptMessageWidget)
+        finalized_text = assistant.query_one(".transcript-message-body").content_region
+        assert finalized_text.right == transcript.region.right
+        assert streaming.content_region.right == transcript.region.right
+        assert streaming.content_region.x == finalized_text.x
 
 
 @pytest.mark.anyio
@@ -11570,6 +11627,55 @@ async def test_hidden_thinking_line_is_not_stranded_by_a_thinking_only_message()
                 positions = hidden_line_positions()
                 assert len(positions) <= 1
             assert hidden_line_positions() == []
+
+
+@pytest.mark.anyio
+async def test_consecutive_tool_rows_run_together_with_a_gap_around_the_run() -> None:
+    app = TauTuiApp(FakeSession())
+
+    async def stream(event: AgentEvent) -> None:
+        app.adapter.apply(event)
+        await app._apply_streaming_transcript_event(event)
+
+    def gaps() -> list[tuple[str, int]]:
+        rows = [
+            child
+            for child in app.query_one("#transcript", TranscriptView).children
+            if isinstance(child, TranscriptMessageWidget | StreamingTranscriptMessageWidget)
+        ]
+        return [
+            (row.item.role, row.region.y - (previous.region.y + previous.region.height))
+            for previous, row in zip(rows, rows[1:], strict=False)
+        ]
+
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        await stream(AgentStartEvent())
+        await stream(MessageEndEvent(message=AssistantMessage(content="Starting.")))
+        # Calls from separate messages land in separate rows; calls from one
+        # message share a row. Either way a burst of tool work is one block.
+        for index in range(3):
+            call = ToolCall(
+                id=f"call-{index}",
+                name="bash",
+                arguments={"command": "ls", "description": f"Step {index}"},
+            )
+            for event in _thinking_message_events(f"plan {index}", (call,)):
+                await stream(event)
+        await stream(MessageEndEvent(message=AssistantMessage(content="Done.")))
+        await pilot.pause()
+
+        assert gaps() == [("tool", 1), ("tool", 0), ("tool", 0), ("assistant", 1)]
+
+        # Revealed thinking sits between the calls, so they are no longer a
+        # run: every row is separated again.
+        await pilot.press("ctrl+t")
+        await pilot.pause()
+        assert {gap for _, gap in gaps()} == {1}
+
+        await pilot.press("ctrl+t")
+        await pilot.pause()
+        assert gaps() == [("tool", 1), ("tool", 0), ("tool", 0), ("assistant", 1)]
 
 
 @pytest.mark.anyio
