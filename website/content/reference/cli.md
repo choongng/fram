@@ -75,7 +75,7 @@ features and fixes.
 | `--append-system-prompt TEXT_OR_PATH` | Append literal text or an existing UTF-8 file (repeatable) |
 | `--auto-compact-threshold INT` | Auto-compact above this rough token estimate |
 | `-e, --extension PATH` | Load an [extension](/guides/extensions/) file or directory (repeatable) |
-| `--no-extensions` | Disable extension directory discovery (explicit `-e` paths still load) |
+| `--no-extensions` | Disable extension directory and installed package discovery (explicit `-e` paths still load) |
 | `--project-extensions` | Also load trusted `<project>/.tau/extensions`; project trust and this code opt-in are both required |
 | `-a, --approve` | Trust protected project inputs for this invocation only |
 | `-na, --no-approve` | Decline protected project inputs for this invocation only |

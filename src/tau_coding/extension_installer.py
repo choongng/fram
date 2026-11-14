@@ -158,7 +158,7 @@ def _validate_install_name(name: str) -> None:
 
 def _validate_staged_extension(staging_root: Path) -> None:
     paths = TauResourcePaths(root=staging_root, cwd=Path.cwd())
-    discovered, diagnostics = discover_extensions(paths)
+    discovered, diagnostics = discover_extensions(paths, include_packages=False)
     errors = [diagnostic.message for diagnostic in diagnostics if diagnostic.severity == "error"]
     if errors:
         raise ExtensionInstallError("invalid extension package: " + "; ".join(errors))

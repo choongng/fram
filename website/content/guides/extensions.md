@@ -85,6 +85,7 @@ with your user permissions, so review the source before installation.
 | `~/.tau/extensions/` | by default |
 | `<project>/.tau/extensions/` | only after project approval **and** `--project-extensions` |
 | any file or directory | with `tau -e PATH` (repeatable) |
+| an installed Python package | by default, when it declares a `tau_coding.extensions` entry point |
 
 ### Trusted built-in extensions
 
@@ -134,6 +135,29 @@ package, so relative imports fail. Once an extension has sibling
 modules, always pass a directory: the package directory itself, or the
 repo root when a manifest declares the entry.
 
+### Installed package extensions
+
+A Python distribution installed in Tau's environment can ship an extension by
+declaring an entry point in the `tau_coding.extensions` group. The entry point's
+name is the extension's name, and it points at the `setup` function:
+
+```toml
+[project.entry-points."tau_coding.extensions"]
+my_ext = "my_ext.extension:setup"
+```
+
+Package extensions count as user extensions: they load by default, and
+`--no-extensions` turns them off. They load after user, explicit and built-in
+extensions, so a directory extension or `tau -e` path with the same name wins.
+To work on an installed extension, load your working copy with `-e` under the
+same name, and the installed copy is skipped with a duplicate-name diagnostic.
+To skip installed extensions without uninstalling them, list their names in
+`TAU_DISABLE_PACKAGE_EXTENSIONS`, separated by commas.
+
+The module imports under its own package name, like any installed package, so
+`/reload` re-runs its `setup` but does not re-import its code. Their source is
+`package` and their source ID `package:<module>:<function>`.
+
 Before a project decision, built-in, user-global, and explicit `-e` extensions
 may handle the `project_trust` event. The event contains canonical cwd, mode,
 UI availability, and bounded category counts—never protected contents. Return
@@ -144,12 +168,12 @@ themselves.
 
 After built-ins, filesystem extensions keep their existing precedence; on name
 conflicts (extension names, tool names, command names) the first registration
-wins. `--no-extensions` disables directory discovery (explicit `-e` paths and
-trusted built-ins still load).
-`/reload` awaits `session_shutdown(reason="reload")` on the outgoing
-extension generation, clears its UI, re-imports every extension and re-runs
-`setup`, then awaits `session_start(reason="reload")` on the new generation.
-Use those lifecycle hooks to stop and restart background work and to remount UI.
+wins. `--no-extensions` disables directory and package discovery (explicit `-e`
+paths and trusted built-ins still load). `/reload` awaits
+`session_shutdown(reason="reload")` on the outgoing extension generation, clears
+its UI, re-imports every extension and re-runs `setup`, then awaits
+`session_start(reason="reload")` on the new generation. Use those lifecycle
+hooks to stop and restart background work and to remount UI.
 
 > **Security.** Extensions execute arbitrary Python inside your session.
 > Project extensions are therefore off by default. Trust approval and

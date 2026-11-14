@@ -429,7 +429,10 @@ def main(
         bool,
         typer.Option(
             "--no-extensions",
-            help="Disable extension directory discovery (explicit -e paths still load).",
+            help=(
+                "Disable extension directory and installed package discovery"
+                " (explicit -e paths still load)."
+            ),
         ),
     ] = False,
     project_extensions: Annotated[

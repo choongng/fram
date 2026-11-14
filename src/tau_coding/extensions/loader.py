@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tomllib
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
+from importlib.metadata import EntryPoint, entry_points
 from importlib.util import module_from_spec, spec_from_file_location
 from inspect import iscoroutinefunction
 from pathlib import Path
@@ -15,22 +17,32 @@ from tau_coding.resources import ResourceDiagnostic, TauResourcePaths
 
 EXTENSION_ENTRY_ATTRIBUTE = "setup"
 _MODULE_NAME_PREFIX = "tau_extension"
+# Installed distributions declare extensions under this entry-point group, each
+# pointing at a setup function: `name = "package.module:setup"`.
+PACKAGE_EXTENSION_GROUP = "tau_coding.extensions"
+# Comma-separated package extension names to skip.
+DISABLE_PACKAGE_EXTENSIONS_ENV = "TAU_DISABLE_PACKAGE_EXTENSIONS"
 
 _load_counter = 0
 
 
-ExtensionSource = Literal["built-in", "user", "explicit", "project"]
+ExtensionSource = Literal["built-in", "user", "explicit", "project", "package"]
 
 
 @dataclass(frozen=True, slots=True)
 class DiscoveredExtension:
-    """A discovered extension entry file before loading."""
+    """A discovered extension before loading.
+
+    Filesystem extensions have an entry file `path`. Package extensions have no
+    file of their own; they carry the installed `entry_point` instead.
+    """
 
     name: str
-    path: Path
+    path: Path | None
     package_dir: Path | None = None
     source_id: str | None = None
     source: ExtensionSource = "explicit"
+    entry_point: EntryPoint | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,12 +104,18 @@ def discover_extensions(
     include_resource_dirs: bool = True,
     include_project_dir: bool = False,
     include_user_dir: bool = True,
+    include_packages: bool = True,
 ) -> tuple[tuple[DiscoveredExtension, ...], tuple[ResourceDiagnostic, ...]]:
-    """Discover extension entry files.
+    """Discover extension entry files and installed package extensions.
 
-    Discovery covers project and user extension directories plus explicitly
-    passed paths (files or directories). Explicit paths always load, even when
-    `include_resource_dirs` is False (the `--no-extensions` escape hatch).
+    Discovery covers project and user extension directories, explicitly passed
+    paths (files or directories), then extensions that installed distributions
+    declare in the `tau_coding.extensions` entry-point group. Explicit paths
+    always load, even when `include_resource_dirs` is False (the
+    `--no-extensions` escape hatch). Package extensions count as user resources:
+    they need `include_resource_dirs` and `include_user_dir`. They come last, so
+    a same-named extension from a directory or `-e` path shadows the installed
+    one, which is how a working copy of an installed extension is developed.
     """
     discovered: list[DiscoveredExtension] = []
     diagnostics: list[ResourceDiagnostic] = []
@@ -105,7 +123,7 @@ def discover_extensions(
     seen_names: set[str] = set()
 
     def add(entry: DiscoveredExtension) -> None:
-        resolved = entry.path.resolve()
+        resolved = entry.path.resolve() if entry.path is not None else None
         if resolved in seen_paths:
             return
         if entry.name in seen_names:
@@ -118,9 +136,14 @@ def discover_extensions(
                 )
             )
             return
-        seen_paths.add(resolved)
         seen_names.add(entry.name)
-        discovered.append(replace(entry, source_id=f"extension:{resolved.as_uri()}"))
+        if resolved is None:
+            assert entry.entry_point is not None
+            source_id = f"package:{entry.entry_point.value}"
+        else:
+            seen_paths.add(resolved)
+            source_id = f"extension:{resolved.as_uri()}"
+        discovered.append(replace(entry, source_id=source_id))
 
     if include_resource_dirs:
         directories: list[tuple[Path, ExtensionSource]] = []
@@ -180,6 +203,10 @@ def discover_extensions(
                 )
             )
 
+    if include_resource_dirs and include_user_dir and include_packages:
+        for entry in _discover_packages():
+            add(entry)
+
     return tuple(discovered), tuple(diagnostics)
 
 
@@ -208,7 +235,12 @@ def load_extensions(
         source_id = entry.source_id
         if source_id is None:  # defensive: discovery always assigns it
             raise RuntimeError(f"extension source identity was not frozen: {entry.path}")
-        extension, entry_diagnostics = _load_extension(entry, source_id=source_id)
+        if entry.entry_point is not None:
+            extension, entry_diagnostics = _load_package_extension(
+                entry, entry.entry_point, source_id=source_id
+            )
+        else:
+            extension, entry_diagnostics = _load_extension(entry, source_id=source_id)
         all_diagnostics.extend(entry_diagnostics)
         if extension is not None:
             loaded.append(extension)
@@ -216,6 +248,24 @@ def load_extensions(
         extensions=tuple(loaded),
         diagnostics=tuple(all_diagnostics),
     )
+
+
+def _discover_packages() -> Iterator[DiscoveredExtension]:
+    """Yield the installed package extensions, skipping disabled names."""
+    disabled = {
+        name.strip()
+        for name in os.environ.get(DISABLE_PACKAGE_EXTENSIONS_ENV, "").split(",")
+        if name.strip()
+    }
+    for entry_point in sorted(entry_points(group=PACKAGE_EXTENSION_GROUP), key=lambda e: e.name):
+        if entry_point.name in disabled:
+            continue
+        yield DiscoveredExtension(
+            name=entry_point.name,
+            path=None,
+            source="package",
+            entry_point=entry_point,
+        )
 
 
 def _discover_in_dir(
@@ -316,6 +366,7 @@ def _load_extension(
     source_id: str,
 ) -> tuple[LoadedExtension | None, list[ResourceDiagnostic]]:
     global _load_counter
+    assert entry.path is not None
     _load_counter += 1
     module_name = f"{_MODULE_NAME_PREFIX}_{_slugify(entry.name)}_{_load_counter}"
 
@@ -338,25 +389,14 @@ def _load_extension(
         del sys.modules[module_name]
         return None, [_error_diagnostic(entry, f"failed to import extension: {exc!r}")]
 
-    setup = getattr(module, EXTENSION_ENTRY_ATTRIBUTE, None)
-    if not callable(setup):
+    setup = _checked_setup(
+        getattr(module, EXTENSION_ENTRY_ATTRIBUTE, None),
+        missing="extension does not define a callable "
+        f"`{EXTENSION_ENTRY_ATTRIBUTE}(tau)` entry point",
+    )
+    if isinstance(setup, str):
         del sys.modules[module_name]
-        return None, [
-            _error_diagnostic(
-                entry,
-                "extension does not define a callable "
-                f"`{EXTENSION_ENTRY_ATTRIBUTE}(tau)` entry point",
-            )
-        ]
-    if iscoroutinefunction(setup):
-        del sys.modules[module_name]
-        return None, [
-            _error_diagnostic(
-                entry,
-                f"`{EXTENSION_ENTRY_ATTRIBUTE}` must be a sync function"
-                " (async setup is not supported)",
-            )
-        ]
+        return None, [_error_diagnostic(entry, setup)]
 
     return LoadedExtension(
         name=entry.name,
@@ -365,6 +405,46 @@ def _load_extension(
         setup=setup,
         source=entry.source,
     ), []
+
+
+def _load_package_extension(
+    entry: DiscoveredExtension,
+    entry_point: EntryPoint,
+    *,
+    source_id: str,
+) -> tuple[LoadedExtension | None, list[ResourceDiagnostic]]:
+    """Import an installed extension's setup function from its entry point.
+
+    The module imports under its own package name, like any installed package,
+    so reload does not re-import it (see `unload_extension_modules`).
+    """
+    try:
+        loaded = entry_point.load()
+    except BaseException as exc:  # noqa: BLE001 - extensions are an isolation boundary
+        return None, [_error_diagnostic(entry, f"failed to import {entry_point.value}: {exc!r}")]
+    setup = _checked_setup(
+        loaded, missing=f"package extension entry point {entry_point.value} is not callable"
+    )
+    if isinstance(setup, str):
+        return None, [_error_diagnostic(entry, setup)]
+    return LoadedExtension(
+        name=entry.name,
+        path=None,
+        source_id=source_id,
+        setup=setup,
+        source="package",
+    ), []
+
+
+def _checked_setup(setup: object, *, missing: str) -> Callable[..., object] | str:
+    """Return `setup` if it can be an extension entry point, else why it cannot."""
+    if not callable(setup):
+        return missing
+    if iscoroutinefunction(setup):
+        return (
+            f"`{EXTENSION_ENTRY_ATTRIBUTE}` must be a sync function (async setup is not supported)"
+        )
+    return setup
 
 
 def unload_extension_modules() -> int:
