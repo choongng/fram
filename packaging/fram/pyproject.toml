@@ -1,5 +1,6 @@
 # The 'fram-agent' distribution, which installs the 'fram' command: Tau's
-# sources from ../../src plus the small 'fram' entry package. Upstream's
+# sources from ../../src, the tau-subagents extension from
+# ../../vendor/tau-subagents, and the small 'fram' entry package. Upstream's
 # pyproject.toml (tau-ai) is left unchanged so that merging Tau releases never
 # conflicts here. See dev-notes/fram-packaging.md.
 #
@@ -32,11 +33,20 @@ dependencies = [
 
 [project.scripts]
 fram = "fram.cli:main"
+# tau-subagents' background-job runner. The extension's text tells the model to
+# run it by this name, so it keeps it.
+tau-job = "tau_subagents.job_run:main"
 
 # Tau reads its display name, command and marks from this (see
 # src/tau_coding/branding.py).
 [project.entry-points."tau_coding.branding"]
 fram = "fram.branding:BRANDING"
+
+# Tau loads tau-subagents from this like a user extension (see
+# src/tau_coding/extensions/loader.py). The name matches the one Tau gives a
+# tau-subagents checkout, so a checkout loaded with -e replaces this copy.
+[project.entry-points."tau_coding.extensions"]
+tau_subagents = "tau_subagents.extension:setup"
 
 [tool.hatch.version]
 path = "src/fram/__init__.py"
@@ -46,8 +56,10 @@ packages = ["src/fram"]
 
 [tool.hatch.build.targets.wheel.force-include]
 # license-files cannot reach outside this folder, so Tau's LICENSE ships inside
-# the fram package instead.
+# the fram package instead, and tau-subagents' inside its own package.
 "../../LICENSE" = "fram/LICENSE"
 "../../src/tau_ai" = "tau_ai"
 "../../src/tau_agent" = "tau_agent"
 "../../src/tau_coding" = "tau_coding"
+"../../vendor/tau-subagents/src/tau_subagents" = "tau_subagents"
+"../../vendor/tau-subagents/LICENSE" = "tau_subagents/LICENSE"

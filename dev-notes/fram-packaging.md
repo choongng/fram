@@ -10,7 +10,8 @@ Everything lives under `packaging/fram/`:
 - `pyproject.toml` defines the `fram-agent` distribution. It builds Tau's
   `src/tau_ai`, `src/tau_agent` and `src/tau_coding` from `../../src` with
   hatchling's `force-include`, plus a small `fram` package, and installs a
-  `fram` console script.
+  `fram` console script. It also bundles the tau-subagents extension from
+  `vendor/` (see "Bundled tau-subagents" below).
 - `src/fram/__init__.py` holds Fram's version, for example `0.4.8.1`. The first
   three parts are the Tau release Fram bundles; the fourth counts Fram releases
   on top of it.
@@ -106,6 +107,54 @@ item 5).
 The seam itself is a change to upstream files (unlike the rest of this note);
 `dev-notes/branding.md` describes it.
 
+## Bundled tau-subagents
+
+Fram ships [tau-subagents](https://github.com/rian-dolphin/tau-subagents) (MIT,
+by Rian Dolphin) and loads it by default.
+
+**Where the code comes from.** `vendor/tau-subagents/` is a squashed
+`git subtree` of a fork of tau-subagents that carries changes not yet upstream.
+A subtree, not a submodule, because the fork is not public; the files are
+ordinary tracked files, so every clone and CI run has them. The squash commit's
+`git-subtree-split` trailer records the fork commit. To take new work from the
+fork:
+
+```bash
+git subtree pull --prefix vendor/tau-subagents <fork URL> <branch> --squash
+```
+
+Make fixes in the tau-subagents repository and pull them, rather than editing
+`vendor/` here. Ruff and the Markdown wrap check skip `vendor/`, since the code
+keeps its own style.
+
+**How it ships.** `pyproject.toml` force-includes
+`vendor/tau-subagents/src/tau_subagents` as the `tau_subagents` package, its
+`LICENSE` as `tau_subagents/LICENSE`, and its `tau-job` script under that name,
+which the extension's own text tells the model to use. Its dependencies
+(`textual`) are already Tau's; its `tau-ai` dependency is not declared, because
+the wheel is Tau.
+
+**How Tau finds it.** The wheel declares it as a package extension (see
+`dev-notes/package-extensions.md`):
+
+```toml
+[project.entry-points."tau_coding.extensions"]
+tau_subagents = "tau_subagents.extension:setup"
+```
+
+So it follows the user-extension rules: `--no-extensions` turns it off, a child
+session started with `isolated: true` does not get it, and the TUI sidebar lists
+it with the session's other extensions. The name is the one Tau gives a
+tau-subagents checkout, so `fram -e /path/to/tau-subagents` (or a checkout in
+`~/.fram/extensions/`) loads in its place.
+
+**Turning it off.** `fram` maps `FRAM_NO_SUBAGENTS=1` onto Tau's
+`TAU_DISABLE_PACKAGE_EXTENSIONS`, adding `tau_subagents` to any names already
+there.
+
+**Versioning.** Syncing tau-subagents does not need its own Fram release; it
+goes out with the next one.
+
 ## Publishing to PyPI
 
 `fram-agent` is published to PyPI by `.github/workflows/fram-publish.yml`,
@@ -164,6 +213,9 @@ checks:
 - The TUI's title is "Fram".
 - The installed `fram` reports its own version.
 - `tau-ai` is not installed in the tool environment.
+- The bundled tau-subagents loads as a package extension with its license,
+  `FRAM_NO_SUBAGENTS=1` leaves it out, a checkout given with `-e` replaces it,
+  and `tau-job` runs a job.
 - `tau` from the repository still works and still says "Tau".
 
 ## How this maps to Pi and Tau
@@ -173,4 +225,4 @@ over the same `tau_coding` CLI app, the way the `tau` script is.
 
 ## Still to come
 
-Extension discovery through entry points, and CI that watches upstream releases.
+CI that watches upstream releases.
