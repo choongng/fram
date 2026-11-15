@@ -338,13 +338,14 @@ after compaction while cumulative usage continues to increase. The
 working-directory name and model are emphasized while the parent path, Git
 branch, and provider use the quieter metadata color.
 
-The sidebar appears on the **right** by default. It can be moved to the **left**
-or turned **off** entirely by setting `sidebar_position` in `~/.tau/tui.json` —
-see [Configuration](/reference/configuration/#tui-settings). Use `/sidebar`, or
-press `Ctrl+B`, to toggle visibility during a session. This is temporary: it
-preserves a configured left/right position, does not change `tui.json`, and is
-forgotten when Tau restarts. A configured `off` sidebar can be shown temporarily
-on the default right side.
+The sidebar starts hidden. Use `/sidebar`, or press `Ctrl+B`, to show or hide it
+during a session. This is temporary: it preserves a configured left/right
+position, does not change `tui.json`, and is forgotten when Tau restarts. To
+show it at startup, set `sidebar_visible` to `true` in `~/.tau/tui.json`. It
+appears on the **right** by default, and can be moved to the **left** or turned
+**off** entirely with `sidebar_position` — see
+[Configuration](/reference/configuration/#tui-settings). A configured `off`
+sidebar can be shown temporarily on the default right side.
 
 ## Herdr compatibility
 

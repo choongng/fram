@@ -5,6 +5,7 @@ import threading
 import weakref
 from collections.abc import AsyncIterator
 from contextlib import suppress
+from dataclasses import replace
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
@@ -160,6 +161,7 @@ from tau_coding.tui.config import (
     TuiKeybindings,
     TuiSettings,
     TuiTheme,
+    load_tui_settings,
     tui_settings_path,
 )
 from tau_coding.tui.local_backends import LocalBackendScreen, LocalConfirmScreen
@@ -4768,7 +4770,7 @@ async def test_tui_compact_session_info_sits_directly_below_prompt() -> None:
 
 @pytest.mark.anyio
 async def test_tui_sidebar_is_visible_on_medium_windows() -> None:
-    app = TauTuiApp(FakeSession())
+    app = TauTuiApp(FakeSession(), tui_settings=TuiSettings(sidebar_visible=True))
 
     async with app.run_test(size=(120, 40)):
         sidebar = app.query_one("#sidebar")
@@ -4794,7 +4796,7 @@ async def test_tui_sidebar_resource_sections_expand_independently() -> None:
         PromptTemplate("explain", session.cwd / ".tau/prompts/explain.md", "Explain"),
         PromptTemplate("fix", session.cwd / ".tau/prompts/fix.md", "Fix"),
     )
-    app = TauTuiApp(session)
+    app = TauTuiApp(session, tui_settings=TuiSettings(sidebar_visible=True))
 
     async with app.run_test(size=(120, 40)) as pilot:
         skills = app.query_one("#sidebar-skills", Collapsible)
@@ -4842,7 +4844,7 @@ async def test_tui_sidebar_context_file_opens_in_main_editor_and_saves(tmp_path:
     session.context_files = (
         ProjectContextFile(path=str(context_path), content="Original context."),
     )
-    app = TauTuiApp(session)
+    app = TauTuiApp(session, tui_settings=TuiSettings(sidebar_visible=True))
 
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.click("#sidebar-context-content .sidebar-file-item")
@@ -4879,7 +4881,7 @@ async def test_tui_sidebar_prompt_file_opens_in_main_editor(tmp_path: Path) -> N
     session.prompt_templates = (
         PromptTemplate("review", prompt_path, "Review this.", "Review changes"),
     )
-    app = TauTuiApp(session)
+    app = TauTuiApp(session, tui_settings=TuiSettings(sidebar_visible=True))
 
     async with app.run_test(size=(120, 40)) as pilot:
         app.query_one("#sidebar-prompts", Collapsible).collapsed = False
@@ -4914,7 +4916,7 @@ async def test_tui_sidebar_skill_opens_only_main_skill_file(tmp_path: Path) -> N
     session = FakeSession()
     session.cwd = tmp_path
     session.skills = (Skill("review", skill_path, "# Review", "Review changes"),)
-    app = TauTuiApp(session)
+    app = TauTuiApp(session, tui_settings=TuiSettings(sidebar_visible=True))
 
     async with app.run_test(size=(120, 40)) as pilot:
         app.query_one("#sidebar-skills", Collapsible).collapsed = False
@@ -4938,7 +4940,7 @@ async def test_tui_sidebar_file_items_have_clear_hover_style(tmp_path: Path) -> 
     session = FakeSession()
     session.cwd = tmp_path
     session.context_files = (ProjectContextFile(path=str(context_path), content="Rules."),)
-    app = TauTuiApp(session)
+    app = TauTuiApp(session, tui_settings=TuiSettings(sidebar_visible=True))
 
     async with app.run_test(size=(120, 40)) as pilot:
         item = app.query_one("#sidebar-context-content .sidebar-file-item", SidebarFileItem)
@@ -4957,7 +4959,7 @@ async def test_tui_sidebar_editor_keeps_contents_open_after_save_failure(tmp_pat
     session = FakeSession()
     session.cwd = tmp_path
     session.context_files = (ProjectContextFile(path=str(context_path), content="Rules."),)
-    app = TauTuiApp(session)
+    app = TauTuiApp(session, tui_settings=TuiSettings(sidebar_visible=True))
 
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.click("#sidebar-context-content .sidebar-file-item")
@@ -4987,7 +4989,7 @@ async def test_tui_sidebar_editor_reports_unexpected_save_failure(
     session = FakeSession()
     session.cwd = tmp_path
     session.context_files = (ProjectContextFile(path=str(context_path), content="Rules."),)
-    app = TauTuiApp(session)
+    app = TauTuiApp(session, tui_settings=TuiSettings(sidebar_visible=True))
 
     def fail_unexpectedly(*args: object) -> None:
         del args
@@ -5017,7 +5019,7 @@ async def test_tui_sidebar_editor_refuses_external_file_changes(tmp_path: Path) 
     session = FakeSession()
     session.cwd = tmp_path
     session.context_files = (ProjectContextFile(path=str(context_path), content="Original."),)
-    app = TauTuiApp(session)
+    app = TauTuiApp(session, tui_settings=TuiSettings(sidebar_visible=True))
 
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.click("#sidebar-context-content .sidebar-file-item")
@@ -5077,7 +5079,7 @@ async def test_tui_sidebar_editor_partial_staging_failure_is_safe(
     session = FakeSession()
     session.cwd = tmp_path
     session.context_files = (ProjectContextFile(path=str(context_path), content="Original rules."),)
-    app = TauTuiApp(session)
+    app = TauTuiApp(session, tui_settings=TuiSettings(sidebar_visible=True))
 
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.click("#sidebar-context-content .sidebar-file-item")
@@ -5113,7 +5115,7 @@ async def test_tui_sidebar_editor_rejects_read_only_target(tmp_path: Path) -> No
     session = FakeSession()
     session.cwd = tmp_path
     session.context_files = (ProjectContextFile(path=str(context_path), content="Original rules."),)
-    app = TauTuiApp(session)
+    app = TauTuiApp(session, tui_settings=TuiSettings(sidebar_visible=True))
     notifications: list[tuple[str, str | None]] = []
 
     def fake_notify(message: str, **kwargs: object) -> None:
@@ -5227,7 +5229,7 @@ async def test_tui_sidebar_scrolls_when_all_skills_overflow() -> None:
         )
         for index in range(1, 31)
     )
-    app = TauTuiApp(session)
+    app = TauTuiApp(session, tui_settings=TuiSettings(sidebar_visible=True))
 
     async with app.run_test(size=(120, 40)) as pilot:
         scroll = app.query_one("#sidebar-scroll", VerticalScroll)
@@ -5245,7 +5247,7 @@ async def test_tui_sidebar_scrolls_when_all_skills_overflow() -> None:
 @pytest.mark.anyio
 async def test_tui_sidebar_relayouts_when_reload_changes_resource_count() -> None:
     session = FakeSession()
-    app = TauTuiApp(session)
+    app = TauTuiApp(session, tui_settings=TuiSettings(sidebar_visible=True))
 
     async with app.run_test(size=(120, 40)) as pilot:
         sidebar = app.query_one("#sidebar", SessionSidebar)
@@ -5290,7 +5292,7 @@ async def test_tui_sidebar_relayouts_when_reload_changes_resource_count() -> Non
 
 @pytest.mark.anyio
 async def test_tui_sidebar_fills_workspace_height() -> None:
-    app = TauTuiApp(FakeSession())
+    app = TauTuiApp(FakeSession(), tui_settings=TuiSettings(sidebar_visible=True))
 
     async with app.run_test(size=(120, 40)):
         workspace = app.query_one("#workspace")
@@ -5337,7 +5339,7 @@ async def test_tui_sidebar_hides_on_short_windows() -> None:
 
 @pytest.mark.anyio
 async def test_tui_sidebar_visibility_updates_on_resize() -> None:
-    app = TauTuiApp(FakeSession())
+    app = TauTuiApp(FakeSession(), tui_settings=TuiSettings(sidebar_visible=True))
 
     async with app.run_test(size=(120, 40)) as pilot:
         sidebar = app.query_one("#sidebar")
@@ -5362,8 +5364,26 @@ async def test_tui_sidebar_visibility_updates_on_resize() -> None:
 
 
 @pytest.mark.anyio
-async def test_tui_sidebar_shows_on_right_by_default() -> None:
+async def test_tui_sidebar_is_hidden_by_default_and_toggles_on_right() -> None:
     app = TauTuiApp(FakeSession())
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        sidebar = app.query_one("#sidebar")
+        assert sidebar.display is False
+        assert app.has_class("-sidebar-right")
+
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        assert sidebar.display is True
+        assert app.has_class("-sidebar-right")
+        assert not tui_settings_path().exists()
+        # Hidden by default, extensions can still add sidebar sections.
+        assert _TuiExtensionUiBridge(app).supports_sidebar is True
+
+
+@pytest.mark.anyio
+async def test_tui_sidebar_shows_on_right_when_visible() -> None:
+    app = TauTuiApp(FakeSession(), tui_settings=TuiSettings(sidebar_visible=True))
 
     async with app.run_test(size=(120, 40)):
         sidebar = app.query_one("#sidebar")
@@ -5373,8 +5393,30 @@ async def test_tui_sidebar_shows_on_right_by_default() -> None:
 
 
 @pytest.mark.anyio
+async def test_tui_theme_change_keeps_every_other_setting() -> None:
+    settings = TuiSettings(
+        sidebar_visible=True,
+        sidebar_position="left",
+        auto_copy_selection=True,
+        turn_notification="bell",
+    )
+    app = TauTuiApp(FakeSession(), tui_settings=settings)
+
+    async with app.run_test(size=(120, 40)) as pilot:
+        app._set_tui_theme("tau-light")
+        await pilot.resize_terminal(121, 40)
+        await pilot.pause()
+
+        assert app.tui_settings == replace(settings, theme="tau-light")
+        assert load_tui_settings() == app.tui_settings
+        assert app.query_one("#sidebar").display is True
+
+
+@pytest.mark.anyio
 async def test_tui_sidebar_shows_on_left_when_configured() -> None:
-    app = TauTuiApp(FakeSession(), tui_settings=TuiSettings(sidebar_position="left"))
+    app = TauTuiApp(
+        FakeSession(), tui_settings=TuiSettings(sidebar_position="left", sidebar_visible=True)
+    )
 
     async with app.run_test(size=(120, 40)):
         sidebar = app.query_one("#sidebar")
@@ -5388,7 +5430,9 @@ async def test_tui_sidebar_shows_on_left_when_configured() -> None:
 async def test_tui_sidebar_command_toggles_visibility_without_changing_position(
     position: str,
 ) -> None:
-    app = TauTuiApp(FakeSession(), tui_settings=TuiSettings(sidebar_position=position))
+    app = TauTuiApp(
+        FakeSession(), tui_settings=TuiSettings(sidebar_position=position, sidebar_visible=True)
+    )
 
     async with app.run_test(size=(120, 40)) as pilot:
         sidebar = app.query_one("#sidebar")
@@ -5412,7 +5456,7 @@ async def test_tui_sidebar_command_toggles_visibility_without_changing_position(
 
 @pytest.mark.anyio
 async def test_tui_sidebar_command_hides_user_sidebar_across_resize() -> None:
-    app = TauTuiApp(FakeSession())
+    app = TauTuiApp(FakeSession(), tui_settings=TuiSettings(sidebar_visible=True))
 
     async with app.run_test(size=(120, 40)) as pilot:
         sidebar = app.query_one("#sidebar")
@@ -9980,7 +10024,9 @@ async def test_tui_app_uses_configured_command_palette_keybinding() -> None:
 async def test_tui_app_uses_configured_sidebar_toggle_keybinding() -> None:
     app = TauTuiApp(
         FakeSession(),
-        tui_settings=TuiSettings(keybindings=TuiKeybindings(toggle_sidebar="ctrl+g")),
+        tui_settings=TuiSettings(
+            keybindings=TuiKeybindings(toggle_sidebar="ctrl+g"), sidebar_visible=True
+        ),
     )
 
     async with app.run_test(size=(120, 40)) as pilot:
@@ -9997,7 +10043,7 @@ async def test_tui_app_uses_configured_sidebar_toggle_keybinding() -> None:
 
 @pytest.mark.anyio
 async def test_tui_app_toggles_sidebar_from_prompt_with_default_keybinding() -> None:
-    app = TauTuiApp(FakeSession())
+    app = TauTuiApp(FakeSession(), tui_settings=TuiSettings(sidebar_visible=True))
 
     async with app.run_test(size=(120, 40)) as pilot:
         prompt = app.query_one("#prompt")

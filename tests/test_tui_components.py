@@ -387,7 +387,7 @@ async def test_sidebar_off_is_unsupported_and_does_not_call_factory() -> None:
 
 @pytest.mark.anyio
 async def test_responsive_hidden_sidebar_keeps_sections_for_resize() -> None:
-    app = TauTuiApp(FakeSession())
+    app = TauTuiApp(FakeSession(), tui_settings=TuiSettings(sidebar_visible=True))
 
     async with app.run_test(size=(80, 30)) as pilot:
         await pilot.pause()
@@ -476,7 +476,7 @@ async def test_sidebar_render_failure_is_quarantined_and_diagnosed() -> None:
     session = FakeSession()
     runtime = ExtensionRuntime()
     session.extension_runtime = runtime
-    app = TauTuiApp(session)
+    app = TauTuiApp(session, tui_settings=TuiSettings(sidebar_visible=True))
 
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.pause()

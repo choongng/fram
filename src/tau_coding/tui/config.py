@@ -103,6 +103,7 @@ class TuiSettings:
     theme: TuiThemeName = "tau-dark"
     auto_copy_selection: bool = False
     sidebar_position: Literal["left", "right", "off"] = "right"
+    sidebar_visible: bool = False
     turn_notification: TurnNotificationMode = "desktop"
 
     def to_json(self) -> dict[str, Any]:
@@ -111,6 +112,7 @@ class TuiSettings:
             "auto_copy_selection": self.auto_copy_selection,
             "keybindings": self.keybindings.to_json(),
             "sidebar_position": self.sidebar_position,
+            "sidebar_visible": self.sidebar_visible,
             "theme": self.theme,
             "turn_notification": self.turn_notification,
         }
@@ -174,6 +176,7 @@ def tui_settings_from_json(data: dict[str, Any]) -> TuiSettings:
             "auto_copy_selection",
         ),
         sidebar_position=cast(Literal["left", "right", "off"], raw_sidebar),
+        sidebar_visible=_bool_setting(data.get("sidebar_visible", False), "sidebar_visible"),
         turn_notification=cast(TurnNotificationMode, raw_notification),
     )
 

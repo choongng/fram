@@ -233,6 +233,16 @@ def test_tui_sidebar_position_defaults_to_right() -> None:
     assert tui_settings_from_json({}).sidebar_position == "right"
 
 
+def test_tui_sidebar_visible_defaults_to_hidden_and_roundtrips() -> None:
+    assert TuiSettings().sidebar_visible is False
+    assert tui_settings_from_json({}).sidebar_visible is False
+    settings = tui_settings_from_json({"sidebar_visible": True})
+    assert settings.sidebar_visible is True
+    assert settings.to_json()["sidebar_visible"] is True
+    with pytest.raises(TuiConfigError, match="sidebar_visible"):
+        tui_settings_from_json({"sidebar_visible": "yes"})
+
+
 def test_tui_sidebar_position_roundtrips() -> None:
     for value in ("left", "right", "off"):
         settings = tui_settings_from_json({"sidebar_position": value})

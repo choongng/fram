@@ -439,6 +439,7 @@ The built-in frontend reads optional settings from `~/.tau/tui.json`:
 {
   "theme": "high-contrast",
   "sidebar_position": "right",
+  "sidebar_visible": false,
   "turn_notification": "desktop",
   "keybindings": {
     "cancel": "escape",
@@ -480,6 +481,11 @@ Tau rejects invalid values, empty keys, and duplicate assignments.
   `/sidebar` temporarily toggles visibility without writing this setting; a
   temporarily shown `"off"` sidebar uses the default right position and the
   saved setting is honored again after restart.
+- `sidebar_visible`: `false` (default) or `true`. Whether the sidebar shows at
+  startup. When `true`, it still hides on small terminals, and with
+  `sidebar_position: "off"` it never shows. `/sidebar` toggles it for the
+  session either way. A hidden sidebar still hosts extension sections; only
+  `sidebar_position: "off"` turns those off.
 - `turn_notification`: `"desktop"` (default), `"bell"`, or `"off"`. When Tau's
   terminal surface is unfocused and the agent becomes fully idle, `"desktop"`
   selects OSC 9 for Ghostty, iTerm2, and MinTTY, or Kitty's OSC 99 protocol for

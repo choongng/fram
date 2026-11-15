@@ -6353,13 +6353,7 @@ class TauTuiApp(App[None]):
 
     def _replace_tui_settings(self, *, theme: TuiThemeName) -> None:
         """Replace the current immutable TUI settings with a new theme."""
-        self.tui_settings = TuiSettings(
-            keybindings=self.tui_settings.keybindings,
-            theme=theme,
-            auto_copy_selection=self.tui_settings.auto_copy_selection,
-            sidebar_position=self.tui_settings.sidebar_position,
-            turn_notification=self.tui_settings.turn_notification,
-        )
+        self.tui_settings = replace(self.tui_settings, theme=theme)
 
     def _set_tui_theme(self, theme: TuiThemeName) -> None:
         if theme not in available_tui_theme_names():
@@ -8103,7 +8097,7 @@ class TauTuiApp(App[None]):
     def _update_responsive_layout(self, width: int, height: int) -> None:
         if self._sidebar_visibility_override is not None:
             show_sidebar = self._sidebar_visibility_override
-        elif self.tui_settings.sidebar_position == "off":
+        elif self.tui_settings.sidebar_position == "off" or not self.tui_settings.sidebar_visible:
             show_sidebar = False
         else:
             show_sidebar = width >= SIDEBAR_MIN_WIDTH and height >= SIDEBAR_MIN_HEIGHT
