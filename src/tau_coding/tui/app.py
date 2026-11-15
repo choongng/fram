@@ -8371,9 +8371,10 @@ def _completion_item_extra_wrapped_lines(
         color_system=None,
         legacy_windows=False,
     )
+    # Measure the row alone: its category header is counted by the caller.
     console.print(
         render_completion_suggestions(
-            CompletionState(items=(item,), selected_index=0),
+            CompletionState(items=(replace(item, category=None),), selected_index=0),
             theme=TAU_DARK_THEME,
         ),
         end="",

@@ -197,6 +197,7 @@ from tau_coding.tui.widgets import (
     _transcript_plain_body_text,
     render_chat_item,
     render_compact_session_info,
+    render_completion_suggestions,
     render_session_sidebar,
     transcript_item_selection_text,
 )
@@ -9332,6 +9333,28 @@ def test_visible_completion_state_accounts_for_wrapped_descriptions() -> None:
     assert _completion_selected_render_line(visible, width=48) < 7
 
 
+def test_completion_line_count_matches_rendered_lines_under_a_category() -> None:
+    items = tuple(
+        CompletionItem(
+            display=f"/command-{index}",
+            replacement=f"/command-{index}",
+            start=0,
+            end=1,
+            kind=CompletionKind.COMMAND,
+            description="A short description.",
+            category="Commands",
+        )
+        for index in range(5)
+    )
+    state = CompletionState(items=items, selected_index=0)
+    console = Console(file=StringIO(), width=60, color_system=None)
+    with console.capture() as capture:
+        console.print(render_completion_suggestions(state), end="")
+
+    # A category header is one line for the group, not one per item.
+    assert tui_app._completion_render_line_count(state, width=60) == len(capture.get().splitlines())
+
+
 def test_visible_completion_state_keeps_selected_item_above_bottom_edge() -> None:
     items = tuple(
         CompletionItem(
@@ -9453,7 +9476,7 @@ async def test_tui_app_keeps_completion_window_height_stable_after_edit(
         await pilot.press(edit_key)
         await pilot.pause()
 
-        assert autocomplete.size.height < initial_line_budget
+        assert autocomplete.size.height <= initial_line_budget
         assert app._completion_window_line_budget(autocomplete) == initial_line_budget
 
 
