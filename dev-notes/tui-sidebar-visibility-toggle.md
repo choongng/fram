@@ -18,6 +18,18 @@ The visibility override belongs to `TauTuiApp`, alongside other frontend-only
 state. It is intentionally not part of `TuiSettings`, so theme persistence and
 other durable TUI settings cannot accidentally serialize it.
 
+## Hidden at startup
+
+The sidebar now starts hidden, so the transcript gets the full width. The
+durable `sidebar_visible` setting (default `false`) shows it at startup;
+`_update_responsive_layout` treats `false` like `off` for the initial layout,
+and the session override above still wins once `/sidebar` or `Ctrl+B` is used.
+
+`sidebar_position: "off"` already hid the sidebar, but it also makes
+`supports_sidebar` false, which turns off extension sidebar sections. A separate
+setting keeps those sections working while the sidebar is hidden, so showing it
+reveals them.
+
 ## Tests
 
 Deterministic Textual pilot tests cover left/right toggling, responsive resize

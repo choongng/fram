@@ -29,6 +29,7 @@ see [Configuration](/reference/configuration/#tui-settings).
   "name": "my-theme",
   "dark": true,
   "syntax_theme": "ansi_dark",
+  "terminal_background": true,
   "vars": {
     "base": "#1e1e2e",
     "text": "#cdd6f4",
@@ -54,6 +55,12 @@ see [Configuration](/reference/configuration/#tui-settings).
   tool-result colors.
 - `syntax_theme` (optional) — Pygments style for fenced code blocks, or
   `ansi_dark` / `ansi_light`. Defaults from `dark`.
+- `terminal_background` (optional) — `true` shows the terminal's own background
+  wherever the theme would paint `screen_background`, including role bodies
+  whose background is that color. `screen_background` is then the color Tau
+  assumes the terminal has, for blending tints and for HTML exports. Other
+  backgrounds, like the prompt's, are still painted. Defaults to `false`;
+  `tau-dark` and `tau-light` set it.
 - `vars` (optional) — named colors. Any whitespace-separated token in a
   `colors` or `roles` value that matches a var name is replaced by its value,
   so compound Rich styles like `"bold base on teal"` work. Var names that

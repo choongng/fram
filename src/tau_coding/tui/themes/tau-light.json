@@ -1,6 +1,7 @@
 {
   "name": "tau-light",
   "dark": false,
+  "terminal_background": true,
   "syntax_theme": "ansi_light",
   "colors": {
     "screen_background": "#ffffff",

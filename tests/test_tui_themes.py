@@ -19,6 +19,8 @@ from tau_coding.tui.themes import (
     load_custom_tui_themes,
     parse_tui_theme_json,
     set_custom_tui_themes,
+    terminal_default_color,
+    theme_css_variables,
 )
 
 
@@ -394,3 +396,44 @@ def test_resource_paths_expose_theme_dirs(tmp_path: Path) -> None:
         tmp_path / ".tau" / "themes",
         tmp_path / "project" / ".tau" / "themes",
     )
+
+
+def test_terminal_background_defaults_to_painting_the_theme_color() -> None:
+    theme = parse_tui_theme_json(_theme_data())
+
+    assert theme.terminal_background is False
+    assert terminal_default_color(theme, theme.screen_background) == "#101010"
+    assert theme_css_variables(theme)["tau-screen-background"] == "#101010"
+
+
+def test_terminal_background_paints_the_terminal_default_for_the_screen_color() -> None:
+    data = _theme_data(terminal_background=True)
+    data["colors"]["prompt_background"] = "#202020"
+    data["roles"]["assistant"] = {"border": "#101010", "body": "#e0e0e0 on #101010"}
+    data["roles"]["user"] = {"border": "#101010", "body": "bold #e0e0e0 on #202020"}
+    data["roles"]["status"] = {"border": "#101010", "body": "on #101010"}
+
+    theme = parse_tui_theme_json(data)
+    variables = theme_css_variables(theme)
+
+    assert theme.terminal_background is True
+    # The theme keeps its colors for blending and export ...
+    assert theme.screen_background == "#101010"
+    # ... but paints the terminal's own background where it would use them.
+    assert variables["tau-screen-background"] == "ansi_default"
+    assert variables["tau-transcript-background"] == "ansi_default"
+    assert variables["tau-prompt-background"] == "#202020"
+    assert theme.role_styles["assistant"].body == "#e0e0e0"
+    assert theme.role_styles["user"].body == "bold #e0e0e0 on #202020"
+    assert theme.role_styles["status"].body == "none"
+
+
+def test_terminal_background_must_be_a_boolean() -> None:
+    with pytest.raises(TuiThemeError, match="terminal_background must be a boolean"):
+        parse_tui_theme_json(_theme_data(terminal_background="yes"))
+
+
+def test_tau_themes_show_the_terminal_background() -> None:
+    assert TAU_DARK_THEME.terminal_background is True
+    assert TAU_LIGHT_THEME.terminal_background is True
+    assert get_tui_theme("high-contrast").terminal_background is False
