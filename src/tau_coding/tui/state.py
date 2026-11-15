@@ -655,6 +655,17 @@ class TuiState:
         self.queued_follow_up = follow_up
 
     @property
+    def hidden_thinking_in_progress(self) -> bool:
+        """Return whether the model is thinking now while thinking is hidden.
+
+        Only thinking that is still the newest output counts: once an answer
+        streams or a tool call follows, it no longer does.
+        """
+        if not self.running or self.show_thinking or self.assistant_buffer:
+            return False
+        return bool(self.items) and self.items[-1].role == "thinking"
+
+    @property
     def queued_message_count(self) -> int:
         """Return the total number of pending queued messages."""
         return len(self.queued_steering) + len(self.queued_follow_up)

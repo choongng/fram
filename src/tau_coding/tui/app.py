@@ -220,8 +220,8 @@ SIDEBAR_MIN_WIDTH = 96
 SIDEBAR_MIN_HEIGHT = 38
 ACTIVITY_TICK_SECONDS = 0.15
 TOAST_REMOVAL_POLL_SECONDS = 0.05
-# Shown in the row above the prompt while the model thinks with thinking hidden.
-# The row is always there, so the notice coming and going moves nothing.
+# Shown while the model thinks with thinking hidden, over the transcript's blank
+# placeholder row (see `ThinkingPlaceholder`), so the reply takes its place.
 HIDDEN_THINKING_NOTICE = "Thinking… Press Ctrl+T to show thinking tokens."
 ACTIVITY_COLOR_FADE_STEPS = 24
 ACTIVITY_SPINNER_FRAMES = ("⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷")
@@ -4059,9 +4059,11 @@ class TauTuiApp(App[None]):
         color: $tau-muted-text;
     }
 
-    /* Always one row tall, blank unless hidden thinking is in progress, so
-       the notice appearing moves nothing. The left padding puts its text in
-       the prompt's text column. */
+    /* Always one row tall, so the notice appearing moves nothing. It is
+       hidden unless hidden thinking is in progress. While the transcript
+       follows the newest output, `_apply_activity_indicator` lifts it one row,
+       over the transcript's thinking placeholder. The left padding puts its
+       text in the prompt's text column. */
     #thinking-notice {
         height: 1;
         margin: 0;
@@ -4790,6 +4792,7 @@ class TauTuiApp(App[None]):
         self._activity_timer: Timer | None = None
         self._last_tool_timer_refresh_at = 0.0
         self._last_activity_indicator_key: tuple[object, ...] | None = None
+        self._last_thinking_notice: bool | None = None
         self._last_queue_render_key: tuple[object, ...] | None = None
         self._terminal_title = TerminalTitleController(writer=self._write_terminal_sequence)
         self._terminal_notification = TerminalNotificationController(
@@ -8030,17 +8033,6 @@ class TauTuiApp(App[None]):
             self._activity_timer.pause()
         self._apply_activity_indicator()
 
-    def _hidden_thinking_in_progress(self) -> bool:
-        """Return whether the model is thinking now while thinking is hidden.
-
-        Only thinking that is still the newest output counts: once an answer
-        streams or a tool call follows, the notice goes.
-        """
-        state = self.state
-        if not state.running or state.show_thinking or state.assistant_buffer:
-            return False
-        return bool(state.items) and state.items[-1].role == "thinking"
-
     def _tick_activity(self) -> None:
         if not self._is_working():
             return
@@ -8085,10 +8077,12 @@ class TauTuiApp(App[None]):
             prompt = self.query_one("#prompt", PromptInput)
             prompt_prefix = self.query_one("#prompt-prefix", Static)
             notice = self.query_one("#thinking-notice", Static)
+            transcript = self.query_one("#transcript", TranscriptView)
         except NoMatches:
             return
         shell_mode = _is_terminal_command_prompt(prompt.text)
-        thinking_notice = self._hidden_thinking_in_progress()
+        thinking_notice = self.state.hidden_thinking_in_progress
+        lifted = self._transcript_ends_above_thinking_notice(transcript)
         render_key = (
             theme.name,
             theme.accent,
@@ -8099,10 +8093,16 @@ class TauTuiApp(App[None]):
             self._is_working(),
             shell_mode,
             thinking_notice,
+            lifted,
         )
         if render_key == self._last_activity_indicator_key:
             return
         self._last_activity_indicator_key = render_key
+        if thinking_notice != self._last_thinking_notice:
+            self._last_thinking_notice = thinking_notice
+            # Placed on the first delta, the placeholder must also go when a
+            # run ends mid-thinking, with no new row to lay the transcript out.
+            transcript.sync_thinking_placeholder()
         border_color = _activity_prompt_border_color(
             theme,
             frame=self._activity_frame,
@@ -8113,6 +8113,13 @@ class TauTuiApp(App[None]):
         prompt_row.styles.border_top = ("solid", border_color)
         prompt_row.styles.border_bottom = ("solid", border_color)
         notice.update(HIDDEN_THINKING_NOTICE if thinking_notice else "", layout=False)
+        # A hidden notice draws nothing, so the row it is lifted over shows.
+        notice.visible = thinking_notice
+        # With the transcript's newest row directly above, the notice sits one
+        # row up, over the blank placeholder: the row the reply's first line
+        # takes, with the usual blank row above it. Otherwise it stays in its
+        # own row rather than cover history or whatever sits in between.
+        notice.styles.offset = (0, -1 if lifted else 0)
         prompt_prefix.update(
             _render_activity_indicator(
                 theme,
@@ -8122,6 +8129,25 @@ class TauTuiApp(App[None]):
             ),
             layout=False,
         )
+
+    def _transcript_ends_above_thinking_notice(self, transcript: TranscriptView) -> bool:
+        """Return whether the transcript's newest row is the row above the notice.
+
+        It is when the transcript is shown and following the newest output, and
+        nothing between it and the notice takes a row: an extension view or
+        widget, or the queued-message list.
+        """
+        if not transcript.display or not transcript.following_output:
+            return False
+        try:
+            main_slot = self.query_one("#main-slot", Container)
+            above_prompt = self.query_one("#above-prompt-slot", Container)
+            queued = self.query_one("#queued-messages", Static)
+        except NoMatches:
+            return False
+        if main_slot.display or queued.display:
+            return False
+        return not any(child.display for child in above_prompt.children)
 
     def _refresh_completions(self) -> None:
         suggestions = self.query_one("#autocomplete", Static)

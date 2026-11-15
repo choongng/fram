@@ -34,7 +34,7 @@ from textual.geometry import Offset, Spacing
 from textual.layout import Layout
 from textual.message import Message
 from textual.selection import Selection
-from textual.widget import Widget
+from textual.widget import AwaitMount, Widget
 from textual.widgets import Collapsible, Static
 from textual.widgets import Markdown as TextualMarkdown
 from textual.widgets._markdown import MarkdownParagraph  # not publicly re-exported
@@ -522,6 +522,29 @@ class TranscriptWindowBoundary(Static):
         noun = "message" if count == 1 else "messages"
         arrow = "↑" if self.direction == "earlier" else "↓"
         return f"{arrow} Scroll for {count} {self.direction} {noun}"
+
+
+class ThinkingPlaceholder(Static):
+    """A blank row at the end of the transcript while hidden thinking runs.
+
+    The app draws its hidden-thinking notice over this row. Like the answer or
+    tool row that usually follows, it has one blank row above it and one line
+    of its own. `TranscriptView.mount` retires it as that row is inserted, so
+    the transcript keeps its height. The reply takes the notice's place and
+    the history above it does not move.
+    """
+
+    ALLOW_SELECT = False
+    DEFAULT_CSS = """
+    ThinkingPlaceholder {
+        width: 1fr;
+        height: 1;
+        margin: 1 0 0 0;
+    }
+    """
+
+    def __init__(self) -> None:
+        super().__init__("")
 
 
 class SystemPromptSectionWidget(Vertical):
@@ -1092,6 +1115,7 @@ class TranscriptView(VerticalScroll):
         ] = {}
         self._top_boundary: TranscriptWindowBoundary | None = None
         self._bottom_boundary: TranscriptWindowBoundary | None = None
+        self._thinking_placeholder: ThinkingPlaceholder | None = None
 
     def on_mount(self) -> None:
         """Follow new transcript content until the user scrolls away."""
@@ -1119,6 +1143,95 @@ class TranscriptView(VerticalScroll):
                 previous_is_tool = True
             else:
                 previous_is_tool = False
+
+    def mount(
+        self,
+        *widgets: Widget,
+        before: int | str | Widget | None = None,
+        after: int | str | Widget | None = None,
+    ) -> AwaitMount:
+        """Mount rows, retiring the thinking placeholder if they land after it.
+
+        A row mounted after the placeholder takes its place. Hiding the
+        placeholder in the same call that inserts the row means the next layout
+        has the row and not the placeholder, so no frame shows both or neither.
+        """
+        placeholder = self._thinking_placeholder
+        if (
+            placeholder is not None
+            and placeholder not in widgets
+            and self._mount_index(before, after) > self._nodes.index(placeholder)
+        ):
+            self._retire_thinking_placeholder()
+        return super().mount(*widgets, before=before, after=after)
+
+    def _mount_index(
+        self,
+        before: int | str | Widget | None,
+        after: int | str | Widget | None,
+    ) -> int:
+        """Return the child index a mount with these arguments inserts at."""
+        children = self._nodes
+        anchor = before if before is not None else after
+        if anchor is None:
+            return len(children)
+        if isinstance(anchor, str):
+            try:
+                anchor = self.query_one(anchor)
+            except NoMatches:
+                return len(children)
+        if isinstance(anchor, int):
+            index = anchor if anchor >= 0 else len(children) + anchor
+        elif anchor in children:
+            index = children.index(anchor)
+        else:
+            return len(children)
+        return index if before is not None else index + 1
+
+    def _retire_thinking_placeholder(self) -> None:
+        placeholder = self._thinking_placeholder
+        if placeholder is None:
+            return
+        self._thinking_placeholder = None
+        # Hidden at once, so the layout that follows leaves it out; the removal
+        # itself completes later.
+        placeholder.display = False
+        placeholder.remove()
+
+    def _last_row(self) -> Widget | None:
+        """Return the last child that is not a window boundary."""
+        for child in reversed(self.children):
+            if not isinstance(child, TranscriptWindowBoundary):
+                return child
+        return None
+
+    def sync_thinking_placeholder(self) -> None:
+        """Keep a blank row at the end of the transcript while hidden thinking runs.
+
+        Call this whenever the hidden-thinking state may have changed. The row
+        that follows thinking retires the placeholder as it mounts (see
+        `mount`), so this only places it, and drops it when the run ends or
+        thinking is shown, with no row to take its place.
+        """
+        state = self._render_state
+        if state is None or not state.running or state.show_thinking:
+            self._retire_thinking_placeholder()
+            return
+        if (
+            state.hidden_thinking_in_progress
+            and self._window_is_latest
+            and self._last_row() is not self._thinking_placeholder
+        ):
+            self._retire_thinking_placeholder()
+            self._thinking_placeholder = ThinkingPlaceholder()
+            self.mount(self._thinking_placeholder, before=self._bottom_boundary)
+            if self._should_follow_output:
+                self._request_follow_scroll()
+
+    @property
+    def following_output(self) -> bool:
+        """Whether the view is pinned to the newest output."""
+        return self._should_follow_output
 
     def follow_output(self) -> None:
         """Return to follow mode for a user-driven turn or explicit jump to bottom."""
@@ -1367,8 +1480,8 @@ class TranscriptView(VerticalScroll):
                             ),
                         )
                     )
-                # Hidden thinking renders no row; the prompt border says it
-                # is happening, so the transcript does not change height.
+                # Hidden thinking renders no row; `sync_thinking_placeholder`
+                # keeps a blank one at the end while it is still running.
                 continue
 
             target = None
@@ -1384,6 +1497,7 @@ class TranscriptView(VerticalScroll):
         # The streaming answer is not an item yet; its thinking goes above it,
         # where `append_thinking_delta` puts it.
         flush(self._active_assistant_widget or self._bottom_boundary)
+        self.sync_thinking_placeholder()
         self.refresh(layout=True)
         if should_follow:
             self._request_follow_scroll()
@@ -1463,6 +1577,7 @@ class TranscriptView(VerticalScroll):
 
         if widgets:
             self.mount(*widgets)
+        self.sync_thinking_placeholder()
         self.refresh(layout=True)
         if scroll_end:
             self._request_follow_scroll()
@@ -1725,7 +1840,10 @@ class TranscriptView(VerticalScroll):
                     self._bottom_boundary.update_count(len(state.items) - self._window_end)
                 return
         if not show_thinking:
-            # Hidden thinking mounts nothing; the prompt border shows it.
+            # Hidden thinking mounts no row of its own: a blank placeholder
+            # holds the place the reply will take, and the app's notice is
+            # drawn over it.
+            self.sync_thinking_placeholder()
             return
         should_follow = self._should_follow_output if not scroll_end else True
         # Record each new row before awaiting its mount: a Ctrl+T during the
