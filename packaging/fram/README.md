@@ -90,6 +90,19 @@ subscription auth, OpenRouter, Hugging Face, and custom OpenAI-compatible
 endpoints, including local models. See Tau's [providers
 guide](https://twotimespi.dev/guides/providers-and-models/).
 
+## Subagents
+
+Fram ships with [tau-subagents](https://github.com/rian-dolphin/tau-subagents),
+by Rian Dolphin, and turns it on by default. It gives the model an `agent` tool
+that hands a task to a second, scoped session, in the foreground or in the
+background, plus `/agents` to watch and steer those runs. The wheel also
+installs tau-subagents' `tau-job` command, which runs long shell jobs in the
+background.
+
+Set `FRAM_NO_SUBAGENTS=1` to start Fram without it. To try a different version,
+load a checkout with `fram -e /path/to/tau-subagents`, which replaces the
+bundled copy for that run.
+
 ## The name
 
 *Fram* is Norwegian for *forward*. It is the name of an [exploration
@@ -101,3 +114,6 @@ directly.
 
 Fram is released under the [MIT
 License](https://github.com/choongng/fram/blob/main/LICENSE).
+
+tau-subagents is copyright Rian Dolphin and is also released under the MIT
+License. Its license ships in the wheel as `tau_subagents/LICENSE`.

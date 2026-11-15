@@ -29,8 +29,9 @@ line per bullet, is the main example.
 
 Skipped: fenced and indented code, tables, headings, blockquotes, HTML, front
 matter (`---` or `+++`), link definitions, and paragraphs with a hard line
-break. Files under a hidden directory, such as `.github/`, are not listed unless
-named on the command line.
+break. Files under a hidden directory, such as `.github/`, or under `vendor/`,
+which holds other projects' code, are not listed unless named on the command
+line.
 
 ## Using it
 

@@ -7,6 +7,9 @@ name: Fram checks
 # Fram's version names the Tau release it is built on, which an upstream merge
 # can leave behind. See dev-notes/fram-packaging.md.
 #
+# The same job runs the tests of the bundled tau-subagents (vendor/) against
+# Fram's Tau.
+#
 # The Markdown wrap check holds the prose Fram changed to 80 columns, compared
 # with the upstream commit Fram last merged. See dev-notes/markdown-wrap.md.
 
@@ -48,6 +51,9 @@ jobs:
 
       - name: Run packaging tests
         run: uv run pytest packaging/fram/tests
+
+      - name: Run bundled tau-subagents tests
+        run: uv run python scripts/test_vendored_subagents.py
 
   markdown-wrap:
     permissions:

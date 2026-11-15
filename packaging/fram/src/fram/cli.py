@@ -12,6 +12,8 @@ installed as ``tau-ai`` are adjusted here, before Tau's CLI is imported:
   defaults there instead of ``~/.tau``. An explicit ``TAU_HOME`` still wins.
 - Tau's version lookup reads the ``fram-agent`` distribution, so the TUI and the
   release-notes state see Fram's version instead of ``0+unknown``.
+- ``FRAM_NO_SUBAGENTS`` turns off the bundled tau-subagents extension, by adding
+  it to ``TAU_DISABLE_PACKAGE_EXTENSIONS``.
 
 Fram's name and marks in Tau's own text come from ``fram.branding``, which Tau
 finds through the wheel's ``tau_coding.branding`` entry point rather than from
@@ -30,6 +32,8 @@ from fram import __version__, tau_base_version
 if TYPE_CHECKING:
     from typer import Typer
 
+SUBAGENTS_EXTENSION = "tau_subagents"
+
 _REINSTALL_ADVICE = (
     "fram update is not supported: Tau's updater installs tau-ai from PyPI.\n"
     "Upgrade with: uv tool upgrade fram-agent  (or reinstall from your Fram index)"
@@ -47,6 +51,7 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(1)
 
     adopt_fram_identity()
+    apply_subagents_switch()
     from tau_coding.cli import app
 
     list_only_supported_update(app)
@@ -74,3 +79,16 @@ def adopt_fram_identity() -> None:
 
     tau_coding.version._DISTRIBUTION_NAME = "fram-agent"
     tau_coding.__version__ = tau_coding.version.current_version()
+
+
+def apply_subagents_switch() -> None:
+    """Skip the bundled tau-subagents extension when ``FRAM_NO_SUBAGENTS`` is set."""
+    if os.environ.get("FRAM_NO_SUBAGENTS", "") in ("", "0"):
+        return
+    from tau_coding.extensions.loader import DISABLE_PACKAGE_EXTENSIONS_ENV
+
+    disabled = os.environ.get(DISABLE_PACKAGE_EXTENSIONS_ENV, "")
+    names = [name.strip() for name in disabled.split(",") if name.strip()]
+    if SUBAGENTS_EXTENSION not in names:
+        names.append(SUBAGENTS_EXTENSION)
+    os.environ[DISABLE_PACKAGE_EXTENSIONS_ENV] = ",".join(names)

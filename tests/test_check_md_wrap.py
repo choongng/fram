@@ -114,3 +114,10 @@ def test_toml_front_matter_is_skipped(tmp_path: Path) -> None:
 
     assert problems == []
     assert after == text
+
+
+def test_hidden_and_vendored_files_are_not_fram_prose() -> None:
+    assert wrap.not_fram_prose(".github/pull_request_template.md")
+    assert wrap.not_fram_prose("vendor/tau-subagents/README.md")
+    assert not wrap.not_fram_prose("dev-notes/markdown-wrap.md")
+    assert not wrap.not_fram_prose("docs/vendor/notes.md")
