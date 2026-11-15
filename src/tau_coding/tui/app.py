@@ -218,8 +218,8 @@ type BindingEntry = Binding | tuple[str, str] | tuple[str, str, str]
 SIDEBAR_MIN_WIDTH = 96
 SIDEBAR_MIN_HEIGHT = 38
 ACTIVITY_TICK_SECONDS = 0.15
-# Shown in the prompt's top border while the model thinks with thinking hidden.
-# The border is always drawn, so the notice coming and going moves nothing.
+# Shown in the row above the prompt while the model thinks with thinking hidden.
+# The row is always there, so the notice coming and going moves nothing.
 HIDDEN_THINKING_NOTICE = "Thinking… Press Ctrl+T to show thinking tokens."
 ACTIVITY_COLOR_FADE_STEPS = 24
 ACTIVITY_SPINNER_FRAMES = ("⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷")
@@ -4057,6 +4057,16 @@ class TauTuiApp(App[None]):
         color: $tau-muted-text;
     }
 
+    /* Always one row tall, blank unless hidden thinking is in progress, so
+       the notice appearing moves nothing. The left padding puts its text in
+       the prompt's text column. */
+    #thinking-notice {
+        height: 1;
+        margin: 0 1 0 1;
+        padding: 0 0 0 3;
+        color: $tau-muted-text;
+    }
+
     #prompt-row {
         height: auto;
         margin: 0 1 0 1;
@@ -4923,6 +4933,7 @@ class TauTuiApp(App[None]):
                 yield Container(id="main-slot")
                 yield Container(id="above-prompt-slot")
                 yield Static("", id="queued-messages")
+                yield Static("", id="thinking-notice")
                 with Horizontal(id="prompt-row"):
                     yield Static(BRANDING.mark, id="prompt-prefix")
                     yield PromptInput(
@@ -8018,6 +8029,7 @@ class TauTuiApp(App[None]):
         try:
             prompt = self.query_one("#prompt", PromptInput)
             prompt_prefix = self.query_one("#prompt-prefix", Static)
+            notice = self.query_one("#thinking-notice", Static)
         except NoMatches:
             return
         shell_mode = _is_terminal_command_prompt(prompt.text)
@@ -8044,8 +8056,7 @@ class TauTuiApp(App[None]):
         )
         prompt.styles.border_top = ("solid", border_color)
         prompt.styles.border_bottom = ("solid", border_color)
-        prompt.styles.border_title_color = theme.muted_text
-        prompt.border_title = HIDDEN_THINKING_NOTICE if thinking_notice else None
+        notice.update(HIDDEN_THINKING_NOTICE if thinking_notice else "", layout=False)
         prompt_prefix.update(
             _render_activity_indicator(
                 theme,

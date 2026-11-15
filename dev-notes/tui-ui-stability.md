@@ -12,15 +12,21 @@ status row, "Thinking… Press Ctrl+T to show thinking tokens.", at the end of t
 transcript, and remove it as soon as an answer or tool call followed. Each turn
 therefore added a row and took it back.
 
-The notice now sits in the prompt's top border, as its `border_title`. The
-border is always drawn, so the notice coming and going changes no layout.
+The notice now has a row of its own, `#thinking-notice`, directly above the
+prompt. The row is always one line tall and blank unless hidden thinking is in
+progress, so the notice coming and going changes no layout. Its text starts in
+the prompt's text column.
+
+The notice first sat in the prompt's top border, as its `border_title`. Text on
+the border read as part of the prompt rather than as a status, so it moved up a
+row. The row costs the transcript one line.
 
 - `TauTuiApp._hidden_thinking_in_progress()` decides from state: a run is going,
   thinking is hidden, no answer text is streaming, and the newest item is
   thinking.
-- `_apply_activity_indicator` sets the title, along with the spinner and border
-  colour it already drew. It runs on chrome refreshes, on each streamed message
-  update and after Ctrl+T.
+- `_apply_activity_indicator` sets the notice text, along with the spinner and
+  border colour it already drew. It runs on chrome refreshes, on each streamed
+  message update and after Ctrl+T.
 - `TranscriptView` no longer mounts the row. The helpers that tracked and
   removed it (`_hidden_thinking_line`, `_drop_hidden_thinking_placeholder`) are
   gone, and hidden thinking items render nothing in the transcript.

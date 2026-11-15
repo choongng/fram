@@ -8,6 +8,7 @@ while the last one is still streaming.
 import asyncio
 
 import pytest
+from textual.widgets import Static
 from textual.widgets._markdown import MarkdownBlock
 
 from tau_agent import (
@@ -169,9 +170,12 @@ def _rendered_thinking(app: TauTuiApp) -> list[list[str]]:
 
 
 def _notice_shown(app: TauTuiApp) -> bool:
-    """Whether the prompt border says hidden thinking is happening."""
-    title = app.query_one("#prompt", PromptInput).border_title
-    shown = title is not None and str(title) == HIDDEN_THINKING_NOTICE
+    """Whether the row above the prompt says hidden thinking is happening."""
+    notice = app.query_one("#thinking-notice", Static)
+    shown = str(notice.content) == HIDDEN_THINKING_NOTICE
+    # It has its own row directly above the prompt, not the prompt's border.
+    assert notice.region.bottom == app.query_one("#prompt-row").region.y
+    assert app.query_one("#prompt", PromptInput).border_title is None
     # The notice never takes a transcript row.
     assert all(row.selection_text.strip() != HIDDEN_THINKING_NOTICE for row in _rows(app))
     return shown

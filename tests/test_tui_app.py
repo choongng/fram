@@ -205,6 +205,11 @@ from tau_coding.tui.widgets import (
 ANSI_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
+def _thinking_notice(app: TauTuiApp) -> str:
+    """Return the text of the hidden-thinking notice row above the prompt."""
+    return str(app.query_one("#thinking-notice", Static).content)
+
+
 def test_herdr_uses_textual_cell_mouse_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HERDR_ENV", "1")
     monkeypatch.delenv("TEXTUAL_SMOOTH_SCROLL", raising=False)
@@ -11620,8 +11625,7 @@ async def test_tui_app_toggles_thinking_tokens_from_keybinding_while_running() -
         return "\n".join(line.text for line in transcript.lines)
 
     def notice() -> str | None:
-        title = app.query_one("#prompt", PromptInput).border_title
-        return None if title is None else str(title)
+        return _thinking_notice(app) or None
 
     app._notify = fake_notify  # type: ignore[method-assign]
 
@@ -11631,7 +11635,7 @@ async def test_tui_app_toggles_thinking_tokens_from_keybinding_while_running() -
         app._refresh()
         await pilot.pause()
 
-        # While thinking is what is happening, the prompt border says so; the
+        # While thinking is what is happening, the row above the prompt says so; the
         # transcript gets no row for it.
         assert app.state.show_thinking is False
         assert notice() == HIDDEN_THINKING_NOTICE
@@ -11705,19 +11709,18 @@ async def test_tui_app_hidden_thinking_status_line_does_not_accumulate_across_tu
     async with app.run_test() as pilot:
         app.state.running = True
         transcript = app.query_one("#transcript", TranscriptView)
-        prompt = app.query_one("#prompt", PromptInput)
 
         for turn in ("one", "two"):
             app.state.add_thinking_delta(f"plan {turn}")
             app._refresh()
             await pilot.pause()
             # The notice shows while thinking is happening...
-            assert prompt.border_title == HIDDEN_THINKING_NOTICE
+            assert _thinking_notice(app) == HIDDEN_THINKING_NOTICE
             app.state.add_item("assistant", f"answer {turn}")
             app._refresh()
             await pilot.pause()
             # ...and once the answer is there it is gone again.
-            assert prompt.border_title is None
+            assert _thinking_notice(app) == ""
 
         assert [line.text for line in transcript.lines] == ["answer one", "answer two"]
 
@@ -11770,7 +11773,6 @@ async def test_hidden_thinking_notice_is_not_stranded_by_a_thinking_only_message
 
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
-        prompt = app.query_one("#prompt", PromptInput)
         await stream(AgentStartEvent())
         for index in range(3):
             # A message that ends on its thinking is still the newest output,
@@ -11778,7 +11780,7 @@ async def test_hidden_thinking_notice_is_not_stranded_by_a_thinking_only_message
             for event in _thinking_message_events(f"musing {index}"):
                 await stream(event)
             await pilot.pause()
-            assert prompt.border_title == HIDDEN_THINKING_NOTICE
+            assert _thinking_notice(app) == HIDDEN_THINKING_NOTICE
             call = ToolCall(
                 id=f"call-{index}",
                 name="bash",
@@ -11790,7 +11792,7 @@ async def test_hidden_thinking_notice_is_not_stranded_by_a_thinking_only_message
                 # Hidden thinking never takes a transcript row.
                 assert thinking_rows() == []
             # The tool call followed the thinking, so the notice is gone.
-            assert prompt.border_title is None
+            assert _thinking_notice(app) == ""
 
 
 @pytest.mark.anyio
