@@ -22,7 +22,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any, BinaryIO, ClassVar, Literal, Protocol, TypeVar, cast
 
-from rich.console import Console, Group
+from rich.console import Console, Group, RenderableType
 from rich.style import Style
 from rich.terminal_theme import TerminalTheme
 from rich.text import Text
@@ -33,7 +33,9 @@ from textual.binding import Binding, BindingsMap
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.events import Key, Resize
-from textual.screen import ModalScreen
+from textual.geometry import Region
+from textual.notifications import Notification
+from textual.screen import ModalScreen, Screen
 from textual.strip import Strip
 from textual.timer import Timer
 from textual.widget import Widget
@@ -217,16 +219,18 @@ type BindingEntry = Binding | tuple[str, str] | tuple[str, str, str]
 SIDEBAR_MIN_WIDTH = 96
 SIDEBAR_MIN_HEIGHT = 38
 ACTIVITY_TICK_SECONDS = 0.15
-# Shown in the prompt's top border while the model thinks with thinking hidden.
-# The border is always drawn, so the notice coming and going moves nothing.
+TOAST_REMOVAL_POLL_SECONDS = 0.05
+# Shown while the model thinks with thinking hidden, over the transcript's blank
+# placeholder row (see `ThinkingPlaceholder`), so the reply takes its place.
 HIDDEN_THINKING_NOTICE = "Thinking… Press Ctrl+T to show thinking tokens."
 ACTIVITY_COLOR_FADE_STEPS = 24
 ACTIVITY_SPINNER_FRAMES = ("⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷")
 ACTIVITY_SPINNER_MAX_FADE = 0.55
 COMPLETION_MAX_VISIBLE_LINES = 16
-COMPLETION_INITIAL_TERMINAL_FRACTION = 3
+# Transcript rows the floating completion list leaves uncovered above it.
 COMPLETION_MIN_TRANSCRIPT_LINES = 4
-COMPLETION_WIDGET_CHROME_LINES = 3
+# The completion list's top and bottom border.
+COMPLETION_WIDGET_CHROME_LINES = 2
 NO_STORED_CREDENTIALS_MESSAGE = (
     "No stored credentials to remove. /logout only removes credentials saved by /login; "
     "environment variables and providers.json config are unchanged."
@@ -1725,7 +1729,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
 
     #session-picker-columns {
         height: auto;
-        border: tall $tau-border;
+        border: solid $tau-border;
         background: $tau-transcript-background;
     }
 
@@ -1736,7 +1740,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
 
     #session-picker-project-column {
         width: 34;
-        border-right: tall $tau-border;
+        border-right: solid $tau-border;
     }
 
     #session-picker-session-column {
@@ -4027,7 +4031,7 @@ class TauTuiApp(App[None]):
         height: 1fr;
         background: $tau-prompt-background;
         color: $tau-prompt-text;
-        border: tall $tau-prompt-border;
+        border: solid $tau-prompt-border;
     }
 
     #above-prompt-slot {
@@ -4055,54 +4059,74 @@ class TauTuiApp(App[None]):
         color: $tau-muted-text;
     }
 
-    #prompt-row {
-        height: auto;
-        margin: 0 1 0 1;
+    /* Always one row tall, so the notice appearing moves nothing. It is
+       hidden unless hidden thinking is in progress. While the transcript
+       follows the newest output, `_apply_activity_indicator` lifts it one row,
+       over the transcript's thinking placeholder. The left padding puts its
+       text in the prompt's text column. */
+    #thinking-notice {
+        height: 1;
+        margin: 0;
+        padding: 0 0 0 2;
+        color: $tau-muted-text;
     }
 
+    /* The prompt's rules run the full width of the main pane, across the
+       logo column too. `_apply_activity_indicator` recolours them while a
+       turn runs and in shell mode. */
+    #prompt-row {
+        height: auto;
+        margin: 0;
+        border-top: solid $tau-prompt-border;
+        border-bottom: solid $tau-prompt-border;
+    }
+
+    #prompt-row.-shell-mode {
+        border-top: solid $tau-tool-running;
+        border-bottom: solid $tau-tool-running;
+    }
+
+    /* The logo or spinner sits in column 0; one blank column follows it, and
+       typed text starts in column 2, the same column as transcript text. */
     #prompt-prefix {
         width: 2;
-        height: 3;
-        padding: 0 0 0 0;
+        height: 1;
+        padding: 0;
         margin: 0;
-        content-align: center middle;
+        content-align: left top;
         color: $tau-accent;
         text-style: bold;
     }
 
-    /* The input keeps 1 column of left padding (the caret sits at the
-       border+padding edge and would otherwise cover the box edge); with the
-       box at x=3 its typed text lands at x=4. */
     #prompt {
         width: 1fr;
         height: auto;
         background: $tau-screen-background;
         color: $tau-prompt-text;
         border: none;
-        border-top: solid $tau-prompt-border;
-        border-bottom: solid $tau-prompt-border;
         margin: 0;
-        padding: 0 1;
-        max-height: 8;
+        padding: 0 1 0 0;
+        max-height: 6;
     }
 
-    #prompt.-shell-mode {
-        border-top: solid $tau-tool-running;
-        border-bottom: solid $tau-tool-running;
-    }
-
+    /* No inset: the path and model start in column 0 and the token count
+       ends in the last column, like the prompt's full-width rules. */
     #compact-session-info {
         height: auto;
         max-height: 3;
-        margin: 0 1 0 1;
-        padding: 0 1;
+        margin: 0;
+        padding: 0;
         color: $tau-muted-text;
     }
 
+    /* Floats over the transcript, its bottom edge on the prompt's top edge.
+       Taking no room in the layout, it moves nothing when it opens or
+       closes. `_place_completions` sets its size and offset. */
     #autocomplete {
+        overlay: screen;
+        position: absolute;
         height: auto;
-        max-height: 18;
-        margin: 0 1 1 1;
+        margin: 0;
         padding: 0 1;
         background: $tau-autocomplete-background;
         color: $tau-screen-text;
@@ -4762,15 +4786,17 @@ class TauTuiApp(App[None]):
         self._prompt_run_id = 0
         self._optimistic_user_messages: list[tuple[int, str]] = []
         self._completion_state = CompletionState()
-        self._completion_visible_line_budget: int | None = None
+        # Prompt-row and main-pane regions the completion list was placed for.
+        self._completion_anchor: tuple[Region, Region] | None = None
         self._activity_frame = 0
         self._activity_timer: Timer | None = None
         self._last_tool_timer_refresh_at = 0.0
         self._last_activity_indicator_key: tuple[object, ...] | None = None
+        self._last_thinking_notice: bool | None = None
         self._last_queue_render_key: tuple[object, ...] | None = None
-        self._terminal_title = TerminalTitleController()
+        self._terminal_title = TerminalTitleController(writer=self._write_terminal_sequence)
         self._terminal_notification = TerminalNotificationController(
-            self.tui_settings.turn_notification
+            self.tui_settings.turn_notification, writer=self._write_terminal_sequence
         )
         self._app_has_focus = True
         self._active_notification_keys: set[tuple[str, str]] = set()
@@ -4790,6 +4816,27 @@ class TauTuiApp(App[None]):
     def _is_working(self) -> bool:
         """Return whether the app should show working affordances (agent turn or compaction)."""
         return self.state.running or self._compacting
+
+    def _write_terminal_sequence(self, sequence: str) -> None:
+        """Send a title or attention sequence to the terminal in order with frames.
+
+        Textual writes each frame from a background thread, in chunks. A
+        sequence written straight to stdout could land between two chunks, in
+        the middle of one of Textual's escape sequences. The terminal then
+        abandons that sequence and prints its tail, with the row text after it,
+        wherever the cursor stood, and it stays there until a full repaint.
+        Queueing through the driver keeps them apart. Before the app starts,
+        nothing else is drawing, so stdout is safe.
+        """
+        driver = self._driver
+        if driver is not None:
+            driver.write(sequence)
+            return
+        stream = sys.__stdout__
+        if stream is None:
+            raise OSError("no terminal to write to")
+        stream.write(sequence)
+        stream.flush()
 
     def _sync_terminal_title(self) -> None:
         """Reflect the active session name and running state in the terminal tab title."""
@@ -4916,6 +4963,7 @@ class TauTuiApp(App[None]):
                 yield Container(id="main-slot")
                 yield Container(id="above-prompt-slot")
                 yield Static("", id="queued-messages")
+                yield Static("", id="thinking-notice")
                 with Horizontal(id="prompt-row"):
                     yield Static(BRANDING.mark, id="prompt-prefix")
                     yield PromptInput(
@@ -4938,6 +4986,7 @@ class TauTuiApp(App[None]):
         self._sync_prompt_shell_mode(prompt.text)
         prompt.focus()
         self.app_resume_signal.subscribe(self, self._on_resumed_from_suspend)
+        self.screen.screen_layout_refresh_signal.subscribe(self, self._on_screen_layout)
         self._update_responsive_layout(self.size.width, self.size.height)
         self._apply_sidebar_position()
         self._refresh()
@@ -5054,7 +5103,6 @@ class TauTuiApp(App[None]):
 
     def on_resize(self, event: Resize) -> None:
         """Update responsive chrome when the terminal changes size."""
-        self._completion_visible_line_budget = None
         self._update_responsive_layout(event.size.width, event.size.height)
 
     @on(SidebarFileItem.OpenRequested)
@@ -7894,6 +7942,34 @@ class TauTuiApp(App[None]):
         )
         self.notify(message, severity=severity, markup=False)
 
+    def _unnotify(self, notification: Notification, refresh: bool = True) -> None:
+        """Forget a notification, then repaint the screen once its toast is gone.
+
+        An expiring toast prunes itself from the DOM asynchronously. When a
+        widget's region is looked up before the next layout pass, Textual
+        rebuilds its compositor map lazily without the toast, and that pass
+        then never marks the toast's old cells dirty. The text stays on the
+        terminal until something else repaints those rows.
+
+        `_unnotify` and `Toast._notification` are private to Textual;
+        `test_expired_toast_repaints_the_screen_once_it_is_removed` fails if
+        an upgrade renames them.
+        """
+        super()._unnotify(notification, refresh=refresh)
+        self._repaint_after_toast_removed(notification)
+
+    def _repaint_after_toast_removed(self, notification: Notification) -> None:
+        screen = self.screen
+        if any(
+            getattr(toast, "_notification", None) is notification for toast in screen.query("Toast")
+        ):
+            self.set_timer(
+                TOAST_REMOVAL_POLL_SECONDS,
+                lambda: self._repaint_after_toast_removed(notification),
+            )
+            return
+        screen.refresh()
+
     def _refresh(self) -> None:
         theme = self.tui_settings.resolved_theme
         self._refresh_chrome(theme=theme)
@@ -7957,17 +8033,6 @@ class TauTuiApp(App[None]):
             self._activity_timer.pause()
         self._apply_activity_indicator()
 
-    def _hidden_thinking_in_progress(self) -> bool:
-        """Return whether the model is thinking now while thinking is hidden.
-
-        Only thinking that is still the newest output counts: once an answer
-        streams or a tool call follows, the notice goes.
-        """
-        state = self.state
-        if not state.running or state.show_thinking or state.assistant_buffer:
-            return False
-        return bool(state.items) and state.items[-1].role == "thinking"
-
     def _tick_activity(self) -> None:
         if not self._is_working():
             return
@@ -8011,10 +8076,13 @@ class TauTuiApp(App[None]):
         try:
             prompt = self.query_one("#prompt", PromptInput)
             prompt_prefix = self.query_one("#prompt-prefix", Static)
+            notice = self.query_one("#thinking-notice", Static)
+            transcript = self.query_one("#transcript", TranscriptView)
         except NoMatches:
             return
         shell_mode = _is_terminal_command_prompt(prompt.text)
-        thinking_notice = self._hidden_thinking_in_progress()
+        thinking_notice = self.state.hidden_thinking_in_progress
+        lifted = self._transcript_ends_above_thinking_notice(transcript)
         render_key = (
             theme.name,
             theme.accent,
@@ -8025,20 +8093,33 @@ class TauTuiApp(App[None]):
             self._is_working(),
             shell_mode,
             thinking_notice,
+            lifted,
         )
         if render_key == self._last_activity_indicator_key:
             return
         self._last_activity_indicator_key = render_key
+        if thinking_notice != self._last_thinking_notice:
+            self._last_thinking_notice = thinking_notice
+            # Placed on the first delta, the placeholder must also go when a
+            # run ends mid-thinking, with no new row to lay the transcript out.
+            transcript.sync_thinking_placeholder()
         border_color = _activity_prompt_border_color(
             theme,
             frame=self._activity_frame,
             running=self._is_working(),
             shell_mode=shell_mode,
         )
-        prompt.styles.border_top = ("solid", border_color)
-        prompt.styles.border_bottom = ("solid", border_color)
-        prompt.styles.border_title_color = theme.muted_text
-        prompt.border_title = HIDDEN_THINKING_NOTICE if thinking_notice else None
+        prompt_row = self.query_one("#prompt-row")
+        prompt_row.styles.border_top = ("solid", border_color)
+        prompt_row.styles.border_bottom = ("solid", border_color)
+        notice.update(HIDDEN_THINKING_NOTICE if thinking_notice else "", layout=False)
+        # A hidden notice draws nothing, so the row it is lifted over shows.
+        notice.visible = thinking_notice
+        # With the transcript's newest row directly above, the notice sits one
+        # row up, over the blank placeholder: the row the reply's first line
+        # takes, with the usual blank row above it. Otherwise it stays in its
+        # own row rather than cover history or whatever sits in between.
+        notice.styles.offset = (0, -1 if lifted else 0)
         prompt_prefix.update(
             _render_activity_indicator(
                 theme,
@@ -8049,72 +8130,101 @@ class TauTuiApp(App[None]):
             layout=False,
         )
 
+    def _transcript_ends_above_thinking_notice(self, transcript: TranscriptView) -> bool:
+        """Return whether the transcript's newest row is the row above the notice.
+
+        It is when the transcript is shown and following the newest output, and
+        nothing between it and the notice takes a row: an extension view or
+        widget, or the queued-message list.
+        """
+        if not transcript.display or not transcript.following_output:
+            return False
+        try:
+            main_slot = self.query_one("#main-slot", Container)
+            above_prompt = self.query_one("#above-prompt-slot", Container)
+            queued = self.query_one("#queued-messages", Static)
+        except NoMatches:
+            return False
+        if main_slot.display or queued.display:
+            return False
+        return not any(child.display for child in above_prompt.children)
+
     def _refresh_completions(self) -> None:
         suggestions = self.query_one("#autocomplete", Static)
         suggestions.display = bool(self._completion_state.items)
         if not self._completion_state.items:
-            self._completion_visible_line_budget = None
             suggestions.update(
                 render_completion_suggestions(
                     CompletionState(),
                     theme=self.tui_settings.resolved_theme,
                 )
             )
+            self._completion_anchor = None
             self._refresh_footer_bindings()
             return
-        max_lines = self._completion_window_line_budget(suggestions)
-        suggestions.update(
-            render_completion_suggestions(
-                _visible_completion_state(
-                    self._completion_state,
-                    max_lines=max_lines,
-                    width=max(suggestions.content_size.width or suggestions.size.width, 1),
-                ),
-                theme=self.tui_settings.resolved_theme,
-            )
-        )
+        self._place_completions(suggestions)
         self._refresh_footer_bindings()
 
-    def _completion_window_line_budget(self, suggestions: Static) -> int:
-        """Return a stable completion window size for the current suggestion box.
+    def _on_screen_layout(self, _screen: Screen[object]) -> None:
+        """Keep the floating completion list on the prompt after a relayout.
 
-        The autocomplete widget has ``height: auto``. If we used its current
-        rendered height as the next render limit unconditionally, selecting an
-        item could render fewer rows, which would shrink the widget, which would
-        then make the next render limit smaller again. Keep the largest measured
-        height for the current completion session so navigation does not feed
-        back into progressively smaller boxes.
+        The prompt moves when the terminal resizes or the prompt grows. Placing
+        the list changes its own content, which lays the screen out again, so
+        re-place only when the prompt or pane actually moved.
         """
-        measured_limit = _completion_visible_line_limit(suggestions)
-        if suggestions.size.height <= 0:
-            if self._completion_visible_line_budget is None:
-                self._completion_visible_line_budget = self._initial_completion_line_budget()
-            return self._completion_visible_line_budget
-        self._completion_visible_line_budget = max(
-            self._completion_visible_line_budget or measured_limit,
-            measured_limit,
-        )
-        return self._completion_visible_line_budget
+        if not self._completion_state.items:
+            return
+        if self._completion_anchor_now() != self._completion_anchor:
+            self._place_completions(self.query_one("#autocomplete", Static))
 
-    def _initial_completion_line_budget(self) -> int:
-        """Estimate the first completion window size before Textual lays it out."""
-        terminal_height = self.size.height
-        if terminal_height <= 0:
+    def _completion_anchor_now(self) -> tuple[Region, Region]:
+        return (self.query_one("#prompt-row").region, self.query_one("#main-pane").region)
+
+    def _place_completions(self, suggestions: Static) -> None:
+        """Render the visible completions and float them just above the prompt."""
+        if not self._completion_state.items:
+            return
+        prompt_row = self.query_one("#prompt-row")
+        pane = self.query_one("#main-pane")
+        self._completion_anchor = self._completion_anchor_now()
+        width = max(prompt_row.region.width, 1)
+        # Border and horizontal padding take two columns on each side.
+        content_width = max(width - 4, 1)
+        visible = _visible_completion_state(
+            self._completion_state,
+            max_lines=self._completion_line_budget(),
+            width=content_width,
+        )
+        rendered = render_completion_suggestions(visible, theme=self.tui_settings.resolved_theme)
+        # Size the box from the real rendering: the windowing estimate measures
+        # each row on its own and can be off by a line where descriptions wrap.
+        # Never taller than the rows above the prompt, so it cannot cover the
+        # prompt itself; the box scrolls if the estimate fell short.
+        rows_above = max(prompt_row.region.y - pane.region.y, 1)
+        height = _rendered_line_count(rendered, width=content_width)
+        height = min(height + COMPLETION_WIDGET_CHROME_LINES, rows_above)
+        suggestions.update(rendered)
+        suggestions.styles.width = width
+        suggestions.styles.height = height
+        suggestions.styles.offset = (
+            prompt_row.region.x - pane.region.x,
+            prompt_row.region.y - pane.region.y - height,
+        )
+
+    def _completion_line_budget(self) -> int:
+        """Return how many completion lines fit above the prompt.
+
+        The list covers the transcript, leaving its top few rows in view. The
+        budget depends only on where the prompt sits, never on the list's own
+        height, so moving the selection cannot resize the list.
+        """
+        prompt_row = self.query_one("#prompt-row")
+        pane = self.query_one("#main-pane")
+        if prompt_row.region.height <= 0:
             return COMPLETION_MAX_VISIBLE_LINES
-
-        reserved_rows = COMPLETION_MIN_TRANSCRIPT_LINES + COMPLETION_WIDGET_CHROME_LINES
-        for selector in ("#prompt-row", "#compact-session-info", "#queued-messages"):
-            with suppress(NoMatches):
-                widget = self.query_one(selector)
-                if widget.display:
-                    reserved_rows += widget.outer_size.height
-
-        available_rows = terminal_height - reserved_rows
-        terminal_fraction_rows = max(1, terminal_height // COMPLETION_INITIAL_TERMINAL_FRACTION)
-        return max(
-            1,
-            min(COMPLETION_MAX_VISIBLE_LINES, available_rows, terminal_fraction_rows),
-        )
+        rows_above = prompt_row.region.y - pane.region.y
+        available = rows_above - COMPLETION_MIN_TRANSCRIPT_LINES - COMPLETION_WIDGET_CHROME_LINES
+        return max(1, min(COMPLETION_MAX_VISIBLE_LINES, available))
 
     def _update_responsive_layout(self, width: int, height: int) -> None:
         if self._sidebar_visibility_override is not None:
@@ -8170,7 +8280,9 @@ class TauTuiApp(App[None]):
     def _sync_prompt_shell_mode(self, text: str) -> None:
         prompt = self.query_one("#prompt", PromptInput)
         prompt.shell_mode_style = self.tui_settings.resolved_theme.role_styles["tool"].border
-        prompt.set_class(_is_terminal_command_prompt(text), "-shell-mode")
+        shell_mode = _is_terminal_command_prompt(text)
+        prompt.set_class(shell_mode, "-shell-mode")
+        self.query_one("#prompt-row").set_class(shell_mode, "-shell-mode")
         prompt.refresh()
         self._apply_activity_indicator()
 
@@ -8263,13 +8375,6 @@ def _hex_to_rgb(color: str) -> tuple[int, int, int]:
     return (int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16))
 
 
-def _completion_visible_line_limit(suggestions: Static) -> int:
-    """Return the number of completion render lines that fit in the widget body."""
-    if suggestions.size.height > 0:
-        return max(min(COMPLETION_MAX_VISIBLE_LINES, suggestions.size.height), 1)
-    return COMPLETION_MAX_VISIBLE_LINES
-
-
 def _visible_completion_state(
     state: CompletionState,
     *,
@@ -8355,6 +8460,18 @@ def _completion_render_line_count(state: CompletionState, *, width: int | None =
     return line_count
 
 
+def _rendered_line_count(renderable: RenderableType, *, width: int) -> int:
+    """Return how many lines ``renderable`` takes at ``width`` columns."""
+    console = Console(
+        file=StringIO(),
+        width=width,
+        force_terminal=False,
+        color_system=None,
+        legacy_windows=False,
+    )
+    return len(console.render_lines(renderable, console.options, pad=False))
+
+
 def _completion_item_extra_wrapped_lines(
     item: CompletionItem,
     *,
@@ -8371,9 +8488,10 @@ def _completion_item_extra_wrapped_lines(
         color_system=None,
         legacy_windows=False,
     )
+    # Measure the row alone: its category header is counted by the caller.
     console.print(
         render_completion_suggestions(
-            CompletionState(items=(item,), selected_index=0),
+            CompletionState(items=(replace(item, category=None),), selected_index=0),
             theme=TAU_DARK_THEME,
         ),
         end="",

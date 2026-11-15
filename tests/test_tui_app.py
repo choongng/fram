@@ -1,6 +1,7 @@
 import asyncio
 import gc
 import re
+import sys
 import threading
 import weakref
 from collections.abc import AsyncIterator
@@ -10,7 +11,7 @@ from datetime import datetime
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 import pytest
 from rich.console import Console
@@ -197,11 +198,17 @@ from tau_coding.tui.widgets import (
     _transcript_plain_body_text,
     render_chat_item,
     render_compact_session_info,
+    render_completion_suggestions,
     render_session_sidebar,
     transcript_item_selection_text,
 )
 
 ANSI_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _thinking_notice(app: TauTuiApp) -> str:
+    """Return the text of the hidden-thinking notice row above the prompt."""
+    return str(app.query_one("#thinking-notice", Static).content)
 
 
 def test_herdr_uses_textual_cell_mouse_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2853,11 +2860,12 @@ async def test_transcript_message_widget_renders_full_height_role_block() -> Non
         # block is rectangular and the accent spans every wrapped line.
         assert widget.styles.background == background
         assert body.styles.background == background
-        # The row pads its top interior row (the user box); the box's bottom
-        # interior row lives on the body.
-        assert widget.styles.padding.top == 1
+        # The box has no blank interior rows: its text starts on its first
+        # row and ends on its last.
+        assert widget.styles.padding.top == 0
         assert widget.styles.padding.bottom == 0
-        assert body.styles.padding.bottom == 1
+        assert body.styles.padding.top == 0
+        assert body.styles.padding.bottom == 0
         edge_type, edge_color = widget.styles.border_left
         assert edge_type != "none"
         assert edge_color == border
@@ -3240,7 +3248,9 @@ async def test_long_transcript_mounts_bounded_latest_window_and_pages_earlier(
     monkeypatch.setattr(tui_widgets, "TRANSCRIPT_WINDOW_ITEMS", 6)
     monkeypatch.setattr(tui_widgets, "TRANSCRIPT_WINDOW_PAGE_ITEMS", 2)
     app = TauTuiApp(
-        FakeSession(messages=[UserMessage(content=f"message {index}") for index in range(12)])
+        FakeSession(
+            messages=[UserMessage(content=f"message {index}\nline\nline") for index in range(12)]
+        )
     )
 
     async with app.run_test(size=(60, 20)) as pilot:
@@ -3248,9 +3258,9 @@ async def test_long_transcript_mounts_bounded_latest_window_and_pages_earlier(
         transcript = app.query_one("#transcript", TranscriptView)
         assert transcript._window_start == 6
         assert transcript._window_end == 12
-        assert [widget.item.text for widget in app.query(TranscriptMessageWidget)] == [
-            f"message {index}" for index in range(6, 12)
-        ]
+        assert [
+            widget.item.text.split("\n")[0] for widget in app.query(TranscriptMessageWidget)
+        ] == [f"message {index}" for index in range(6, 12)]
         [top_boundary] = list(app.query(TranscriptWindowBoundary))
         assert top_boundary.direction == "earlier"
 
@@ -3259,9 +3269,9 @@ async def test_long_transcript_mounts_bounded_latest_window_and_pages_earlier(
 
         assert transcript._window_start == 4
         assert transcript._window_end == 10
-        assert [widget.item.text for widget in app.query(TranscriptMessageWidget)] == [
-            f"message {index}" for index in range(4, 10)
-        ]
+        assert [
+            widget.item.text.split("\n")[0] for widget in app.query(TranscriptMessageWidget)
+        ] == [f"message {index}" for index in range(4, 10)]
         assert {boundary.direction for boundary in app.query(TranscriptWindowBoundary)} == {
             "earlier",
             "later",
@@ -3321,9 +3331,17 @@ async def test_message_end_while_paged_back_keeps_later_items_reachable(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("live_role", "hook"),
+    [("assistant", "finalize"), ("thinking", "remove")],
+    ids=["kept-streamed-row", "remounted-row"],
+)
 async def test_paging_back_while_a_message_ends_leaves_it_behind_the_boundary(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, live_role: str, hook: str
 ) -> None:
+    # A streamed block that matches the canonical item is finalized in place;
+    # one that does not (here hidden thinking) is removed and the item mounted.
+    # Either await is where the reader can page back.
     from tau_coding.tui import widgets as tui_widgets
 
     monkeypatch.setattr(tui_widgets, "TRANSCRIPT_WINDOW_ITEMS", 6)
@@ -3338,15 +3356,16 @@ async def test_paging_back_while_a_message_ends_leaves_it_behind_the_boundary(
         assert transcript._window_end == 12
 
         live = tui_widgets.StreamingTranscriptMessageWidget(
-            ChatItem(role="assistant", text="x"), theme=tui_widgets.TAU_DARK_THEME
+            ChatItem(role=live_role, text="x"), theme=tui_widgets.TAU_DARK_THEME
         )
         await transcript.mount(live)
         transcript._active_message_widgets.append(live)
 
-        async def page_back_instead_of_removing() -> None:
+        async def page_back_instead(*args: object) -> None:
+            del args
             await transcript._shift_window("earlier")
 
-        monkeypatch.setattr(live, "remove", page_back_instead_of_removing)
+        monkeypatch.setattr(live, hook, page_back_instead)
         canonical = [ChatItem(role="assistant", text="answer")]
         app.state.items.extend(canonical)
         await transcript.finish_structured_assistant_message(canonical, show_thinking=False)
@@ -3370,7 +3389,9 @@ async def test_tool_only_message_keeps_a_paged_back_window(
     monkeypatch.setattr(tui_widgets, "TRANSCRIPT_WINDOW_PAGE_ITEMS", 2)
     monkeypatch.setattr(tui_widgets, "TRANSCRIPT_WINDOW_OVERSCAN_ITEMS", 0)
     app = TauTuiApp(
-        FakeSession(messages=[UserMessage(content=f"message {index}") for index in range(12)])
+        FakeSession(
+            messages=[UserMessage(content=f"message {index}\nline\nline") for index in range(12)]
+        )
     )
 
     async with app.run_test(size=(60, 20)) as pilot:
@@ -3479,8 +3500,13 @@ async def test_long_transcript_incremental_appends_keep_mounted_window_bounded()
 
 
 def _window_rows(transcript: TranscriptView) -> list[tuple[str, str]]:
+    # A finished streamed block is kept as the message's row rather than
+    # remounted, and draws the same as a rebuilt one, so rows compare by kind.
     return [
-        (type(child).__name__, getattr(child, "selection_text", "").strip())
+        (
+            "boundary" if isinstance(child, TranscriptWindowBoundary) else "row",
+            getattr(child, "selection_text", "").strip(),
+        )
         for child in transcript.children
         if isinstance(
             child,
@@ -4745,13 +4771,14 @@ async def test_tui_prompt_grows_to_six_lines_then_scrolls() -> None:
 
     async with app.run_test(size=(120, 30)) as pilot:
         prompt = app.query_one("#prompt", TextArea)
+        prompt_row = app.query_one("#prompt-row")
         assert prompt.size.height == 1
-        assert prompt.outer_size.height == 3
+        assert prompt_row.outer_size.height == 3
 
         prompt.text = "x" * 700
         await pilot.pause()
         assert prompt.size.height == 6
-        assert prompt.outer_size.height == 8
+        assert prompt_row.outer_size.height == 8
 
         prompt.text = "x" * 1000
         await pilot.pause()
@@ -4767,6 +4794,17 @@ async def test_tui_compact_session_info_sits_directly_below_prompt() -> None:
         prompt_row = app.query_one("#prompt-row")
         compact_info = app.query_one("#compact-session-info")
         assert compact_info.region.y == prompt_row.region.bottom
+
+
+@pytest.mark.anyio
+async def test_tui_compact_session_info_spans_the_main_pane_edge_to_edge() -> None:
+    app = TauTuiApp(FakeSession())
+
+    async with app.run_test(size=(120, 30)):
+        compact_info = app.query_one("#compact-session-info")
+        main_pane = app.query_one("#main-pane")
+        assert compact_info.content_region.x == main_pane.region.x
+        assert compact_info.content_region.right == main_pane.region.right
 
 
 @pytest.mark.anyio
@@ -5856,7 +5894,8 @@ def test_tau_dark_theme_uses_aqua_as_its_shared_accent() -> None:
     assert theme.screen_background == "#000000"
     assert theme.transcript_background == "#000000"
     assert theme.prompt_background == "#101419"
-    assert theme.role_styles["user"].body.endswith(f"on {theme.prompt_background}")
+    # User rows paint no background of their own, so the terminal's shows.
+    assert theme.role_styles["user"].body == "#d8dee9"
     assert theme.terminal_background is True
     assert theme.role_styles["assistant"].body == "#d8dee9"
 
@@ -5940,15 +5979,15 @@ async def test_tui_app_shows_activity_indicator_while_running() -> None:
     app = TauTuiApp(FakeSession())
 
     async with app.run_test():
-        prompt = app.query_one("#prompt")
+        prompt_row = app.query_one("#prompt-row")
         indicator = app.query_one("#prompt-prefix")
 
         assert not app.query("#status")
         assert not app.query("#activity-status")
-        assert prompt.styles.border_top == ("solid", Color.parse("#2d3748"))
-        assert prompt.styles.border_bottom == ("solid", Color.parse("#2d3748"))
-        assert prompt.styles.border_left[0] == ""
-        assert prompt.styles.border_right[0] == ""
+        assert prompt_row.styles.border_top == ("solid", Color.parse("#2d3748"))
+        assert prompt_row.styles.border_bottom == ("solid", Color.parse("#2d3748"))
+        assert prompt_row.styles.border_left[0] == ""
+        assert prompt_row.styles.border_right[0] == ""
         assert indicator.render().plain == "τ"
 
         app.adapter.apply(AgentStartEvent())
@@ -5956,20 +5995,75 @@ async def test_tui_app_shows_activity_indicator_while_running() -> None:
 
         assert pytest.approx(tui_app.ACTIVITY_TICK_SECONDS) == 0.15
         assert tui_app.ACTIVITY_COLOR_FADE_STEPS == 24
-        assert prompt.styles.border_top[1].hex.lower() == "#2d3748"
+        assert prompt_row.styles.border_top[1].hex.lower() == "#2d3748"
         assert indicator.render().plain == "⣾"
 
         app._tick_activity()
 
-        assert prompt.styles.border_top[1].hex.lower() == "#2d3748"
+        assert prompt_row.styles.border_top[1].hex.lower() == "#2d3748"
         assert indicator.render().plain == "⣽"
 
         app.adapter.apply(AgentEndEvent())
         app._refresh()
 
         assert not app.query("#status")
-        assert prompt.styles.border_top[1].hex.lower() == "#2d3748"
+        assert prompt_row.styles.border_top[1].hex.lower() == "#2d3748"
         assert indicator.render().plain == "τ"
+
+
+@pytest.mark.anyio
+async def test_terminal_title_and_notifications_queue_behind_textual_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Title and attention sequences go through Textual's driver while it runs.
+
+    Written straight to stdout, they could cut into one of the frame's escape
+    sequences mid-way and leave its tail as text on screen until a full
+    repaint."""
+    app = TauTuiApp(FakeSession())
+    assert app._terminal_title._writer == app._write_terminal_sequence
+    assert app._terminal_notification._writer == app._write_terminal_sequence
+
+    stdout = StringIO()
+    monkeypatch.setattr(sys, "__stdout__", stdout)
+    async with app.run_test():
+        driver_writes: list[str] = []
+        assert app._driver is not None
+        monkeypatch.setattr(app._driver, "write", driver_writes.append)
+        app._write_terminal_sequence("\x1b]0;title\x07")
+        assert driver_writes == ["\x1b]0;title\x07"]
+    assert stdout.getvalue() == ""
+
+
+@pytest.mark.anyio
+async def test_expired_toast_repaints_the_screen_once_it_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An expired toast's cells are repainted after the toast leaves the DOM.
+
+    Textual can drop the toast's old region from its dirty set when a lazy
+    compositor-map rebuild runs between the prune and the next layout pass,
+    leaving fragments of the toast's text on screen. The override this tests
+    uses Textual's private `App._unnotify` and `Toast._notification`, so it
+    also fails if a Textual upgrade renames them."""
+    app = TauTuiApp(FakeSession())
+    async with app.run_test(notifications=True) as pilot:
+        repaints: list[int] = []
+        screen = app.screen
+        refresh = screen.refresh
+
+        def record_refresh(*args: Any, **kwargs: Any) -> Any:
+            if not args and not kwargs:
+                repaints.append(len(screen.query("Toast")))
+            return refresh(*args, **kwargs)
+
+        monkeypatch.setattr(screen, "refresh", record_refresh)
+        app.notify("Short-lived notice", timeout=0.1)
+        await pilot.pause(0.05)
+        assert len(screen.query("Toast")) == 1
+        await pilot.pause(0.4)
+        assert len(screen.query("Toast")) == 0
+        assert repaints and repaints[-1] == 0
 
 
 @pytest.mark.anyio
@@ -6277,7 +6371,7 @@ async def test_tui_app_clears_activity_status_on_error() -> None:
     app = TauTuiApp(FakeSession())
 
     async with app.run_test():
-        prompt = app.query_one("#prompt")
+        prompt_row = app.query_one("#prompt-row")
         indicator = app.query_one("#prompt-prefix")
         app.adapter.apply(AgentStartEvent())
         app._refresh()
@@ -6290,10 +6384,10 @@ async def test_tui_app_clears_activity_status_on_error() -> None:
 
         assert not app.query("#status")
         assert not app.query("#activity-status")
-        assert prompt.styles.border_top == ("solid", Color.parse("#2d3748"))
-        assert prompt.styles.border_bottom == ("solid", Color.parse("#2d3748"))
-        assert prompt.styles.border_left[0] == ""
-        assert prompt.styles.border_right[0] == ""
+        assert prompt_row.styles.border_top == ("solid", Color.parse("#2d3748"))
+        assert prompt_row.styles.border_bottom == ("solid", Color.parse("#2d3748"))
+        assert prompt_row.styles.border_left[0] == ""
+        assert prompt_row.styles.border_right[0] == ""
         assert indicator.render().plain == "τ"
 
 
@@ -7702,9 +7796,9 @@ async def test_session_picker_navigates_projects_in_left_column() -> None:
         columns = screen.query_one("#session-picker-columns")
         project_column = screen.query_one("#session-picker-project-column")
         session_column = screen.query_one("#session-picker-session-column")
-        assert columns.styles.border.top[0] == "tall"
+        assert columns.styles.border.top[0] == "solid"
         assert project_column.styles.border.top[0] == ""
-        assert project_column.styles.border.right[0] == "tall"
+        assert project_column.styles.border.right[0] == "solid"
         assert session_column.styles.border.top[0] == ""
         assert [record.id for record in screen.visible_records] == ["local-1"]
         assert str(screen.query_one("#session-picker-session-title", Static).render()) == (
@@ -9332,6 +9426,28 @@ def test_visible_completion_state_accounts_for_wrapped_descriptions() -> None:
     assert _completion_selected_render_line(visible, width=48) < 7
 
 
+def test_completion_line_count_matches_rendered_lines_under_a_category() -> None:
+    items = tuple(
+        CompletionItem(
+            display=f"/command-{index}",
+            replacement=f"/command-{index}",
+            start=0,
+            end=1,
+            kind=CompletionKind.COMMAND,
+            description="A short description.",
+            category="Commands",
+        )
+        for index in range(5)
+    )
+    state = CompletionState(items=items, selected_index=0)
+    console = Console(file=StringIO(), width=60, color_system=None)
+    with console.capture() as capture:
+        console.print(render_completion_suggestions(state), end="")
+
+    # A category header is one line for the group, not one per item.
+    assert tui_app._completion_render_line_count(state, width=60) == len(capture.get().splitlines())
+
+
 def test_visible_completion_state_keeps_selected_item_above_bottom_edge() -> None:
     items = tuple(
         CompletionItem(
@@ -9373,8 +9489,7 @@ async def test_tui_app_scrolls_completion_selection_into_view() -> None:
         app._completion_state = app._build_completion_state(prompt.value)
         app._refresh_completions()
         await pilot.pause()
-        autocomplete = app.query_one("#autocomplete", Static)
-        visible_line_limit = app._completion_window_line_budget(autocomplete)
+        visible_line_limit = app._completion_line_budget()
         assert visible_line_limit < tui_app.COMPLETION_MAX_VISIBLE_LINES
         visible = tui_app._visible_completion_state(
             app._completion_state,
@@ -9399,7 +9514,7 @@ async def test_tui_app_scrolls_completion_selection_into_view() -> None:
 
 
 @pytest.mark.anyio
-async def test_tui_app_uses_terminal_space_for_initial_completion_window() -> None:
+async def test_tui_app_fits_completion_window_above_prompt_on_short_terminal() -> None:
     session = FakeSession()
     session.prompt_templates = tuple(
         PromptTemplate(
@@ -9416,14 +9531,13 @@ async def test_tui_app_uses_terminal_space_for_initial_completion_window() -> No
         prompt.focus()
         prompt.value = "/"
         await pilot.pause()
-        autocomplete = app.query_one("#autocomplete", Static)
 
-        initial_line_budget = app._completion_window_line_budget(autocomplete)
+        initial_line_budget = app._completion_line_budget()
         assert initial_line_budget < COMPLETION_MAX_VISIBLE_LINES
 
         app.action_completion_next()
         await pilot.pause()
-        assert app._completion_window_line_budget(autocomplete) == initial_line_budget
+        assert app._completion_line_budget() == initial_line_budget
 
 
 @pytest.mark.anyio
@@ -9447,14 +9561,65 @@ async def test_tui_app_keeps_completion_window_height_stable_after_edit(
         prompt.focus()
         prompt.value = "/"
         await pilot.pause()
-        autocomplete = app.query_one("#autocomplete", Static)
-        initial_line_budget = app._completion_window_line_budget(autocomplete)
+        initial_line_budget = app._completion_line_budget()
 
         await pilot.press(edit_key)
         await pilot.pause()
 
-        assert autocomplete.size.height < initial_line_budget
-        assert app._completion_window_line_budget(autocomplete) == initial_line_budget
+        assert app._completion_line_budget() == initial_line_budget
+
+
+@pytest.mark.anyio
+async def test_completion_list_floats_above_prompt_and_moves_nothing() -> None:
+    app = TauTuiApp(FakeSession())
+
+    def layout() -> dict[str, object]:
+        return {
+            selector: app.query_one(selector).region
+            for selector in ("#transcript", "#prompt-row", "#compact-session-info")
+        }
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.query_one("#prompt").focus()
+        await pilot.pause()
+        before = layout()
+
+        await pilot.press("/")
+        await pilot.pause()
+        await pilot.pause()
+
+        autocomplete = app.query_one("#autocomplete")
+        prompt_row = app.query_one("#prompt-row").region
+        assert autocomplete.display is True
+        assert layout() == before
+        assert autocomplete.region.bottom == prompt_row.y
+        assert autocomplete.region.x == prompt_row.x
+        assert autocomplete.region.width == prompt_row.width
+
+        await pilot.press("backspace")
+        await pilot.pause()
+
+        assert autocomplete.display is False
+        assert layout() == before
+
+
+@pytest.mark.anyio
+async def test_completion_list_follows_prompt_after_resize() -> None:
+    app = TauTuiApp(FakeSession())
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.query_one("#prompt").focus()
+        await pilot.press("/")
+        await pilot.pause()
+
+        await pilot.resize_terminal(90, 24)
+        await pilot.pause()
+        await pilot.pause()
+
+        autocomplete = app.query_one("#autocomplete")
+        prompt_row = app.query_one("#prompt-row").region
+        assert autocomplete.region.bottom == prompt_row.y
+        assert autocomplete.region.width == prompt_row.width
 
 
 @pytest.mark.anyio
@@ -9783,6 +9948,30 @@ async def test_tui_app_system_appends_markdown_command_output_to_transcript() ->
             0.08,
         )
         assert len(list(message.query(ThemedMarkdownWidget))) == 2
+
+
+@pytest.mark.anyio
+async def test_command_output_on_a_short_fresh_transcript_stays_in_the_window() -> None:
+    # Laying out a startup notice briefly anchors the view past its end and
+    # clamps it back. That must not read as the reader scrolling up, or the
+    # next item lands behind a "scroll for later" row that cannot scroll.
+    app = TauTuiApp(FakeSession(), startup_notices=("notice one",))
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        prompt = app.query_one("#prompt")
+        prompt.value = "/system"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        transcript = app.query_one("#transcript", TranscriptView)
+        assert len(app.state.items) == 2
+        assert (transcript._window_start, transcript._window_end) == (0, 2)
+        assert not [
+            boundary for boundary in app.query(TranscriptWindowBoundary) if boundary.display
+        ]
+        assert app.state.items[1].system_prompt is True
+        assert len(app.query(TranscriptMessageWidget)) == 2
 
 
 @pytest.mark.anyio
@@ -11548,8 +11737,7 @@ async def test_tui_app_toggles_thinking_tokens_from_keybinding_while_running() -
         return "\n".join(line.text for line in transcript.lines)
 
     def notice() -> str | None:
-        title = app.query_one("#prompt", PromptInput).border_title
-        return None if title is None else str(title)
+        return _thinking_notice(app) or None
 
     app._notify = fake_notify  # type: ignore[method-assign]
 
@@ -11559,7 +11747,7 @@ async def test_tui_app_toggles_thinking_tokens_from_keybinding_while_running() -
         app._refresh()
         await pilot.pause()
 
-        # While thinking is what is happening, the prompt border says so; the
+        # While thinking is what is happening, the row above the prompt says so; the
         # transcript gets no row for it.
         assert app.state.show_thinking is False
         assert notice() == HIDDEN_THINKING_NOTICE
@@ -11633,19 +11821,18 @@ async def test_tui_app_hidden_thinking_status_line_does_not_accumulate_across_tu
     async with app.run_test() as pilot:
         app.state.running = True
         transcript = app.query_one("#transcript", TranscriptView)
-        prompt = app.query_one("#prompt", PromptInput)
 
         for turn in ("one", "two"):
             app.state.add_thinking_delta(f"plan {turn}")
             app._refresh()
             await pilot.pause()
             # The notice shows while thinking is happening...
-            assert prompt.border_title == HIDDEN_THINKING_NOTICE
+            assert _thinking_notice(app) == HIDDEN_THINKING_NOTICE
             app.state.add_item("assistant", f"answer {turn}")
             app._refresh()
             await pilot.pause()
             # ...and once the answer is there it is gone again.
-            assert prompt.border_title is None
+            assert _thinking_notice(app) == ""
 
         assert [line.text for line in transcript.lines] == ["answer one", "answer two"]
 
@@ -11698,7 +11885,6 @@ async def test_hidden_thinking_notice_is_not_stranded_by_a_thinking_only_message
 
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
-        prompt = app.query_one("#prompt", PromptInput)
         await stream(AgentStartEvent())
         for index in range(3):
             # A message that ends on its thinking is still the newest output,
@@ -11706,7 +11892,7 @@ async def test_hidden_thinking_notice_is_not_stranded_by_a_thinking_only_message
             for event in _thinking_message_events(f"musing {index}"):
                 await stream(event)
             await pilot.pause()
-            assert prompt.border_title == HIDDEN_THINKING_NOTICE
+            assert _thinking_notice(app) == HIDDEN_THINKING_NOTICE
             call = ToolCall(
                 id=f"call-{index}",
                 name="bash",
@@ -11718,7 +11904,7 @@ async def test_hidden_thinking_notice_is_not_stranded_by_a_thinking_only_message
                 # Hidden thinking never takes a transcript row.
                 assert thinking_rows() == []
             # The tool call followed the thinking, so the notice is gone.
-            assert prompt.border_title is None
+            assert _thinking_notice(app) == ""
 
 
 @pytest.mark.anyio

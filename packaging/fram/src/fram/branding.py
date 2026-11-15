@@ -9,8 +9,9 @@ from __future__ import annotations
 BRANDING = {
     "product_name": "Fram",
     "command_name": "fram",
-    # A four-pointed star, read as a compass rose. One terminal cell wide,
-    # like Tau's τ.
-    "mark": "✦",
-    "logo": "✦ fram",
+    # A forward-pointing triangle: Fram means "forward". It reads as a prompt
+    # marker, so the input line is easy to find. One terminal cell wide, like
+    # Tau's τ.
+    "mark": "►",
+    "logo": "► fram",
 }

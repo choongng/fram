@@ -21,7 +21,7 @@ it lives, and what an upstream merge must check.
 ## 2. Fram's branding
 
 - **What:** the installed `fram` calls itself Fram in Tau's display text, with
-  `✦` as its prompt mark and `✦ fram` as its sidebar logo.
+  `►` as its prompt mark and `► fram` as its sidebar logo.
 - **Where:** `packaging/fram/src/fram/branding.py`, declared as the wheel's
   `tau_coding.branding` entry point.
 - **Touches Tau at:** the branding seam, `src/tau_coding/branding.py`, and the

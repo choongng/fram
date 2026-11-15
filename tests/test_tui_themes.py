@@ -1,3 +1,4 @@
+import re
 from collections.abc import Iterator
 from json import dumps
 from pathlib import Path
@@ -7,6 +8,7 @@ import pytest
 
 from tau_coding.resources import TauResourcePaths
 from tau_coding.tui.config import TuiSettings
+from tau_coding.tui.project_trust import ProjectTrustScreen
 from tau_coding.tui.themes import (
     BUILTIN_TUI_THEME_NAMES,
     TAU_DARK_THEME,
@@ -437,3 +439,30 @@ def test_tau_themes_show_the_terminal_background() -> None:
     assert TAU_DARK_THEME.terminal_background is True
     assert TAU_LIGHT_THEME.terminal_background is True
     assert get_tui_theme("high-contrast").terminal_background is False
+
+
+def _contrast_ratio(first: str, second: str) -> float:
+    """WCAG contrast ratio between two #rrggbb colors."""
+
+    def luminance(color: str) -> float:
+        channels = [int(color[index : index + 2], 16) / 255 for index in (1, 3, 5)]
+        linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+    lighter, darker = sorted((luminance(first), luminance(second)), reverse=True)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def test_dark_theme_borders_stand_out_from_its_background() -> None:
+    """Dialog, picker and autocomplete frames use the theme's `border` color.
+    A near-black border on the dark background, or on a dark terminal showing
+    through it, leaves those frames all but invisible."""
+    assert _contrast_ratio(TAU_DARK_THEME.border, TAU_DARK_THEME.screen_background) >= 2.0
+
+
+def test_project_trust_dialog_borders_match_the_dark_theme() -> None:
+    """The trust dialog runs before settings load, so it spells its colors out;
+    its frames should still match the dark theme's border."""
+    borders = re.findall(r"border: solid (#[0-9a-fA-F]{6})", ProjectTrustScreen.DEFAULT_CSS)
+    assert borders
+    assert set(borders) == {TAU_DARK_THEME.border}

@@ -12,8 +12,8 @@ turned it white. Themes can now leave the terminal's own background showing.
   flag is set, it returns `ansi_default`, Textual's name for the terminal's
   default color, for any color equal to `screen_background`.
   `theme_css_variables` passes every background variable through it, so the
-  screen, transcript, sidebar and chrome show the terminal while the prompt and
-  the user box, which have their own colors, stay tinted.
+  screen, transcript, sidebar and chrome show the terminal while the prompt,
+  which has its own color, stays tinted.
 - Parsing drops `on <screen_background>` from role bodies, so transcript rows do
   not repaint black over the terminal.
 - `tui/terminal_background.py`, a Textual line filter and a modal backdrop, both
