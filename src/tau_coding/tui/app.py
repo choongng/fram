@@ -24,6 +24,7 @@ from typing import Any, BinaryIO, ClassVar, Literal, Protocol, TypeVar, cast
 
 from rich.console import Console, Group
 from rich.style import Style
+from rich.terminal_theme import TerminalTheme
 from rich.text import Text
 from textual import constants as textual_constants
 from textual import events, on
@@ -185,6 +186,10 @@ from tau_coding.tui.state import (
     TuiState,
     assistant_block_is_visible,
     format_terminal_command_result_block,
+)
+from tau_coding.tui.terminal_background import (
+    install_modal_backdrop,
+    install_terminal_background_filter,
 )
 from tau_coding.tui.terminal_notification import TerminalNotificationController
 from tau_coding.tui.terminal_title import TerminalTitleController
@@ -4258,7 +4263,9 @@ class TauTuiApp(App[None]):
     }
 
     ProjectTrustScreen {
-        background: $tau-screen-background 60%;
+        /* Textual's background stays a real color; Tau's screen background
+           can be the terminal's default, which would tint as black. */
+        background: $background 60%;
     }
 
     #extension-select,
@@ -4684,6 +4691,8 @@ class TauTuiApp(App[None]):
         # reset with every app instance and never participates in tui.json.
         self._sidebar_visibility_override: bool | None = None
         super().__init__()
+        install_terminal_background_filter(self)
+        install_modal_backdrop()
         self._register_tau_textual_themes()
         # Assign the resolved theme's name: it is always registered, while the
         # raw settings value may name a custom theme that failed to load. The
@@ -4863,6 +4872,11 @@ class TauTuiApp(App[None]):
                 else "information"
             )
             self._notify(diagnostic.format(), severity=severity)
+
+    def _refresh_truecolor_filter(self, theme: TerminalTheme) -> None:
+        # Textual rebuilds its ANSI filter on a theme change; keep ours in place.
+        super()._refresh_truecolor_filter(theme)
+        install_terminal_background_filter(self)
 
     def _watch_theme(self, theme_name: str) -> None:
         """Keep Textual theme changes synchronized with Tau's durable TUI theme."""

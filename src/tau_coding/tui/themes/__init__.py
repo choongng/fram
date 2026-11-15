@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
-from functools import cache
+from functools import cache, partial
 from importlib.resources import files
 from json import JSONDecodeError, loads
 from pathlib import Path
@@ -74,6 +74,10 @@ class TuiTheme:
     completion_description: str
     syntax_theme: str
     role_styles: dict[str, TuiRoleStyle]
+    # Paint the terminal's own background wherever the theme uses
+    # `screen_background`; that color is then only the one assumed for blending
+    # and export. See `terminal_default_color`.
+    terminal_background: bool = False
 
 
 type TuiThemeName = str
@@ -81,7 +85,8 @@ type TuiThemeName = str
 THEME_COLOR_FIELDS: tuple[str, ...] = tuple(
     theme_field.name
     for theme_field in fields(TuiTheme)
-    if theme_field.name not in {"name", "dark", "syntax_theme", "role_styles"}
+    if theme_field.name
+    not in {"name", "dark", "syntax_theme", "role_styles", "terminal_background"}
 )
 
 # Single source of truth for transcript roles: the theme schema requires a
@@ -100,7 +105,19 @@ TranscriptRole = Literal[
 ]
 TRANSCRIPT_ROLES: tuple[str, ...] = get_args(TranscriptRole)
 
-_TOP_LEVEL_FIELDS = {"$schema", "name", "dark", "vars", "syntax_theme", "colors", "roles"}
+_TOP_LEVEL_FIELDS = {
+    "$schema",
+    "name",
+    "dark",
+    "terminal_background",
+    "vars",
+    "syntax_theme",
+    "colors",
+    "roles",
+}
+
+# Textual's name for the terminal's default color.
+TERMINAL_DEFAULT_COLOR = "ansi_default"
 
 # Fields that feed Textual CSS variables and must be a single color, unlike
 # the completion fields and role bodies, which are full Rich style strings.
@@ -169,6 +186,15 @@ def parse_tui_theme_json(data: object) -> TuiTheme:
     role_styles = _parse_roles(data.get("roles"), variables, problems)
     dark = _parse_dark(data.get("dark"), colors, problems)
     syntax_theme = _parse_syntax_theme(data.get("syntax_theme"), dark=dark, problems=problems)
+    terminal_background = data.get("terminal_background", False)
+    if not isinstance(terminal_background, bool):
+        problems.append("terminal_background must be a boolean")
+        terminal_background = False
+    if terminal_background and "screen_background" in colors:
+        role_styles = {
+            role: _without_background(style, colors["screen_background"])
+            for role, style in role_styles.items()
+        }
 
     if problems:
         label = f"theme {name!r}" if name else "theme"
@@ -178,8 +204,42 @@ def parse_tui_theme_json(data: object) -> TuiTheme:
         dark=dark,
         syntax_theme=syntax_theme,
         role_styles=role_styles,
+        terminal_background=terminal_background,
         **colors,
     )
+
+
+def _same_color(left: str, right: str) -> bool:
+    try:
+        return Color.parse(left) == Color.parse(right)
+    except ColorParseError:
+        return False
+
+
+def _without_background(style: TuiRoleStyle, background: str) -> TuiRoleStyle:
+    """Drop a role body's background when it is the screen's, so the terminal's shows.
+
+    Only the first `on <color>` is looked at, which is all a Rich style string
+    uses.
+    """
+    tokens = style.body.split()
+    for index, token in enumerate(tokens[:-1]):
+        if token.lower() == "on" and _same_color(tokens[index + 1], background):
+            body = " ".join(tokens[:index] + tokens[index + 2 :])
+            return TuiRoleStyle(border=style.border, body=body or "none")
+    return style
+
+
+def terminal_default_color(theme: TuiTheme, color: str) -> str:
+    """Return the color to paint for a theme background color.
+
+    A theme with `terminal_background` paints the terminal's own background
+    wherever it uses `screen_background`, so the TUI keeps the terminal's
+    color instead of covering it.
+    """
+    if theme.terminal_background and _same_color(color, theme.screen_background):
+        return TERMINAL_DEFAULT_COLOR
+    return color
 
 
 def _parse_name(value: object, problems: list[str]) -> str:
@@ -406,6 +466,8 @@ def get_tui_theme(name: TuiThemeName = "tau-dark") -> TuiTheme:
 def textual_theme_for_tui_theme(theme_name: TuiThemeName) -> Theme:
     """Map a Tau theme to Textual's native theme type."""
     theme = get_tui_theme(theme_name)
+    # Textual derives shades from these, so they stay real colors even when
+    # the theme paints the terminal's background (see `theme_css_variables`).
     return Theme(
         name=theme.name,
         primary=theme.accent,
@@ -425,37 +487,38 @@ def textual_theme_for_tui_theme(theme_name: TuiThemeName) -> Theme:
 
 def theme_css_variables(theme: TuiTheme) -> dict[str, str]:
     """Return Textual CSS variables for a resolved Tau theme."""
+    paint = partial(terminal_default_color, theme)
     return {
-        "tau-screen-background": theme.screen_background,
+        "tau-screen-background": paint(theme.screen_background),
         "tau-screen-text": theme.screen_text,
-        "tau-chrome-background": theme.chrome_background,
+        "tau-chrome-background": paint(theme.chrome_background),
         "tau-chrome-text": theme.chrome_text,
         "tau-muted-text": theme.muted_text,
-        "tau-sidebar-background": theme.sidebar_background,
+        "tau-sidebar-background": paint(theme.sidebar_background),
         "tau-border": theme.border,
-        "tau-transcript-background": theme.transcript_background,
-        "tau-prompt-background": theme.prompt_background,
+        "tau-transcript-background": paint(theme.transcript_background),
+        "tau-prompt-background": paint(theme.prompt_background),
         "tau-prompt-text": theme.prompt_text,
         "tau-prompt-border": theme.prompt_border,
-        "tau-autocomplete-background": theme.autocomplete_background,
+        "tau-autocomplete-background": paint(theme.autocomplete_background),
         "tau-accent": theme.accent,
         "tau-tool-running": theme.role_styles["tool"].border,
-        "tau-highlight-background": theme.highlight_background,
+        "tau-highlight-background": paint(theme.highlight_background),
         "tau-highlight-text": theme.highlight_text,
         "tau-markdown-highlight": theme.markdown_heading,
         "tau-markdown-table-header": theme.markdown_table_header,
         "tau-markdown-table-border": theme.markdown_table_border,
         "tau-markdown-inline-code": theme.markdown_inline_code,
-        "tau-markdown-code-block-background": theme.markdown_code_block_background,
+        "tau-markdown-code-block-background": paint(theme.markdown_code_block_background),
         "tau-markdown-link": theme.markdown_link,
         "tau-markdown-bullet": theme.markdown_bullet,
-        "footer-background": theme.chrome_background,
+        "footer-background": paint(theme.chrome_background),
         "footer-foreground": theme.chrome_text,
-        "footer-description-background": theme.chrome_background,
+        "footer-description-background": paint(theme.chrome_background),
         "footer-description-foreground": theme.chrome_text,
-        "footer-key-background": theme.chrome_background,
+        "footer-key-background": paint(theme.chrome_background),
         "footer-key-foreground": theme.accent,
-        "footer-item-background": theme.chrome_background,
+        "footer-item-background": paint(theme.chrome_background),
     }
 
 

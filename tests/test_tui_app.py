@@ -166,6 +166,7 @@ from tau_coding.tui.local_backends import LocalBackendScreen, LocalConfirmScreen
 from tau_coding.tui.state import ChatItem, TuiState
 from tau_coding.tui.terminal_notification import TerminalNotificationController
 from tau_coding.tui.terminal_title import TerminalTitleController
+from tau_coding.tui.themes import terminal_default_color
 from tau_coding.tui.widgets import (
     TRANSCRIPT_WINDOW_ITEMS,
     TRANSCRIPT_WINDOW_OVERSCAN_ITEMS,
@@ -2553,8 +2554,8 @@ def test_pending_tool_invocation_colors_tool_name_but_not_arguments() -> None:
 
     output = console.export_text(styles=True)
 
-    accent = "38;2;138;122;82;48;2;0;0;0m"
-    body = "38;2;203;213;225;48;2;0;0;0m"
+    accent = "38;2;138;122;82m"
+    body = "38;2;203;213;225m"
     assert f"{accent}read" in output
     assert f"{body} README.md" in output
     assert f"{accent} README.md" not in output
@@ -2584,21 +2585,21 @@ def test_tool_chat_items_color_description_not_details_or_results() -> None:
     white = "38;2;203;213;225"
 
     assert green in success_output
-    assert f"{green};48;2;0;0;0mread" in success_output
-    assert f"{white};48;2;0;0;0m README.md" in success_output
-    assert f"{green};48;2;0;0;0m README.md" not in success_output
-    assert f"{green};48;2;0;0;0m✓ read" not in success_output
-    assert f"{green};48;2;0;0;0mcontents" not in success_output
+    assert f"{green}mread" in success_output
+    assert f"{white}m README.md" in success_output
+    assert f"{green}m README.md" not in success_output
+    assert f"{green}m✓ read" not in success_output
+    assert f"{green}mcontents" not in success_output
 
     assert red in error_output
-    assert f"{white};48;2;0;0;0m✗ bash" in error_output
-    assert f"{red};48;2;0;0;0m✗ bash" not in error_output
-    assert f"{red};48;2;0;0;0mfailed" not in error_output
+    assert f"{white}m✗ bash" in error_output
+    assert f"{red}m✗ bash" not in error_output
+    assert f"{red}mfailed" not in error_output
 
 
 def test_grouped_read_details_stay_neutral() -> None:
-    green = "38;2;156;255;177;48;2;0;0;0m"
-    body = "38;2;203;213;225;48;2;0;0;0m"
+    green = "38;2;156;255;177m"
+    body = "38;2;203;213;225m"
     text = "→ Read 5 files\n  - a.py\n  - b.py\n  - c.py\n  - d.py\n  - e.py"
     console = Console(record=True, width=100, color_system="truecolor")
     item = ChatItem(role="tool", text=text, tool_result_text="✓ tool")
@@ -2619,8 +2620,8 @@ def test_grouped_read_details_stay_neutral() -> None:
 
 
 def test_grouped_write_paths_stay_neutral() -> None:
-    green = "38;2;156;255;177;48;2;0;0;0m"
-    body = "38;2;203;213;225;48;2;0;0;0m"
+    green = "38;2;156;255;177m"
+    body = "38;2;203;213;225m"
     text = "→ Written 2 files\n  - a.py\n  - b.py"
     console = Console(record=True, width=100, color_system="truecolor")
     item = ChatItem(role="tool", text=text, tool_name="write", tool_result_text="✓ write group")
@@ -2659,7 +2660,7 @@ def test_bash_description_without_command_keeps_full_status_color() -> None:
     )
 
     output = console.export_text(styles=True)
-    assert "38;2;156;255;177;48;2;0;0;0mRunning long command" in output
+    assert "38;2;156;255;177mRunning long command" in output
     assert command not in console.export_text()
 
 
@@ -2700,9 +2701,9 @@ def test_tool_batch_colors_each_description_by_its_own_status() -> None:
     )
     output = console.export_text(styles=True)
 
-    assert "38;2;156;255;177;48;2;0;0;0mFinished action" in output
-    assert "38;2;255;79;79;48;2;0;0;0mFailed action" in output
-    assert "38;2;138;122;82;48;2;0;0;0mRunning action" in output
+    assert "38;2;156;255;177mFinished action" in output
+    assert "38;2;255;79;79mFailed action" in output
+    assert "38;2;138;122;82mRunning action" in output
     assert "$ false" not in console.export_text()
 
 
@@ -2726,7 +2727,7 @@ def test_partially_completed_read_group_keeps_running_color() -> None:
 
     output = console.export_text(styles=True)
     running_color = _style_color_escape(TAU_DARK_THEME.role_styles["tool"].border)
-    assert f"{running_color};48;2;0;0;0mReading 2 files" in output
+    assert f"{running_color}mReading 2 files" in output
 
 
 def test_tool_batch_body_stays_one_selectable_text_renderable() -> None:
@@ -5693,12 +5694,57 @@ def test_tui_app_falls_back_to_tau_dark_when_theme_is_missing(
     assert not tui_settings_path().exists()
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("theme", ["tau-dark", "tau-light"])
+async def test_tui_app_modal_backdrop_keeps_the_terminal_background(theme: str) -> None:
+    from rich.color import Color as RichColor
+
+    app = TauTuiApp(FakeSession(), tui_settings=TuiSettings(theme=theme))
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app.action_command_palette()
+        await pilot.pause()
+
+        # The top row is backdrop, outside the palette's own panel.
+        segments = list(app.screen._compositor.render_strips()[0])
+        for line_filter in app.get_line_filters():
+            segments = line_filter.apply(segments, Color.parse("ansi_default"))
+        backgrounds = {segment.style.bgcolor for segment in segments if segment.style}
+        assert backgrounds == {RichColor.parse("default")}
+
+
+@pytest.mark.anyio
+async def test_tui_app_leaves_the_terminal_background_showing() -> None:
+    from rich.color import Color as RichColor
+
+    from tau_coding.tui.terminal_background import KeepTerminalBackground
+
+    app = TauTuiApp(FakeSession())
+
+    async with app.run_test(size=(80, 20)) as pilot:
+        app.theme = "tau-light"
+        await pilot.pause()
+        app.theme = "tau-dark"
+        await pilot.pause()
+
+        assert [type(item) for item in app._filters] == [KeepTerminalBackground]
+        transcript = app.query_one("#transcript", TranscriptView)
+        strip = app.screen._compositor.render_strips()[transcript.region.y]
+        segments = list(strip)
+        for line_filter in app.get_line_filters():
+            segments = line_filter.apply(segments, Color.parse("ansi_default"))
+        backgrounds = {segment.style.bgcolor for segment in segments if segment.style}
+        assert backgrounds == {RichColor.parse("default")}
+
+
 def test_tui_app_uses_light_theme_css_variables() -> None:
     app = TauTuiApp(FakeSession(), tui_settings=TuiSettings(theme="tau-light"))
 
     variables = app.get_theme_variable_defaults()
 
-    assert variables["tau-screen-background"] == "#ffffff"
+    # tau-light shows the terminal's own background instead of white.
+    assert variables["tau-screen-background"] == "ansi_default"
     assert variables["tau-chrome-background"] == "#f3f4f6"
     assert variables["tau-muted-text"] == "#475569"
     assert variables["tau-prompt-background"] == "#f8fafc"
@@ -5726,16 +5772,15 @@ async def test_list_view_scrollbars_use_theme_colors(theme: TuiTheme) -> None:
         await pilot.pause()
 
         list_view = app.screen.query_one("#session-picker-list", OptionList)
+        transcript_background = Color.parse(
+            terminal_default_color(theme, theme.transcript_background)
+        )
 
-        assert list_view.styles.scrollbar_background == Color.parse(theme.transcript_background)
+        assert list_view.styles.scrollbar_background == transcript_background
         assert list_view.styles.scrollbar_color == Color.parse(theme.border)
-        assert list_view.styles.scrollbar_background_hover == Color.parse(
-            theme.transcript_background
-        )
+        assert list_view.styles.scrollbar_background_hover == transcript_background
         assert list_view.styles.scrollbar_color_hover == Color.parse(theme.highlight_background)
-        assert list_view.styles.scrollbar_background_active == Color.parse(
-            theme.transcript_background
-        )
+        assert list_view.styles.scrollbar_background_active == transcript_background
         assert list_view.styles.scrollbar_color_active == Color.parse(theme.accent)
         assert list_view.styles.scrollbar_size_vertical == 2
 
@@ -5752,7 +5797,8 @@ def test_textual_theme_mapping_uses_tau_theme_values() -> None:
     assert textual_theme.name == "tau-light"
     assert textual_theme.primary == TAU_LIGHT_THEME.accent
     assert textual_theme.dark is False
-    assert textual_theme.variables["tau-screen-background"] == TAU_LIGHT_THEME.screen_background
+    assert textual_theme.variables["tau-screen-background"] == "ansi_default"
+    assert textual_theme.background == TAU_LIGHT_THEME.screen_background
 
 
 def test_tau_dark_theme_uses_aqua_as_its_shared_accent() -> None:
@@ -5766,7 +5812,8 @@ def test_tau_dark_theme_uses_aqua_as_its_shared_accent() -> None:
     assert theme.transcript_background == "#000000"
     assert theme.prompt_background == "#101419"
     assert theme.role_styles["user"].body.endswith(f"on {theme.prompt_background}")
-    assert theme.role_styles["assistant"].body.endswith("on #000000")
+    assert theme.terminal_background is True
+    assert theme.role_styles["assistant"].body == "#d8dee9"
 
 
 @pytest.mark.parametrize(
@@ -6389,7 +6436,7 @@ async def test_tui_app_theme_command_opens_picker_and_persists_selection(
         assert app.tui_settings.theme == "tau-light"
         assert app.theme == "tau-light"
         assert tui_settings_path().read_text(encoding="utf-8").find('"theme": "tau-light"') != -1
-        assert app.get_theme_variable_defaults()["tau-screen-background"] == "#ffffff"
+        assert app.get_theme_variable_defaults()["tau-screen-background"] == "ansi_default"
 
 
 @pytest.mark.parametrize(
@@ -6896,7 +6943,7 @@ async def test_tui_app_theme_command_argument_updates_theme_and_persists(
         assert app.tui_settings.theme == "tau-light"
         assert app.theme == "tau-light"
         assert tui_settings_path().read_text(encoding="utf-8").find('"theme": "tau-light"') != -1
-        assert app.get_theme_variable_defaults()["tau-screen-background"] == "#ffffff"
+        assert app.get_theme_variable_defaults()["tau-screen-background"] == "ansi_default"
 
 
 @pytest.mark.anyio
