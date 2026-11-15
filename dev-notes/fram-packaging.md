@@ -155,6 +155,13 @@ there.
 **Versioning.** Syncing tau-subagents does not need its own Fram release; it
 goes out with the next one.
 
+**Its tests.** `fram-ci.yml` runs `vendor/tau-subagents/tests` against Fram's
+Tau through `scripts/test_vendored_subagents.py`, so a change to Fram's Tau that
+breaks the extension fails CI. The suite also passes on tau-ai 0.3.5, which
+tau-subagents locks, and on upstream 0.4. Where the versions differ, its tests
+accept each one; the one behavior 0.4 dropped, `skills: true` pinning discovery
+under worktree isolation, is a strict expected failure there.
+
 ## Publishing to PyPI
 
 `fram-agent` is published to PyPI by `.github/workflows/fram-publish.yml`,
