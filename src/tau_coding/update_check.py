@@ -115,14 +115,19 @@ def startup_update_notice(
     cache_path: Path | None = None,
     now: Clock | None = None,
     env: Mapping[str, str] | None = None,
+    direct_url: str | None = None,
 ) -> UpdateNotice | None:
     """Return an update notice when PyPI has a newer stable Tau release.
+
+    Direct installs (``direct_url`` set, i.e. the distribution came from a local
+    or editable source) get no notice: ``tau update`` refuses to change them, so
+    there is no action the notice could ask for.
 
     This function is intentionally best-effort: cache, network, JSON, and version
     parsing failures all become quiet no-ops so startup can continue.
     """
     environment = environ if env is None else env
-    if _update_check_disabled(environment):
+    if _update_check_disabled(environment) or direct_url is not None:
         return None
 
     current_time = (now or _utc_now)()
@@ -148,15 +153,17 @@ def cached_update_notice(
     cache_path: Path | None = None,
     now: Clock | None = None,
     env: Mapping[str, str] | None = None,
+    direct_url: str | None = None,
 ) -> tuple[UpdateNotice | None, bool]:
     """Return the cached update notice and whether a PyPI check is due.
 
     This never contacts PyPI, so an interactive frontend can show a cached
     notice immediately and run a due check in the background instead of
-    delaying startup by up to the request timeout.
+    delaying startup by up to the request timeout. A direct install
+    (``direct_url`` set) gets neither, as in :func:`startup_update_notice`.
     """
     environment = environ if env is None else env
-    if _update_check_disabled(environment):
+    if _update_check_disabled(environment) or direct_url is not None:
         return None, False
     cached_result = _cached_update_check_result(cache_path, (now or _utc_now)())
     if cached_result is None:

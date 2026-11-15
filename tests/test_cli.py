@@ -365,6 +365,40 @@ def test_version_command_does_not_check_for_updates(monkeypatch: pytest.MonkeyPa
     assert result.stdout.strip() == "tau 1.2.3"
 
 
+def test_startup_notice_passes_detected_direct_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "_current_version", lambda: "0.1.0")
+    monkeypatch.setattr(cli, "installed_direct_url", lambda: "file:///home/dev/tau")
+    seen: dict[str, object] = {}
+
+    def fake_startup_update_notice(version: str, **kwargs: object) -> None:
+        seen["version"] = version
+        seen.update(kwargs)
+        return None
+
+    monkeypatch.setattr(cli, "startup_update_notice", fake_startup_update_notice)
+
+    assert cli._startup_update_notice() is None
+    assert seen == {"version": "0.1.0", "direct_url": "file:///home/dev/tau"}
+
+
+def test_cached_startup_notices_pass_detected_direct_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "_current_version", lambda: "0.1.0")
+    monkeypatch.setattr(cli, "installed_direct_url", lambda: "file:///home/dev/tau")
+    seen: list[dict[str, object]] = []
+
+    def fake_cached_update_notice(version: str, **kwargs: object) -> tuple[None, bool]:
+        seen.append(kwargs)
+        return None, False
+
+    monkeypatch.setattr(cli, "cached_update_notice", fake_cached_update_notice)
+
+    assert cli._cached_startup_update_notice() is None
+    assert cli._deferred_startup_update_notice() is None
+    assert seen == [{"direct_url": "file:///home/dev/tau"}] * 2
+
+
 def test_update_command_upgrades_without_startup_check(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         cli,
@@ -564,7 +598,7 @@ def test_tui_startup_does_not_wait_for_pypi_update_check(
     monkeypatch.setattr(
         cli,
         "cached_update_notice",
-        lambda version: (UpdateNotice(current_version=version, latest_version="9.9.9"), False),
+        lambda version, **_: (UpdateNotice(current_version=version, latest_version="9.9.9"), False),
     )
     monkeypatch.setattr(cli, "run_openai_tui", fake_run_openai_tui)
 
@@ -587,7 +621,7 @@ async def test_run_openai_tui_defers_due_update_check_to_the_app(
     monkeypatch.setattr(cli, "run_tui_app", fake_run_tui_app)
     monkeypatch.setattr(cli, "startup_release_notes_notice", lambda version: None)
     monkeypatch.setattr(cli, "_current_version", lambda: "0.1.0")
-    monkeypatch.setattr(cli, "cached_update_notice", lambda version: (None, True))
+    monkeypatch.setattr(cli, "cached_update_notice", lambda version, **_: (None, True))
     monkeypatch.setattr(
         cli,
         "_startup_update_notice",

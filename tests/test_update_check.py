@@ -195,6 +195,51 @@ def test_startup_update_notice_skips_ci(tmp_path) -> None:
     assert notice is None
 
 
+def test_startup_update_notice_silent_for_direct_install(tmp_path) -> None:
+    notice = startup_update_notice(
+        "0.1.0",
+        fetcher=lambda _url, _timeout: (_ for _ in ()).throw(AssertionError("no fetch")),
+        cache_path=tmp_path / "update-check.json",
+        env={},
+        direct_url="file:///home/dev/tau",
+    )
+
+    assert notice is None
+
+
+def test_cached_update_notice_silent_for_direct_install(tmp_path) -> None:
+    cache_path = tmp_path / "update-check.json"
+    cache_path.write_text(
+        '{"checked_at":"2026-01-01T00:00:00+00:00","latest_version":"0.2.0"}\n',
+        encoding="utf-8",
+    )
+    now = datetime(2026, 1, 1, 12, tzinfo=UTC)
+
+    assert (
+        cached_update_notice("0.1.0", cache_path=cache_path, now=lambda: now, env={})[0] is not None
+    )
+    assert cached_update_notice(
+        "0.1.0",
+        cache_path=cache_path,
+        now=lambda: now,
+        env={},
+        direct_url="file:///home/dev/tau",
+    ) == (None, False)
+
+
+def test_startup_update_notice_reports_for_registry_install(tmp_path) -> None:
+    notice = startup_update_notice(
+        "0.1.0",
+        fetcher=lambda _url, _timeout: {"releases": {"0.2.0": [{}]}},
+        cache_path=tmp_path / "update-check.json",
+        env={},
+        direct_url=None,
+    )
+
+    assert notice is not None
+    assert notice.latest_version == "0.2.0"
+
+
 def test_load_release_notes_reads_shared_json(tmp_path) -> None:
     notes_path = tmp_path / "releases.json"
     notes_path.write_text(

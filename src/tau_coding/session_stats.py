@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from tau_agent.messages import AssistantMessage, CustomMessage, UserMessage
 from tau_agent.session import BranchSummaryEntry, CompactionEntry, MessageEntry, ModelChangeEntry
 from tau_agent.session.entries import CustomMessageEntry, SessionEntry
+from tau_ai.model_profile import prompt_tokens as request_prompt_tokens
 
 PricingResolver = Callable[[str, str, int], Mapping[str, float] | None]
 _TOKENS_PER_MILLION = 1_000_000
@@ -125,7 +126,7 @@ def calculate_session_stats(
         else:
             continue
 
-        prompt_tokens = usage.input + usage.cache_read + usage.cache_write
+        prompt_tokens = request_prompt_tokens(usage)
         latest_prompt_tokens = prompt_tokens
         latest_cached_input_tokens = usage.cache_read
         input_tokens += prompt_tokens

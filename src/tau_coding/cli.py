@@ -86,7 +86,7 @@ from tau_coding.update_check import (
     startup_release_notes_notice,
     startup_update_notice,
 )
-from tau_coding.updater import update_tau
+from tau_coding.updater import installed_direct_url, update_tau
 from tau_coding.version import current_version as _current_version
 
 
@@ -808,18 +808,18 @@ async def run_openai_tui(
 
 
 def _startup_update_notice() -> UpdateNotice | None:
-    return startup_update_notice(_current_version())
+    return startup_update_notice(_current_version(), direct_url=installed_direct_url())
 
 
 def _cached_startup_update_notice() -> UpdateNotice | None:
     """Return a cached update notice without contacting PyPI."""
-    notice, _check_due = cached_update_notice(_current_version())
+    notice, _check_due = cached_update_notice(_current_version(), direct_url=installed_direct_url())
     return notice
 
 
 def _deferred_startup_update_notice() -> Callable[[], str | None] | None:
     """Return a blocking PyPI check for the TUI to run when the cache is stale."""
-    _notice, check_due = cached_update_notice(_current_version())
+    _notice, check_due = cached_update_notice(_current_version(), direct_url=installed_direct_url())
     if not check_due:
         return None
 

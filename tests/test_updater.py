@@ -461,3 +461,15 @@ def test_update_tau_refuses_unknown_installer(tmp_path: Path) -> None:
 
     assert result.succeeded is False
     assert "Package metadata reports: custom-manager" in result.failures[0]
+
+
+def test_installed_direct_url_is_none_when_the_record_cannot_be_decoded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Undecodable:
+        def read_text(self, filename: str) -> str:
+            raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(updater, "distribution", lambda _name: Undecodable())
+
+    assert updater.installed_direct_url() is None
