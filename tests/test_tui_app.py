@@ -11,7 +11,7 @@ from datetime import datetime
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 import pytest
 from rich.console import Console
@@ -6033,6 +6033,37 @@ async def test_terminal_title_and_notifications_queue_behind_textual_frames(
         app._write_terminal_sequence("\x1b]0;title\x07")
         assert driver_writes == ["\x1b]0;title\x07"]
     assert stdout.getvalue() == ""
+
+
+@pytest.mark.anyio
+async def test_expired_toast_repaints_the_screen_once_it_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An expired toast's cells are repainted after the toast leaves the DOM.
+
+    Textual can drop the toast's old region from its dirty set when a lazy
+    compositor-map rebuild runs between the prune and the next layout pass,
+    leaving fragments of the toast's text on screen. The override this tests
+    uses Textual's private `App._unnotify` and `Toast._notification`, so it
+    also fails if a Textual upgrade renames them."""
+    app = TauTuiApp(FakeSession())
+    async with app.run_test(notifications=True) as pilot:
+        repaints: list[int] = []
+        screen = app.screen
+        refresh = screen.refresh
+
+        def record_refresh(*args: Any, **kwargs: Any) -> Any:
+            if not args and not kwargs:
+                repaints.append(len(screen.query("Toast")))
+            return refresh(*args, **kwargs)
+
+        monkeypatch.setattr(screen, "refresh", record_refresh)
+        app.notify("Short-lived notice", timeout=0.1)
+        await pilot.pause(0.05)
+        assert len(screen.query("Toast")) == 1
+        await pilot.pause(0.4)
+        assert len(screen.query("Toast")) == 0
+        assert repaints and repaints[-1] == 0
 
 
 @pytest.mark.anyio

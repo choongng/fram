@@ -34,6 +34,7 @@ from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.events import Key, Resize
 from textual.geometry import Region
+from textual.notifications import Notification
 from textual.screen import ModalScreen, Screen
 from textual.strip import Strip
 from textual.timer import Timer
@@ -218,6 +219,7 @@ type BindingEntry = Binding | tuple[str, str] | tuple[str, str, str]
 SIDEBAR_MIN_WIDTH = 96
 SIDEBAR_MIN_HEIGHT = 38
 ACTIVITY_TICK_SECONDS = 0.15
+TOAST_REMOVAL_POLL_SECONDS = 0.05
 # Shown in the row above the prompt while the model thinks with thinking hidden.
 # The row is always there, so the notice coming and going moves nothing.
 HIDDEN_THINKING_NOTICE = "Thinking… Press Ctrl+T to show thinking tokens."
@@ -7936,6 +7938,34 @@ class TauTuiApp(App[None]):
             name=f"notification-dedupe-{hash(key)}",
         )
         self.notify(message, severity=severity, markup=False)
+
+    def _unnotify(self, notification: Notification, refresh: bool = True) -> None:
+        """Forget a notification, then repaint the screen once its toast is gone.
+
+        An expiring toast prunes itself from the DOM asynchronously. When a
+        widget's region is looked up before the next layout pass, Textual
+        rebuilds its compositor map lazily without the toast, and that pass
+        then never marks the toast's old cells dirty. The text stays on the
+        terminal until something else repaints those rows.
+
+        `_unnotify` and `Toast._notification` are private to Textual;
+        `test_expired_toast_repaints_the_screen_once_it_is_removed` fails if
+        an upgrade renames them.
+        """
+        super()._unnotify(notification, refresh=refresh)
+        self._repaint_after_toast_removed(notification)
+
+    def _repaint_after_toast_removed(self, notification: Notification) -> None:
+        screen = self.screen
+        if any(
+            getattr(toast, "_notification", None) is notification for toast in screen.query("Toast")
+        ):
+            self.set_timer(
+                TOAST_REMOVAL_POLL_SECONDS,
+                lambda: self._repaint_after_toast_removed(notification),
+            )
+            return
+        screen.refresh()
 
     def _refresh(self) -> None:
         theme = self.tui_settings.resolved_theme
