@@ -4029,7 +4029,7 @@ class TauTuiApp(App[None]):
         height: 1fr;
         background: $tau-prompt-background;
         color: $tau-prompt-text;
-        border: tall $tau-prompt-border;
+        border: solid $tau-prompt-border;
     }
 
     #above-prompt-slot {
