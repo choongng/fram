@@ -212,6 +212,9 @@ type BindingEntry = Binding | tuple[str, str] | tuple[str, str, str]
 SIDEBAR_MIN_WIDTH = 96
 SIDEBAR_MIN_HEIGHT = 38
 ACTIVITY_TICK_SECONDS = 0.15
+# Shown in the prompt's top border while the model thinks with thinking hidden.
+# The border is always drawn, so the notice coming and going moves nothing.
+HIDDEN_THINKING_NOTICE = "Thinking… Press Ctrl+T to show thinking tokens."
 ACTIVITY_COLOR_FADE_STEPS = 24
 ACTIVITY_SPINNER_FRAMES = ("⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷")
 ACTIVITY_SPINNER_MAX_FADE = 0.55
@@ -6484,6 +6487,8 @@ class TauTuiApp(App[None]):
                     theme=theme,
                     show_thinking=self.state.show_thinking,
                 )
+            # Thinking starting or giving way to text changes the notice.
+            self._apply_activity_indicator()
             return
         if isinstance(event, MessageEndEvent):
             if isinstance(event.message, (UserMessage, CustomMessage)):
@@ -7104,6 +7109,7 @@ class TauTuiApp(App[None]):
             self.state,
             theme=self.tui_settings.resolved_theme,
         )
+        self._apply_activity_indicator()
 
     def _handle_session_picker_result(self, session_id: str | None) -> None:
         if session_id is None:
@@ -7943,6 +7949,17 @@ class TauTuiApp(App[None]):
             self._activity_timer.pause()
         self._apply_activity_indicator()
 
+    def _hidden_thinking_in_progress(self) -> bool:
+        """Return whether the model is thinking now while thinking is hidden.
+
+        Only thinking that is still the newest output counts: once an answer
+        streams or a tool call follows, the notice goes.
+        """
+        state = self.state
+        if not state.running or state.show_thinking or state.assistant_buffer:
+            return False
+        return bool(state.items) and state.items[-1].role == "thinking"
+
     def _tick_activity(self) -> None:
         if not self._is_working():
             return
@@ -7989,14 +8006,17 @@ class TauTuiApp(App[None]):
         except NoMatches:
             return
         shell_mode = _is_terminal_command_prompt(prompt.text)
+        thinking_notice = self._hidden_thinking_in_progress()
         render_key = (
             theme.name,
             theme.accent,
+            theme.muted_text,
             theme.screen_background,
             theme.prompt_border,
             self._activity_frame,
             self._is_working(),
             shell_mode,
+            thinking_notice,
         )
         if render_key == self._last_activity_indicator_key:
             return
@@ -8009,6 +8029,8 @@ class TauTuiApp(App[None]):
         )
         prompt.styles.border_top = ("solid", border_color)
         prompt.styles.border_bottom = ("solid", border_color)
+        prompt.styles.border_title_color = theme.muted_text
+        prompt.border_title = HIDDEN_THINKING_NOTICE if thinking_notice else None
         prompt_prefix.update(
             _render_activity_indicator(
                 theme,

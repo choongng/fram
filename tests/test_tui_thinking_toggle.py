@@ -27,7 +27,7 @@ from tau_agent import (
     UserMessage,
 )
 from tau_agent.provider_events import TextDeltaEvent, ThinkingDeltaEvent, ThinkingEndEvent
-from tau_coding.tui.app import TauTuiApp
+from tau_coding.tui.app import HIDDEN_THINKING_NOTICE, PromptInput, TauTuiApp
 from tau_coding.tui.widgets import (
     StreamingTranscriptMessageWidget,
     TranscriptMessageWidget,
@@ -35,7 +35,6 @@ from tau_coding.tui.widgets import (
 )
 from test_tui_app import FakeSession
 
-HIDDEN_LINE = "Thinking… Press Ctrl+T to show thinking tokens."
 TURNS = 3
 # Positions in `_turn_events(..., with_tool=False)`.
 AFTER_FIRST_THINKING_DELTA = 4
@@ -157,11 +156,7 @@ def _rows(app: TauTuiApp) -> list[TranscriptMessageWidget | StreamingTranscriptM
 
 def _visible_thinking(app: TauTuiApp) -> list[str]:
     """The text of every thinking block on screen, in transcript order."""
-    return [
-        row.selection_text.strip()
-        for row in _rows(app)
-        if row.item.role == "thinking" and row.selection_text.strip() != HIDDEN_LINE
-    ]
+    return [row.selection_text.strip() for row in _rows(app) if row.item.role == "thinking"]
 
 
 def _rendered_thinking(app: TauTuiApp) -> list[list[str]]:
@@ -173,10 +168,13 @@ def _rendered_thinking(app: TauTuiApp) -> list[list[str]]:
     ]
 
 
-def _hidden_line_positions(app: TauTuiApp) -> list[int]:
-    return [
-        index for index, row in enumerate(_rows(app)) if row.selection_text.strip() == HIDDEN_LINE
-    ]
+def _notice_shown(app: TauTuiApp) -> bool:
+    """Whether the prompt border says hidden thinking is happening."""
+    title = app.query_one("#prompt", PromptInput).border_title
+    shown = title is not None and str(title) == HIDDEN_THINKING_NOTICE
+    # The notice never takes a transcript row.
+    assert all(row.selection_text.strip() != HIDDEN_THINKING_NOTICE for row in _rows(app))
+    return shown
 
 
 def _streamer(app: TauTuiApp):
@@ -216,7 +214,7 @@ async def test_thinking_toggle_all_after_streaming(with_tool: bool, start_shown:
         for _ in range(3):
             await _toggle(pilot)
             assert _visible_thinking(app) == (every_plan if app.state.show_thinking else [])
-            assert _hidden_line_positions(app) == []
+            assert not _notice_shown(app)
 
 
 @pytest.mark.anyio
@@ -282,18 +280,18 @@ async def test_hiding_thinking_while_the_answer_streams_shows_no_status_line() -
 
         await _toggle(pilot)
         await _toggle(pilot)
-        assert _hidden_line_positions(app) == []
+        assert not _notice_shown(app)
 
         # The full redraw a window shift runs takes the same decision.
         app.query_one("#transcript", TranscriptView)._redraw(scroll_end=False, preserve_window=True)
         await pilot.pause()
-        assert _hidden_line_positions(app) == []
+        assert not _notice_shown(app)
 
 
 @pytest.mark.anyio
 async def test_thinking_toggle_all_status_line_only_for_the_open_block() -> None:
-    """Hidden, only the open block shows the status line; earlier hidden
-    blocks show nothing."""
+    """Hidden, only the open block brings up the prompt-border notice;
+    earlier hidden blocks show nothing."""
     app = TauTuiApp(FakeSession())
     stream = _streamer(app)
 
@@ -311,14 +309,14 @@ async def test_thinking_toggle_all_status_line_only_for_the_open_block() -> None
 
         await _toggle(pilot)
         assert _visible_thinking(app) == []
-        assert _hidden_line_positions(app) == [len(_rows(app)) - 1]
+        assert _notice_shown(app)
 
         await stream(events[AFTER_FIRST_THINKING_DELTA])
         await pilot.pause()
-        assert _hidden_line_positions(app) == [len(_rows(app)) - 1]
+        assert _notice_shown(app)
 
         await _toggle(pilot)
-        assert _hidden_line_positions(app) == []
+        assert not _notice_shown(app)
         assert _visible_thinking(app) == ["plan 0", "plan 1", "plan 2"]
 
         await _toggle(pilot)
@@ -326,7 +324,7 @@ async def test_thinking_toggle_all_status_line_only_for_the_open_block() -> None
             await stream(event)
             await pilot.pause()
         # Answered and settled: the status line is taken back.
-        assert _hidden_line_positions(app) == []
+        assert not _notice_shown(app)
         assert _visible_thinking(app) == []
         await _toggle(pilot)
         assert _visible_thinking(app) == ["plan 0", "plan 1", "plan 2"]
@@ -444,7 +442,8 @@ async def test_thinking_toggle_while_the_first_row_mounts(toggles: int, start_sh
         app.adapter.apply(first)
         mounting = asyncio.create_task(app._apply_streaming_transcript_event(first))
         await asyncio.sleep(0)
-        assert not mounting.done()
+        # Shown thinking awaits its row's mount; hidden thinking mounts nothing.
+        assert mounting.done() is not start_shown
         for _ in range(toggles):
             app.action_toggle_thinking()
         await mounting
@@ -468,3 +467,43 @@ async def test_thinking_toggle_while_the_first_row_mounts(toggles: int, start_sh
         assert _visible_thinking(app) == (["plan 0"] if app.state.show_thinking else [])
         await _toggle(pilot)
         assert _visible_thinking(app) == (["plan 0"] if app.state.show_thinking else [])
+
+
+@pytest.mark.anyio
+async def test_hidden_thinking_moves_nothing_on_screen() -> None:
+    """Thinking starting and stopping, hidden, changes no layout: the transcript
+    keeps its height and the prompt stays where it is until the answer lands."""
+    app = TauTuiApp(FakeSession())
+    stream = _streamer(app)
+
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        transcript = app.query_one("#transcript", TranscriptView)
+        prompt = app.query_one("#prompt", PromptInput)
+        events = _turn_events(0, with_tool=False)
+        for event in events[: AFTER_FIRST_THINKING_DELTA - 1]:
+            await stream(event)
+        await pilot.pause()
+
+        def layout() -> tuple[tuple[tuple[int, int], ...], int, int]:
+            # Every transcript row's place and height, then the prompt's.
+            rows = tuple(
+                (child.virtual_region.y, child.virtual_region.height)
+                for child in transcript.children
+                if child.display
+            )
+            return (rows, prompt.region.y, prompt.region.height)
+
+        before = layout()
+        for event in events[AFTER_FIRST_THINKING_DELTA - 1 : AFTER_TEXT_STARTED - 1]:
+            await stream(event)
+            await pilot.pause()
+            assert _notice_shown(app)
+            assert layout() == before
+        await stream(events[AFTER_TEXT_STARTED - 1])
+        await pilot.pause()
+        assert not _notice_shown(app)
+        # Only the answer itself adds a row; the rows above it stay put.
+        after = layout()
+        assert after[0][: len(before[0])] == before[0]
+        assert after[1:] == before[1:]

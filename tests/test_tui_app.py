@@ -115,6 +115,7 @@ from tau_coding.tui import app as tui_app
 from tau_coding.tui.adapter import TuiEventAdapter
 from tau_coding.tui.app import (
     COMPLETION_MAX_VISIBLE_LINES,
+    HIDDEN_THINKING_NOTICE,
     PASTE_DISPLAY_THRESHOLD,
     RESERVED_EXTENSION_INTERCEPTOR_KEYS,
     CommandOutputScreen,
@@ -11453,6 +11454,10 @@ async def test_tui_app_toggles_thinking_tokens_from_keybinding_while_running() -
         transcript = app.query_one("#transcript", TranscriptView)
         return "\n".join(line.text for line in transcript.lines)
 
+    def notice() -> str | None:
+        title = app.query_one("#prompt", PromptInput).border_title
+        return None if title is None else str(title)
+
     app._notify = fake_notify  # type: ignore[method-assign]
 
     async with app.run_test() as pilot:
@@ -11461,31 +11466,32 @@ async def test_tui_app_toggles_thinking_tokens_from_keybinding_while_running() -
         app._refresh()
         await pilot.pause()
 
-        # While thinking is what is happening, its status line is there.
+        # While thinking is what is happening, the prompt border says so; the
+        # transcript gets no row for it.
         assert app.state.show_thinking is False
-        assert "Thinking… Press Ctrl+T to show thinking tokens." in transcript_text()
-        assert "internal plan" not in transcript_text()
+        assert notice() == HIDDEN_THINKING_NOTICE
+        assert transcript_text() == ""
 
         await pilot.press("ctrl+t")
         await pilot.pause()
         assert app.state.show_thinking is True
         assert app.state.running is True
         assert "internal plan" in transcript_text()
-        assert "Thinking… Press Ctrl+T to show thinking tokens." not in transcript_text()
+        assert notice() is None
 
         await pilot.press("ctrl+t")
         await pilot.pause()
         assert app.state.show_thinking is False
-        assert "Thinking… Press Ctrl+T to show thinking tokens." in transcript_text()
+        assert notice() == HIDDEN_THINKING_NOTICE
         assert "internal plan" not in transcript_text()
 
-        # Once something follows the thinking, the line is taken back: it is a
-        # status, not a record that thinking happened.
+        # Once something follows the thinking, the notice goes: it is a status,
+        # not a record that thinking happened.
         app.state.add_item("assistant", "final answer")
         app._refresh()
         await pilot.pause()
         assert "final answer" in transcript_text()
-        assert "Thinking… Press Ctrl+T to show thinking tokens." not in transcript_text()
+        assert notice() is None
 
     assert notifications == []
 
@@ -11528,31 +11534,25 @@ async def test_tui_app_hidden_thinking_placeholder_gives_way_to_the_streamed_ans
 
 @pytest.mark.anyio
 async def test_tui_app_hidden_thinking_status_line_does_not_accumulate_across_turns() -> None:
-    """Successive hidden-thinking runs share one line and take it back."""
+    """Successive hidden-thinking runs bring the notice up and take it back."""
     app = TauTuiApp(FakeSession())
 
     async with app.run_test() as pilot:
         app.state.running = True
         transcript = app.query_one("#transcript", TranscriptView)
-
-        def hidden_lines() -> list[str]:
-            return [
-                line.text
-                for line in transcript.lines
-                if line.text == "Thinking… Press Ctrl+T to show thinking tokens."
-            ]
+        prompt = app.query_one("#prompt", PromptInput)
 
         for turn in ("one", "two"):
             app.state.add_thinking_delta(f"plan {turn}")
             app._refresh()
             await pilot.pause()
-            # The status shows while thinking is happening, in one place.
-            assert len(hidden_lines()) == 1
+            # The notice shows while thinking is happening...
+            assert prompt.border_title == HIDDEN_THINKING_NOTICE
             app.state.add_item("assistant", f"answer {turn}")
             app._refresh()
             await pilot.pause()
             # ...and once the answer is there it is gone again.
-            assert hidden_lines() == []
+            assert prompt.border_title is None
 
         assert [line.text for line in transcript.lines] == ["answer one", "answer two"]
 
@@ -11587,34 +11587,33 @@ def _thinking_message_events(thinking: str, calls: tuple[ToolCall, ...] = ()) ->
 
 
 @pytest.mark.anyio
-async def test_hidden_thinking_line_is_not_stranded_by_a_thinking_only_message() -> None:
-    """A thinking-only message's line, reused by the next message, still goes."""
+async def test_hidden_thinking_notice_is_not_stranded_by_a_thinking_only_message() -> None:
+    """A thinking-only message leaves no row, and the notice goes with a tool call."""
     app = TauTuiApp(FakeSession())
 
     async def stream(event: AgentEvent) -> None:
         app.adapter.apply(event)
         await app._apply_streaming_transcript_event(event)
 
-    def hidden_line_positions() -> list[int]:
-        rows = [
-            child
+    def thinking_rows() -> list[str]:
+        return [
+            child.item.text
             for child in app.query_one("#transcript", TranscriptView).children
             if isinstance(child, TranscriptMessageWidget | StreamingTranscriptMessageWidget)
-        ]
-        return [
-            index
-            for index, row in enumerate(rows)
-            if row.item.text == "Thinking… Press Ctrl+T to show thinking tokens."
+            and child.item.role == "thinking"
         ]
 
     async with app.run_test(size=(100, 40)) as pilot:
         await pilot.pause()
+        prompt = app.query_one("#prompt", PromptInput)
         await stream(AgentStartEvent())
         for index in range(3):
-            # A message that ends on its thinking leaves the line at the tail;
-            # the next message's thinking reuses it rather than adding one.
+            # A message that ends on its thinking is still the newest output,
+            # so the notice stays up into the next message's thinking.
             for event in _thinking_message_events(f"musing {index}"):
                 await stream(event)
+            await pilot.pause()
+            assert prompt.border_title == HIDDEN_THINKING_NOTICE
             call = ToolCall(
                 id=f"call-{index}",
                 name="bash",
@@ -11623,10 +11622,10 @@ async def test_hidden_thinking_line_is_not_stranded_by_a_thinking_only_message()
             for event in _thinking_message_events(f"plan {index}", (call,)):
                 await stream(event)
                 await pilot.pause()
-                # At most one line, and only ever as the last row.
-                positions = hidden_line_positions()
-                assert len(positions) <= 1
-            assert hidden_line_positions() == []
+                # Hidden thinking never takes a transcript row.
+                assert thinking_rows() == []
+            # The tool call followed the thinking, so the notice is gone.
+            assert prompt.border_title is None
 
 
 @pytest.mark.anyio
