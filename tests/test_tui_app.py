@@ -5862,7 +5862,8 @@ def test_tau_dark_theme_uses_aqua_as_its_shared_accent() -> None:
     assert theme.screen_background == "#000000"
     assert theme.transcript_background == "#000000"
     assert theme.prompt_background == "#101419"
-    assert theme.role_styles["user"].body.endswith(f"on {theme.prompt_background}")
+    # User rows paint no background of their own, so the terminal's shows.
+    assert theme.role_styles["user"].body == "#d8dee9"
     assert theme.terminal_background is True
     assert theme.role_styles["assistant"].body == "#d8dee9"
 

@@ -35,7 +35,7 @@
     "completion_description": "#667085"
   },
   "roles": {
-    "user": { "border": "#7c8ea6", "body": "#d8dee9 on #101419" },
+    "user": { "border": "#7c8ea6", "body": "#d8dee9 on #000000" },
     "assistant": { "border": "#6ea6a0", "body": "#d8dee9 on #000000" },
     "tool": { "border": "#8a7a52", "body": "#cbd5e1 on #000000" },
     "error": { "border": "#ff4f4f", "body": "#ffb4b4 on #000000" },
