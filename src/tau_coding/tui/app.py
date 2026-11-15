@@ -1727,7 +1727,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
 
     #session-picker-columns {
         height: auto;
-        border: tall $tau-border;
+        border: solid $tau-border;
         background: $tau-transcript-background;
     }
 
@@ -1738,7 +1738,7 @@ class SessionPickerScreen(ModalScreen[str | None]):
 
     #session-picker-project-column {
         width: 34;
-        border-right: tall $tau-border;
+        border-right: solid $tau-border;
     }
 
     #session-picker-session-column {

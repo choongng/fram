@@ -7726,9 +7726,9 @@ async def test_session_picker_navigates_projects_in_left_column() -> None:
         columns = screen.query_one("#session-picker-columns")
         project_column = screen.query_one("#session-picker-project-column")
         session_column = screen.query_one("#session-picker-session-column")
-        assert columns.styles.border.top[0] == "tall"
+        assert columns.styles.border.top[0] == "solid"
         assert project_column.styles.border.top[0] == ""
-        assert project_column.styles.border.right[0] == "tall"
+        assert project_column.styles.border.right[0] == "solid"
         assert session_column.styles.border.top[0] == ""
         assert [record.id for record in screen.visible_records] == ["local-1"]
         assert str(screen.query_one("#session-picker-session-title", Static).render()) == (
