@@ -246,7 +246,8 @@ setting so the server decides.
 
 - **Shift+Tab** cycles the thinking level (Tau starts at `medium`).
 - **Ctrl+T** toggles whether reasoning tokens are shown (hidden by default).
-  Reasoning blocks are saved with the assistant response, so their original
+  While they are hidden and the model is thinking, the prompt's top border says
+  so. Reasoning blocks are saved with the assistant response, so their original
   positions and visibility toggle are restored when you resume a session.
 
 Thinking is model-aware: Tau enables it only when the active provider declares
