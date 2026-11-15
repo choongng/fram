@@ -76,9 +76,11 @@ to search and run them. Common ones:
 - `/local` — choose and manage a registered local backend
 - `/sidebar` — show or hide the sidebar for this session
 
-When slash-command autocomplete is open, **Enter** applies the highlighted
-suggestion without submitting it; use the arrow keys first to choose a different
-suggestion. **Tab** also applies the highlighted suggestion.
+Autocomplete suggestions float over the transcript, just above the prompt, so
+opening or closing them moves nothing on screen. When slash-command autocomplete
+is open, **Enter** applies the highlighted suggestion without submitting it; use
+the arrow keys first to choose a different suggestion. **Tab** also applies the
+highlighted suggestion.
 
 The full list is in the [Slash commands reference](/reference/slash-commands/). For local inference, see the [local backends guide](/guides/local-inference/).
 

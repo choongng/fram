@@ -9396,8 +9396,7 @@ async def test_tui_app_scrolls_completion_selection_into_view() -> None:
         app._completion_state = app._build_completion_state(prompt.value)
         app._refresh_completions()
         await pilot.pause()
-        autocomplete = app.query_one("#autocomplete", Static)
-        visible_line_limit = app._completion_window_line_budget(autocomplete)
+        visible_line_limit = app._completion_line_budget()
         assert visible_line_limit < tui_app.COMPLETION_MAX_VISIBLE_LINES
         visible = tui_app._visible_completion_state(
             app._completion_state,
@@ -9422,7 +9421,7 @@ async def test_tui_app_scrolls_completion_selection_into_view() -> None:
 
 
 @pytest.mark.anyio
-async def test_tui_app_uses_terminal_space_for_initial_completion_window() -> None:
+async def test_tui_app_fits_completion_window_above_prompt_on_short_terminal() -> None:
     session = FakeSession()
     session.prompt_templates = tuple(
         PromptTemplate(
@@ -9439,14 +9438,13 @@ async def test_tui_app_uses_terminal_space_for_initial_completion_window() -> No
         prompt.focus()
         prompt.value = "/"
         await pilot.pause()
-        autocomplete = app.query_one("#autocomplete", Static)
 
-        initial_line_budget = app._completion_window_line_budget(autocomplete)
+        initial_line_budget = app._completion_line_budget()
         assert initial_line_budget < COMPLETION_MAX_VISIBLE_LINES
 
         app.action_completion_next()
         await pilot.pause()
-        assert app._completion_window_line_budget(autocomplete) == initial_line_budget
+        assert app._completion_line_budget() == initial_line_budget
 
 
 @pytest.mark.anyio
@@ -9470,14 +9468,65 @@ async def test_tui_app_keeps_completion_window_height_stable_after_edit(
         prompt.focus()
         prompt.value = "/"
         await pilot.pause()
-        autocomplete = app.query_one("#autocomplete", Static)
-        initial_line_budget = app._completion_window_line_budget(autocomplete)
+        initial_line_budget = app._completion_line_budget()
 
         await pilot.press(edit_key)
         await pilot.pause()
 
-        assert autocomplete.size.height <= initial_line_budget
-        assert app._completion_window_line_budget(autocomplete) == initial_line_budget
+        assert app._completion_line_budget() == initial_line_budget
+
+
+@pytest.mark.anyio
+async def test_completion_list_floats_above_prompt_and_moves_nothing() -> None:
+    app = TauTuiApp(FakeSession())
+
+    def layout() -> dict[str, object]:
+        return {
+            selector: app.query_one(selector).region
+            for selector in ("#transcript", "#prompt-row", "#compact-session-info")
+        }
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.query_one("#prompt").focus()
+        await pilot.pause()
+        before = layout()
+
+        await pilot.press("/")
+        await pilot.pause()
+        await pilot.pause()
+
+        autocomplete = app.query_one("#autocomplete")
+        prompt_row = app.query_one("#prompt-row").region
+        assert autocomplete.display is True
+        assert layout() == before
+        assert autocomplete.region.bottom == prompt_row.y
+        assert autocomplete.region.x == prompt_row.x
+        assert autocomplete.region.width == prompt_row.width
+
+        await pilot.press("backspace")
+        await pilot.pause()
+
+        assert autocomplete.display is False
+        assert layout() == before
+
+
+@pytest.mark.anyio
+async def test_completion_list_follows_prompt_after_resize() -> None:
+    app = TauTuiApp(FakeSession())
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.query_one("#prompt").focus()
+        await pilot.press("/")
+        await pilot.pause()
+
+        await pilot.resize_terminal(90, 24)
+        await pilot.pause()
+        await pilot.pause()
+
+        autocomplete = app.query_one("#autocomplete")
+        prompt_row = app.query_one("#prompt-row").region
+        assert autocomplete.region.bottom == prompt_row.y
+        assert autocomplete.region.width == prompt_row.width
 
 
 @pytest.mark.anyio

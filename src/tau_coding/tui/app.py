@@ -22,7 +22,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any, BinaryIO, ClassVar, Literal, Protocol, TypeVar, cast
 
-from rich.console import Console, Group
+from rich.console import Console, Group, RenderableType
 from rich.style import Style
 from rich.terminal_theme import TerminalTheme
 from rich.text import Text
@@ -33,7 +33,8 @@ from textual.binding import Binding, BindingsMap
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.events import Key, Resize
-from textual.screen import ModalScreen
+from textual.geometry import Region
+from textual.screen import ModalScreen, Screen
 from textual.strip import Strip
 from textual.timer import Timer
 from textual.widget import Widget
@@ -224,9 +225,10 @@ ACTIVITY_COLOR_FADE_STEPS = 24
 ACTIVITY_SPINNER_FRAMES = ("⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷")
 ACTIVITY_SPINNER_MAX_FADE = 0.55
 COMPLETION_MAX_VISIBLE_LINES = 16
-COMPLETION_INITIAL_TERMINAL_FRACTION = 3
+# Transcript rows the floating completion list leaves uncovered above it.
 COMPLETION_MIN_TRANSCRIPT_LINES = 4
-COMPLETION_WIDGET_CHROME_LINES = 3
+# The completion list's top and bottom border.
+COMPLETION_WIDGET_CHROME_LINES = 2
 NO_STORED_CREDENTIALS_MESSAGE = (
     "No stored credentials to remove. /logout only removes credentials saved by /login; "
     "environment variables and providers.json config are unchanged."
@@ -4099,10 +4101,14 @@ class TauTuiApp(App[None]):
         color: $tau-muted-text;
     }
 
+    /* Floats over the transcript, its bottom edge on the prompt's top edge.
+       Taking no room in the layout, it moves nothing when it opens or
+       closes. `_place_completions` sets its size and offset. */
     #autocomplete {
+        overlay: screen;
+        position: absolute;
         height: auto;
-        max-height: 18;
-        margin: 0 1 1 1;
+        margin: 0;
         padding: 0 1;
         background: $tau-autocomplete-background;
         color: $tau-screen-text;
@@ -4762,7 +4768,8 @@ class TauTuiApp(App[None]):
         self._prompt_run_id = 0
         self._optimistic_user_messages: list[tuple[int, str]] = []
         self._completion_state = CompletionState()
-        self._completion_visible_line_budget: int | None = None
+        # Prompt-row and main-pane regions the completion list was placed for.
+        self._completion_anchor: tuple[Region, Region] | None = None
         self._activity_frame = 0
         self._activity_timer: Timer | None = None
         self._last_tool_timer_refresh_at = 0.0
@@ -4938,6 +4945,7 @@ class TauTuiApp(App[None]):
         self._sync_prompt_shell_mode(prompt.text)
         prompt.focus()
         self.app_resume_signal.subscribe(self, self._on_resumed_from_suspend)
+        self.screen.screen_layout_refresh_signal.subscribe(self, self._on_screen_layout)
         self._update_responsive_layout(self.size.width, self.size.height)
         self._apply_sidebar_position()
         self._refresh()
@@ -5054,7 +5062,6 @@ class TauTuiApp(App[None]):
 
     def on_resize(self, event: Resize) -> None:
         """Update responsive chrome when the terminal changes size."""
-        self._completion_visible_line_budget = None
         self._update_responsive_layout(event.size.width, event.size.height)
 
     @on(SidebarFileItem.OpenRequested)
@@ -8053,68 +8060,78 @@ class TauTuiApp(App[None]):
         suggestions = self.query_one("#autocomplete", Static)
         suggestions.display = bool(self._completion_state.items)
         if not self._completion_state.items:
-            self._completion_visible_line_budget = None
             suggestions.update(
                 render_completion_suggestions(
                     CompletionState(),
                     theme=self.tui_settings.resolved_theme,
                 )
             )
+            self._completion_anchor = None
             self._refresh_footer_bindings()
             return
-        max_lines = self._completion_window_line_budget(suggestions)
-        suggestions.update(
-            render_completion_suggestions(
-                _visible_completion_state(
-                    self._completion_state,
-                    max_lines=max_lines,
-                    width=max(suggestions.content_size.width or suggestions.size.width, 1),
-                ),
-                theme=self.tui_settings.resolved_theme,
-            )
-        )
+        self._place_completions(suggestions)
         self._refresh_footer_bindings()
 
-    def _completion_window_line_budget(self, suggestions: Static) -> int:
-        """Return a stable completion window size for the current suggestion box.
+    def _on_screen_layout(self, _screen: Screen[object]) -> None:
+        """Keep the floating completion list on the prompt after a relayout.
 
-        The autocomplete widget has ``height: auto``. If we used its current
-        rendered height as the next render limit unconditionally, selecting an
-        item could render fewer rows, which would shrink the widget, which would
-        then make the next render limit smaller again. Keep the largest measured
-        height for the current completion session so navigation does not feed
-        back into progressively smaller boxes.
+        The prompt moves when the terminal resizes or the prompt grows. Placing
+        the list changes its own content, which lays the screen out again, so
+        re-place only when the prompt or pane actually moved.
         """
-        measured_limit = _completion_visible_line_limit(suggestions)
-        if suggestions.size.height <= 0:
-            if self._completion_visible_line_budget is None:
-                self._completion_visible_line_budget = self._initial_completion_line_budget()
-            return self._completion_visible_line_budget
-        self._completion_visible_line_budget = max(
-            self._completion_visible_line_budget or measured_limit,
-            measured_limit,
-        )
-        return self._completion_visible_line_budget
+        if not self._completion_state.items:
+            return
+        if self._completion_anchor_now() != self._completion_anchor:
+            self._place_completions(self.query_one("#autocomplete", Static))
 
-    def _initial_completion_line_budget(self) -> int:
-        """Estimate the first completion window size before Textual lays it out."""
-        terminal_height = self.size.height
-        if terminal_height <= 0:
+    def _completion_anchor_now(self) -> tuple[Region, Region]:
+        return (self.query_one("#prompt-row").region, self.query_one("#main-pane").region)
+
+    def _place_completions(self, suggestions: Static) -> None:
+        """Render the visible completions and float them just above the prompt."""
+        if not self._completion_state.items:
+            return
+        prompt_row = self.query_one("#prompt-row")
+        pane = self.query_one("#main-pane")
+        self._completion_anchor = self._completion_anchor_now()
+        width = max(prompt_row.region.width, 1)
+        # Border and horizontal padding take two columns on each side.
+        content_width = max(width - 4, 1)
+        visible = _visible_completion_state(
+            self._completion_state,
+            max_lines=self._completion_line_budget(),
+            width=content_width,
+        )
+        rendered = render_completion_suggestions(visible, theme=self.tui_settings.resolved_theme)
+        # Size the box from the real rendering: the windowing estimate measures
+        # each row on its own and can be off by a line where descriptions wrap.
+        # Never taller than the rows above the prompt, so it cannot cover the
+        # prompt itself; the box scrolls if the estimate fell short.
+        rows_above = max(prompt_row.region.y - pane.region.y, 1)
+        height = _rendered_line_count(rendered, width=content_width)
+        height = min(height + COMPLETION_WIDGET_CHROME_LINES, rows_above)
+        suggestions.update(rendered)
+        suggestions.styles.width = width
+        suggestions.styles.height = height
+        suggestions.styles.offset = (
+            prompt_row.region.x - pane.region.x,
+            prompt_row.region.y - pane.region.y - height,
+        )
+
+    def _completion_line_budget(self) -> int:
+        """Return how many completion lines fit above the prompt.
+
+        The list covers the transcript, leaving its top few rows in view. The
+        budget depends only on where the prompt sits, never on the list's own
+        height, so moving the selection cannot resize the list.
+        """
+        prompt_row = self.query_one("#prompt-row")
+        pane = self.query_one("#main-pane")
+        if prompt_row.region.height <= 0:
             return COMPLETION_MAX_VISIBLE_LINES
-
-        reserved_rows = COMPLETION_MIN_TRANSCRIPT_LINES + COMPLETION_WIDGET_CHROME_LINES
-        for selector in ("#prompt-row", "#compact-session-info", "#queued-messages"):
-            with suppress(NoMatches):
-                widget = self.query_one(selector)
-                if widget.display:
-                    reserved_rows += widget.outer_size.height
-
-        available_rows = terminal_height - reserved_rows
-        terminal_fraction_rows = max(1, terminal_height // COMPLETION_INITIAL_TERMINAL_FRACTION)
-        return max(
-            1,
-            min(COMPLETION_MAX_VISIBLE_LINES, available_rows, terminal_fraction_rows),
-        )
+        rows_above = prompt_row.region.y - pane.region.y
+        available = rows_above - COMPLETION_MIN_TRANSCRIPT_LINES - COMPLETION_WIDGET_CHROME_LINES
+        return max(1, min(COMPLETION_MAX_VISIBLE_LINES, available))
 
     def _update_responsive_layout(self, width: int, height: int) -> None:
         if self._sidebar_visibility_override is not None:
@@ -8263,13 +8280,6 @@ def _hex_to_rgb(color: str) -> tuple[int, int, int]:
     return (int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16))
 
 
-def _completion_visible_line_limit(suggestions: Static) -> int:
-    """Return the number of completion render lines that fit in the widget body."""
-    if suggestions.size.height > 0:
-        return max(min(COMPLETION_MAX_VISIBLE_LINES, suggestions.size.height), 1)
-    return COMPLETION_MAX_VISIBLE_LINES
-
-
 def _visible_completion_state(
     state: CompletionState,
     *,
@@ -8353,6 +8363,18 @@ def _completion_render_line_count(state: CompletionState, *, width: int | None =
             previous_category = item.category
         line_count += 1 + _completion_item_extra_wrapped_lines(item, width=width)
     return line_count
+
+
+def _rendered_line_count(renderable: RenderableType, *, width: int) -> int:
+    """Return how many lines ``renderable`` takes at ``width`` columns."""
+    console = Console(
+        file=StringIO(),
+        width=width,
+        force_terminal=False,
+        color_system=None,
+        legacy_windows=False,
+    )
+    return len(console.render_lines(renderable, console.options, pad=False))
 
 
 def _completion_item_extra_wrapped_lines(
