@@ -638,16 +638,18 @@ class TranscriptMessageWidget(Horizontal):
            border-box against the container minus the row's own margins,
            so the box stopped one column short of the space it was given
            and left a screen-background column down its right edge. With
-           no width rule the row fills its container exactly. The left
-           margin keeps the history inset; the right margin is the one plain
-           column between a highlighted box and the edge of the transcript.
-           Borderless rows drop it (below). */
+           no width rule the row fills its container exactly. A bordered
+           row's pipe sits in column 0, under the prompt's logo, so its text
+           (after one padding column) starts in column 2 like the prompt's.
+           The right margin is the one plain column between a highlighted box
+           and the edge of the transcript. Borderless rows drop it (below). */
         height: auto;
-        margin: 1 1 0 1;
+        margin: 1 1 0 0;
     }
 
     /* Free text (assistant, thinking) has no right inset at all: it may run
-       to the transcript's last column, like the streaming block does. */
+       to the transcript's last column, like the streaming block does. Its
+       left margin and padding put its text in column 2 as well. */
     TranscriptMessageWidget.-borderless {
         margin: 1 0 0 1;
     }
