@@ -44,6 +44,9 @@ def test_default_prompt_includes_tools_guidelines_date_and_cwd(tmp_path: Path) -
     assert "- Use bash for file operations like ls, rg, find" in prompt
     assert "- When using bash, include a brief present-participle description" in prompt
     assert "- Use read to examine files instead of cat or sed." in prompt
+    assert "- Make independent read-only calls" in prompt
+    assert "suggest starting a new session (/new in the TUI)" in prompt
+    assert "Always read relevant Tau .md files completely" not in prompt
     assert "- Inspect relevant files and project instructions before editing" in prompt
     assert "- Do not overwrite or discard unrelated user changes" in prompt
     assert "- Report checks honestly; never claim a command passed unless you ran it" in prompt
@@ -72,6 +75,10 @@ def test_guidelines_are_deduplicated(tmp_path: Path) -> None:
     guidelines = collect_prompt_guidelines(tools, [duplicate])
 
     assert guidelines.count(duplicate) == 1
+
+
+def test_batching_guideline_needs_a_read_only_tool() -> None:
+    assert not any("read-only calls" in g for g in collect_prompt_guidelines([]))
 
 
 def test_custom_prompt_replaces_default_but_keeps_append_context_and_date(tmp_path: Path) -> None:
