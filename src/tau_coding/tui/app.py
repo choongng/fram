@@ -4789,9 +4789,9 @@ class TauTuiApp(App[None]):
         self._last_tool_timer_refresh_at = 0.0
         self._last_activity_indicator_key: tuple[object, ...] | None = None
         self._last_queue_render_key: tuple[object, ...] | None = None
-        self._terminal_title = TerminalTitleController()
+        self._terminal_title = TerminalTitleController(writer=self._write_terminal_sequence)
         self._terminal_notification = TerminalNotificationController(
-            self.tui_settings.turn_notification
+            self.tui_settings.turn_notification, writer=self._write_terminal_sequence
         )
         self._app_has_focus = True
         self._active_notification_keys: set[tuple[str, str]] = set()
@@ -4811,6 +4811,27 @@ class TauTuiApp(App[None]):
     def _is_working(self) -> bool:
         """Return whether the app should show working affordances (agent turn or compaction)."""
         return self.state.running or self._compacting
+
+    def _write_terminal_sequence(self, sequence: str) -> None:
+        """Send a title or attention sequence to the terminal in order with frames.
+
+        Textual writes each frame from a background thread, in chunks. A
+        sequence written straight to stdout could land between two chunks, in
+        the middle of one of Textual's escape sequences. The terminal then
+        abandons that sequence and prints its tail, with the row text after it,
+        wherever the cursor stood, and it stays there until a full repaint.
+        Queueing through the driver keeps them apart. Before the app starts,
+        nothing else is drawing, so stdout is safe.
+        """
+        driver = self._driver
+        if driver is not None:
+            driver.write(sequence)
+            return
+        stream = sys.__stdout__
+        if stream is None:
+            raise OSError("no terminal to write to")
+        stream.write(sequence)
+        stream.flush()
 
     def _sync_terminal_title(self) -> None:
         """Reflect the active session name and running state in the terminal tab title."""

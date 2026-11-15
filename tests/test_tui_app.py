@@ -1,6 +1,7 @@
 import asyncio
 import gc
 import re
+import sys
 import threading
 import weakref
 from collections.abc import AsyncIterator
@@ -6008,6 +6009,30 @@ async def test_tui_app_shows_activity_indicator_while_running() -> None:
         assert not app.query("#status")
         assert prompt_row.styles.border_top[1].hex.lower() == "#2d3748"
         assert indicator.render().plain == "τ"
+
+
+@pytest.mark.anyio
+async def test_terminal_title_and_notifications_queue_behind_textual_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Title and attention sequences go through Textual's driver while it runs.
+
+    Written straight to stdout, they could cut into one of the frame's escape
+    sequences mid-way and leave its tail as text on screen until a full
+    repaint."""
+    app = TauTuiApp(FakeSession())
+    assert app._terminal_title._writer == app._write_terminal_sequence
+    assert app._terminal_notification._writer == app._write_terminal_sequence
+
+    stdout = StringIO()
+    monkeypatch.setattr(sys, "__stdout__", stdout)
+    async with app.run_test():
+        driver_writes: list[str] = []
+        assert app._driver is not None
+        monkeypatch.setattr(app._driver, "write", driver_writes.append)
+        app._write_terminal_sequence("\x1b]0;title\x07")
+        assert driver_writes == ["\x1b]0;title\x07"]
+    assert stdout.getvalue() == ""
 
 
 @pytest.mark.anyio
