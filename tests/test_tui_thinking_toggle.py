@@ -511,3 +511,48 @@ async def test_hidden_thinking_moves_nothing_on_screen() -> None:
         after = layout()
         assert after[0][: len(before[0])] == before[0]
         assert after[1:] == before[1:]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("show_thinking", [False, True], ids=["hidden", "shown"])
+async def test_message_end_keeps_the_streamed_blocks_mounted(show_thinking: bool) -> None:
+    """A finished reply keeps the rows it streamed into. Replacing them with new
+    rows blanked the reply for the frames the new Markdown took to draw: a
+    flicker on every long answer, though the layout came out the same."""
+    app = TauTuiApp(FakeSession())
+    stream = _streamer(app)
+    events = _turn_events(0, with_tool=False)
+    end = next(
+        index
+        for index, event in enumerate(events)
+        if isinstance(event, MessageEndEvent) and isinstance(event.message, AssistantMessage)
+    )
+
+    async with app.run_test(size=(100, 40)) as pilot:
+        await pilot.pause()
+        if show_thinking:
+            await _toggle(pilot)
+        transcript = app.query_one("#transcript", TranscriptView)
+        for event in events[:end]:
+            await stream(event)
+        await pilot.pause()
+        streamed = [
+            child
+            for child in transcript.children
+            if isinstance(child, StreamingTranscriptMessageWidget)
+        ]
+        assert [widget.item.role for widget in streamed] == (
+            ["thinking", "assistant"] if show_thinking else ["assistant"]
+        )
+
+        for event in events[end:]:
+            await stream(event)
+        await pilot.pause()
+
+        shown = [item for item in app.state.items if item.role in {"thinking", "assistant"}]
+        if not show_thinking:
+            shown = [item for item in shown if item.role != "thinking"]
+        assert [transcript._item_widgets[id(item)] for item in shown] == streamed
+        assert all(widget.parent is transcript for widget in streamed)
+        assert all(widget.item is item for widget, item in zip(streamed, shown, strict=True))
+        assert transcript._active_message_widgets == []

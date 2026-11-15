@@ -3330,9 +3330,17 @@ async def test_message_end_while_paged_back_keeps_later_items_reachable(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("live_role", "hook"),
+    [("assistant", "finalize"), ("thinking", "remove")],
+    ids=["kept-streamed-row", "remounted-row"],
+)
 async def test_paging_back_while_a_message_ends_leaves_it_behind_the_boundary(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, live_role: str, hook: str
 ) -> None:
+    # A streamed block that matches the canonical item is finalized in place;
+    # one that does not (here hidden thinking) is removed and the item mounted.
+    # Either await is where the reader can page back.
     from tau_coding.tui import widgets as tui_widgets
 
     monkeypatch.setattr(tui_widgets, "TRANSCRIPT_WINDOW_ITEMS", 6)
@@ -3347,15 +3355,16 @@ async def test_paging_back_while_a_message_ends_leaves_it_behind_the_boundary(
         assert transcript._window_end == 12
 
         live = tui_widgets.StreamingTranscriptMessageWidget(
-            ChatItem(role="assistant", text="x"), theme=tui_widgets.TAU_DARK_THEME
+            ChatItem(role=live_role, text="x"), theme=tui_widgets.TAU_DARK_THEME
         )
         await transcript.mount(live)
         transcript._active_message_widgets.append(live)
 
-        async def page_back_instead_of_removing() -> None:
+        async def page_back_instead(*args: object) -> None:
+            del args
             await transcript._shift_window("earlier")
 
-        monkeypatch.setattr(live, "remove", page_back_instead_of_removing)
+        monkeypatch.setattr(live, hook, page_back_instead)
         canonical = [ChatItem(role="assistant", text="answer")]
         app.state.items.extend(canonical)
         await transcript.finish_structured_assistant_message(canonical, show_thinking=False)
@@ -3490,8 +3499,13 @@ async def test_long_transcript_incremental_appends_keep_mounted_window_bounded()
 
 
 def _window_rows(transcript: TranscriptView) -> list[tuple[str, str]]:
+    # A finished streamed block is kept as the message's row rather than
+    # remounted, and draws the same as a rebuilt one, so rows compare by kind.
     return [
-        (type(child).__name__, getattr(child, "selection_text", "").strip())
+        (
+            "boundary" if isinstance(child, TranscriptWindowBoundary) else "row",
+            getattr(child, "selection_text", "").strip(),
+        )
         for child in transcript.children
         if isinstance(
             child,

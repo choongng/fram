@@ -1824,6 +1824,22 @@ class TranscriptView(VerticalScroll):
         if state is not None and not paged_back:
             self._window_end = len(state.items)
         claimed_end = self._window_end
+        if not paged_back and await self._adopt_streamed_widgets(
+            items, show_thinking=show_thinking
+        ):
+            if state is not None and self._window_end != claimed_end:
+                # Same as below: the reader paged back while the blocks were
+                # finalized, so rebuild the window they paged to.
+                self._redraw(scroll_end=False, preserve_window=True)
+            elif (
+                state is not None
+                and self._window_end - self._window_start
+                > TRANSCRIPT_WINDOW_ITEMS + TRANSCRIPT_WINDOW_OVERSCAN_ITEMS
+            ):
+                self._trim_window_start(scroll_end=should_follow)
+            elif should_follow:
+                self._request_follow_scroll()
+            return
         for widget in tuple(self._active_message_widgets):
             if widget.parent is self:
                 await widget.remove()
@@ -1869,6 +1885,60 @@ class TranscriptView(VerticalScroll):
             self._trim_window_start(scroll_end=should_follow)
         elif should_follow:
             self._request_follow_scroll()
+
+    async def _adopt_streamed_widgets(
+        self, items: Sequence[ChatItem], *, show_thinking: bool
+    ) -> bool:
+        """Finalize this message's streamed blocks in place as its canonical items.
+
+        Replacing them with freshly mounted rows blanked the message for the
+        frames the new Markdown took to draw, a visible flicker on a long reply
+        even though the layout ended up the same. Streamed blocks pair with
+        the canonical items in order by role; a streamed block with no partner
+        (whitespace-only thinking the canonical message dropped) is removed.
+        Returns False, touching nothing, when some canonical item has no
+        streamed block to take it over, so the caller remounts instead.
+        """
+        active = {id(widget) for widget in self._active_message_widgets}
+        streamed = [
+            child
+            for child in self.children
+            if id(child) in active and isinstance(child, StreamingTranscriptMessageWidget)
+        ]
+        shown = [item for item in items if item.role != "thinking" or show_thinking]
+        pairs: list[tuple[StreamingTranscriptMessageWidget, ChatItem]] = []
+        unpaired: list[StreamingTranscriptMessageWidget] = []
+        remaining = iter(shown)
+        pending = next(remaining, None)
+        for widget in streamed:
+            if pending is not None and widget.item.role == pending.role:
+                pairs.append((widget, pending))
+                pending = next(remaining, None)
+            else:
+                unpaired.append(widget)
+        if pending is not None or not pairs:
+            return False
+
+        for widget, item in pairs:
+            await widget.finalize(item.text)
+            widget.item = item
+            self._item_widgets[id(item)] = widget
+        for widget in unpaired:
+            if widget.parent is self:
+                await widget.remove()
+        # Anything else this message mounted (hidden thinking leaves nothing,
+        # but a toggle mid-stream can) is no longer a live block either.
+        paired = {id(widget) for widget, _ in pairs}
+        for leftover in tuple(self._active_message_widgets):
+            if id(leftover) not in paired and leftover.parent is self:
+                await leftover.remove()
+        self._active_message_widgets.clear()
+        self._active_assistant_widget = None
+        self._active_thinking_widget = None
+        for item_id, row in tuple(self._item_widgets.items()):
+            if row.parent is None:
+                del self._item_widgets[item_id]
+        return True
 
     @property
     def lines(self) -> tuple[TranscriptLine, ...]:
