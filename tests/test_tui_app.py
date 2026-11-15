@@ -14240,7 +14240,7 @@ async def test_page_keys_page_across_the_bounded_transcript_window(
     app = TauTuiApp(
         FakeSession(
             messages=[
-                UserMessage(content=f"message {index}\n" + "line\n" * 4) for index in range(12)
+                UserMessage(content=f"message {index}\n" + "line\n" * 2) for index in range(12)
             ]
         )
     )

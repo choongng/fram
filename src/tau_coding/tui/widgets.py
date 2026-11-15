@@ -1219,6 +1219,16 @@ class TranscriptView(VerticalScroll):
             new_end = min(len(state.items), old_end + TRANSCRIPT_WINDOW_PAGE_ITEMS)
             new_start = max(0, new_end - TRANSCRIPT_WINDOW_ITEMS)
 
+        # Keep the anchor where it sits on screen. Only bringing it back into
+        # view left the viewport still at the edge it reached whenever the
+        # anchor was already visible after the rows above it went away (the
+        # last row of a "later" shift usually is), so the next page key could
+        # not move the scroll position and nothing ever paged the window again.
+        old_anchor = self._item_widgets.get(id(anchor_item)) if anchor_item is not None else None
+        anchor_offset = (
+            old_anchor.virtual_region.y - self.scroll_y if old_anchor is not None else None
+        )
+
         self._window_start = new_start
         self._window_end = new_end
         self._redraw(scroll_end=False, preserve_window=True)
@@ -1228,7 +1238,12 @@ class TranscriptView(VerticalScroll):
                 if anchor_item is None:
                     return
                 anchor = self._item_widgets.get(id(anchor_item))
-                if anchor is not None:
+                if anchor is not None and anchor_offset is not None:
+                    target = anchor.virtual_region.y - anchor_offset
+                    self.scroll_to(
+                        y=min(max(0, target), self.max_scroll_y), animate=False, immediate=True
+                    )
+                elif anchor is not None:
                     self.scroll_to_widget(
                         anchor,
                         top=direction == "earlier",
