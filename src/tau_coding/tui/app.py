@@ -4062,45 +4062,47 @@ class TauTuiApp(App[None]):
        the prompt's text column. */
     #thinking-notice {
         height: 1;
-        margin: 0 1 0 1;
-        padding: 0 0 0 3;
+        margin: 0;
+        padding: 0 0 0 2;
         color: $tau-muted-text;
     }
 
+    /* The prompt's rules run the full width of the main pane, across the
+       logo column too. `_apply_activity_indicator` recolours them while a
+       turn runs and in shell mode. */
     #prompt-row {
         height: auto;
-        margin: 0 1 0 1;
+        margin: 0;
+        border-top: solid $tau-prompt-border;
+        border-bottom: solid $tau-prompt-border;
     }
 
+    #prompt-row.-shell-mode {
+        border-top: solid $tau-tool-running;
+        border-bottom: solid $tau-tool-running;
+    }
+
+    /* The logo or spinner sits in column 0; one blank column follows it, and
+       typed text starts in column 2, the same column as transcript text. */
     #prompt-prefix {
         width: 2;
-        height: 3;
-        padding: 0 0 0 0;
+        height: 1;
+        padding: 0;
         margin: 0;
-        content-align: center middle;
+        content-align: left top;
         color: $tau-accent;
         text-style: bold;
     }
 
-    /* The input keeps 1 column of left padding (the caret sits at the
-       border+padding edge and would otherwise cover the box edge); with the
-       box at x=3 its typed text lands at x=4. */
     #prompt {
         width: 1fr;
         height: auto;
         background: $tau-screen-background;
         color: $tau-prompt-text;
         border: none;
-        border-top: solid $tau-prompt-border;
-        border-bottom: solid $tau-prompt-border;
         margin: 0;
-        padding: 0 1;
-        max-height: 8;
-    }
-
-    #prompt.-shell-mode {
-        border-top: solid $tau-tool-running;
-        border-bottom: solid $tau-tool-running;
+        padding: 0 1 0 0;
+        max-height: 6;
     }
 
     #compact-session-info {
@@ -8054,8 +8056,9 @@ class TauTuiApp(App[None]):
             running=self._is_working(),
             shell_mode=shell_mode,
         )
-        prompt.styles.border_top = ("solid", border_color)
-        prompt.styles.border_bottom = ("solid", border_color)
+        prompt_row = self.query_one("#prompt-row")
+        prompt_row.styles.border_top = ("solid", border_color)
+        prompt_row.styles.border_bottom = ("solid", border_color)
         notice.update(HIDDEN_THINKING_NOTICE if thinking_notice else "", layout=False)
         prompt_prefix.update(
             _render_activity_indicator(
@@ -8198,7 +8201,9 @@ class TauTuiApp(App[None]):
     def _sync_prompt_shell_mode(self, text: str) -> None:
         prompt = self.query_one("#prompt", PromptInput)
         prompt.shell_mode_style = self.tui_settings.resolved_theme.role_styles["tool"].border
-        prompt.set_class(_is_terminal_command_prompt(text), "-shell-mode")
+        shell_mode = _is_terminal_command_prompt(text)
+        prompt.set_class(shell_mode, "-shell-mode")
+        self.query_one("#prompt-row").set_class(shell_mode, "-shell-mode")
         prompt.refresh()
         self._apply_activity_indicator()
 
