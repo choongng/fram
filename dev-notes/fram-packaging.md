@@ -93,8 +93,8 @@ on import, from an entry point in the `tau_coding.branding` group. The
 fram = "fram.branding:BRANDING"
 ```
 
-So the installed `fram` says "Fram" and `fram install ...`, shows `✦` as its
-prompt mark and `✦ fram` as its logo, while `tau` from a checkout, which has no
+So the installed `fram` says "Fram" and `fram install ...`, shows `►` as its
+prompt mark and `► fram` as its logo, while `tau` from a checkout, which has no
 such entry point, is unchanged. `fram.branding` must not import Tau, because Tau
 loads it while `tau_coding` is still importing.
 
