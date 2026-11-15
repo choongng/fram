@@ -211,9 +211,7 @@ def format_tau_documentation() -> str:
         f"(docs/tui.md), {BRANDING.product_name} architecture and packages (docs/architecture.md)\n"
         f"- When working on {BRANDING.product_name} topics, "
         "read the docs and examples, and follow .md "
-        "cross-references before implementing\n"
-        f"- Always read relevant {BRANDING.product_name} .md files completely "
-        "and follow links to related docs"
+        "cross-references before implementing"
     )
 
 
@@ -253,6 +251,11 @@ def collect_prompt_guidelines(
     for guideline in extra_guidelines:
         add(guideline)
 
+    if names & {"read", "grep", "find", "ls"}:
+        add(
+            "Make independent read-only calls (reads, searches, listings) together in one "
+            "response rather than one per turn"
+        )
     add("Inspect relevant files and project instructions before editing")
     add("Make focused changes that preserve the project's architecture and style")
     add("Do not overwrite or discard unrelated user changes")
@@ -260,6 +263,11 @@ def collect_prompt_guidelines(
     add("Run relevant tests, formatting, linting, and type checks after changes")
     add("Report checks honestly; never claim a command passed unless you ran it")
     add("Ask before destructive operations or materially ambiguous design choices")
+    add(
+        "Once a finished task has been committed, if the next request does not need "
+        "this conversation, suggest starting a new session (/new in the TUI) rather "
+        "than carrying the long context on"
+    )
     add("Be concise in your responses")
     add("Show file paths clearly when working with files")
     return guidelines
