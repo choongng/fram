@@ -4777,6 +4777,17 @@ async def test_tui_compact_session_info_sits_directly_below_prompt() -> None:
 
 
 @pytest.mark.anyio
+async def test_tui_compact_session_info_spans_the_main_pane_edge_to_edge() -> None:
+    app = TauTuiApp(FakeSession())
+
+    async with app.run_test(size=(120, 30)):
+        compact_info = app.query_one("#compact-session-info")
+        main_pane = app.query_one("#main-pane")
+        assert compact_info.content_region.x == main_pane.region.x
+        assert compact_info.content_region.right == main_pane.region.right
+
+
+@pytest.mark.anyio
 async def test_tui_sidebar_is_visible_on_medium_windows() -> None:
     app = TauTuiApp(FakeSession(), tui_settings=TuiSettings(sidebar_visible=True))
 

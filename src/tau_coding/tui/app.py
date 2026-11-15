@@ -4105,11 +4105,13 @@ class TauTuiApp(App[None]):
         max-height: 6;
     }
 
+    /* No inset: the path and model start in column 0 and the token count
+       ends in the last column, like the prompt's full-width rules. */
     #compact-session-info {
         height: auto;
         max-height: 3;
-        margin: 0 1 0 1;
-        padding: 0 1;
+        margin: 0;
+        padding: 0;
         color: $tau-muted-text;
     }
 
