@@ -1159,7 +1159,13 @@ class TranscriptView(VerticalScroll):
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         """Track follow mode and page the bounded transcript window near its edges."""
         super().watch_scroll_y(old_value, new_value)
-        if new_value < old_value:
+        # A decrease that still ends at the bottom is not the reader leaving.
+        # Textual's anchoring sets scroll_y unclamped while it lays out short
+        # content, and the next size update clamps it back down to
+        # max_scroll_y. Treating that as a scroll up dropped follow mode on a
+        # fresh transcript, so the next item landed outside the window behind
+        # a "scroll for later" row that the short view could never scroll to.
+        if new_value < old_value and new_value < self.max_scroll_y:
             self._follow_output = False
         elif new_value >= self.max_scroll_y and self._window_is_latest:
             self._follow_output = True

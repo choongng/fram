@@ -9881,6 +9881,30 @@ async def test_tui_app_system_appends_markdown_command_output_to_transcript() ->
 
 
 @pytest.mark.anyio
+async def test_command_output_on_a_short_fresh_transcript_stays_in_the_window() -> None:
+    # Laying out a startup notice briefly anchors the view past its end and
+    # clamps it back. That must not read as the reader scrolling up, or the
+    # next item lands behind a "scroll for later" row that cannot scroll.
+    app = TauTuiApp(FakeSession(), startup_notices=("notice one",))
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        prompt = app.query_one("#prompt")
+        prompt.value = "/system"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        transcript = app.query_one("#transcript", TranscriptView)
+        assert len(app.state.items) == 2
+        assert (transcript._window_start, transcript._window_end) == (0, 2)
+        assert not [
+            boundary for boundary in app.query(TranscriptWindowBoundary) if boundary.display
+        ]
+        assert app.state.items[1].system_prompt is True
+        assert len(app.query(TranscriptMessageWidget)) == 2
+
+
+@pytest.mark.anyio
 async def test_tui_app_omits_textual_header() -> None:
     app = TauTuiApp(FakeSession())
 
