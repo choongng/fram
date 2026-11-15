@@ -19,8 +19,8 @@ Usage:
 
 ``--base`` defaults to ``git merge-base HEAD upstream/main``. The check reads
 the working tree, so uncommitted edits count. Headings, tables, code, HTML,
-blockquotes, front matter, files under hidden directories and paragraphs with
-hard line breaks are skipped.
+blockquotes, front matter, files under hidden directories or ``vendor/``, and
+paragraphs with hard line breaks are skipped.
 """
 
 from __future__ import annotations
@@ -149,6 +149,12 @@ def _words(lines: list[str]) -> list[str]:
     return " ".join(lines).split()
 
 
+def not_fram_prose(path: str) -> bool:
+    """Whether ``path`` is tool state, a template, or another project's prose."""
+    parts = Path(path).parts
+    return parts[:1] == ("vendor",) or any(part.startswith(".") for part in parts)
+
+
 def changed_lines(base: str, path: str) -> set[int]:
     """0-based line numbers of ``path`` in the working tree that differ from ``base``."""
     diff = subprocess.run(
@@ -239,8 +245,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     problems = []
     for path in paths:
-        if not args.paths and any(part.startswith(".") for part in Path(path).parts):
-            continue  # tool state and templates, not prose
+        if not args.paths and not_fram_prose(path):
+            continue
         if path.endswith(".md") and Path(path).is_file():
             problems += check_file(path, changed_lines(base, path), fix=args.fix)
     for problem in problems:
