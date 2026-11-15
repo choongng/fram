@@ -660,9 +660,8 @@ class TranscriptMessageWidget(Horizontal):
        borderless rows (assistant, thinking) sit one column in and keep no
        right padding. The padding lives on the body, not on the inner markdown
        blocks: those inherit the markdown widget's styles, and padding on both
-       would double up. The bottom padding row — the box's blank interior row
-       — is user-only (see the constructor): the summary-style rows (tools,
-       status) read better sitting close to what follows them. */
+       would double up. No role pads above or below its text: the blank rows
+       that separate one row from the next are margins, outside the box. */
     TranscriptMessageWidget > .transcript-message-body {
         height: auto;
         padding: 0 1 0 1;
@@ -670,10 +669,6 @@ class TranscriptMessageWidget(Horizontal):
 
     TranscriptMessageWidget.-borderless > .transcript-message-body {
         padding: 0 0 0 1;
-    }
-
-    TranscriptMessageWidget.-user > .transcript-plain-body {
-        padding: 0 1 1 1;
     }
 
     /* Textual's default MarkdownParagraph rule is `margin: 0 0 1 0`. Inside a
@@ -737,16 +732,9 @@ class TranscriptMessageWidget(Horizontal):
             self._result_markup,
         )
         super().__init__(classes="transcript-message")
-        # The user box is the only one with blank interior rows, and its body
-        # is always a plain Static (see `_use_plain_transcript_body`), which
-        # is what the interior-padding CSS rule selects on.
-        if item.role == "user":
-            self.add_class("-user")
-        # Top padding is the user box's blank interior row and must not move
-        # its pipe glyph down; the bottom interior row lives on the body (see
-        # the CSS), and only the user box has one. The side insets are
-        # margins (outside the box) and body padding (inside it).
-        self.styles.padding = (1, 0, 0, 0) if item.role == "user" else (0, 0, 0, 0)
+        # The side insets are margins (outside the box) and body padding
+        # (inside it); no role has blank interior rows above or below its text.
+        self.styles.padding = (0, 0, 0, 0)
         foreground, background = _split_rich_style_colors(self._role_style.body)
         self._body_foreground = foreground
         if _transcript_prose_spacing(item):

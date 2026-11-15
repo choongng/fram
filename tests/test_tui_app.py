@@ -2859,11 +2859,12 @@ async def test_transcript_message_widget_renders_full_height_role_block() -> Non
         # block is rectangular and the accent spans every wrapped line.
         assert widget.styles.background == background
         assert body.styles.background == background
-        # The row pads its top interior row (the user box); the box's bottom
-        # interior row lives on the body.
-        assert widget.styles.padding.top == 1
+        # The box has no blank interior rows: its text starts on its first
+        # row and ends on its last.
+        assert widget.styles.padding.top == 0
         assert widget.styles.padding.bottom == 0
-        assert body.styles.padding.bottom == 1
+        assert body.styles.padding.top == 0
+        assert body.styles.padding.bottom == 0
         edge_type, edge_color = widget.styles.border_left
         assert edge_type != "none"
         assert edge_color == border
@@ -3246,7 +3247,9 @@ async def test_long_transcript_mounts_bounded_latest_window_and_pages_earlier(
     monkeypatch.setattr(tui_widgets, "TRANSCRIPT_WINDOW_ITEMS", 6)
     monkeypatch.setattr(tui_widgets, "TRANSCRIPT_WINDOW_PAGE_ITEMS", 2)
     app = TauTuiApp(
-        FakeSession(messages=[UserMessage(content=f"message {index}") for index in range(12)])
+        FakeSession(
+            messages=[UserMessage(content=f"message {index}\nline\nline") for index in range(12)]
+        )
     )
 
     async with app.run_test(size=(60, 20)) as pilot:
@@ -3254,9 +3257,9 @@ async def test_long_transcript_mounts_bounded_latest_window_and_pages_earlier(
         transcript = app.query_one("#transcript", TranscriptView)
         assert transcript._window_start == 6
         assert transcript._window_end == 12
-        assert [widget.item.text for widget in app.query(TranscriptMessageWidget)] == [
-            f"message {index}" for index in range(6, 12)
-        ]
+        assert [
+            widget.item.text.split("\n")[0] for widget in app.query(TranscriptMessageWidget)
+        ] == [f"message {index}" for index in range(6, 12)]
         [top_boundary] = list(app.query(TranscriptWindowBoundary))
         assert top_boundary.direction == "earlier"
 
@@ -3265,9 +3268,9 @@ async def test_long_transcript_mounts_bounded_latest_window_and_pages_earlier(
 
         assert transcript._window_start == 4
         assert transcript._window_end == 10
-        assert [widget.item.text for widget in app.query(TranscriptMessageWidget)] == [
-            f"message {index}" for index in range(4, 10)
-        ]
+        assert [
+            widget.item.text.split("\n")[0] for widget in app.query(TranscriptMessageWidget)
+        ] == [f"message {index}" for index in range(4, 10)]
         assert {boundary.direction for boundary in app.query(TranscriptWindowBoundary)} == {
             "earlier",
             "later",
@@ -3376,7 +3379,9 @@ async def test_tool_only_message_keeps_a_paged_back_window(
     monkeypatch.setattr(tui_widgets, "TRANSCRIPT_WINDOW_PAGE_ITEMS", 2)
     monkeypatch.setattr(tui_widgets, "TRANSCRIPT_WINDOW_OVERSCAN_ITEMS", 0)
     app = TauTuiApp(
-        FakeSession(messages=[UserMessage(content=f"message {index}") for index in range(12)])
+        FakeSession(
+            messages=[UserMessage(content=f"message {index}\nline\nline") for index in range(12)]
+        )
     )
 
     async with app.run_test(size=(60, 20)) as pilot:
@@ -14240,7 +14245,7 @@ async def test_page_keys_page_across_the_bounded_transcript_window(
     app = TauTuiApp(
         FakeSession(
             messages=[
-                UserMessage(content=f"message {index}\n" + "line\n" * 2) for index in range(12)
+                UserMessage(content=f"message {index}\n" + "line\n" * 4) for index in range(12)
             ]
         )
     )
