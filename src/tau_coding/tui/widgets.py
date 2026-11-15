@@ -570,7 +570,7 @@ class SystemPromptSectionWidget(Vertical):
             0.08,
         )
         self.styles.background = background
-        self.styles.border_left = ("tall", self.source_color)
+        self.styles.border_left = ("solid", self.source_color)
 
     def compose(self) -> Any:
         name = Text()
