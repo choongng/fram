@@ -13,7 +13,10 @@ budget. `guards.py` then queues a follow-up asking the model to act.
   next reply can build on it. A token budget converts to characters at the
   model's measured thinking ratio.
 - **Switch.** `/reasoning-guard`, RPC `set_reasoning_guard`, `--reasoning-guard`
-  and `TAU_REASONING_GUARD`.
+  and `TAU_REASONING_GUARD`. The same switch governs the tool-argument loop cut
+  in `tau_ai`, which ends a chat-completions reply whose tool-call arguments
+  repeat one block of text. Only the chat-completions parser has that cut; the
+  other providers have nothing for the switch to turn off.
 
 ## Why it exists
 
@@ -27,7 +30,23 @@ looks healthy, so stall detection doesn't help, and the user pays for the time.
 - The guard reads the setting on every request. The harness takes its provider
   once per run, so adding or removing the wrapper would only take effect on the
   next run.
-- With the guard off, the provider's own stream is returned untouched.
+- With the guard off, the provider's events are passed on as they come and the
+  model's limits are not read.
+- `tau_ai` does not read Tau's settings, and the choice is not kept on the
+  provider: sessions can share one provider object and choose differently, and a
+  request can wait for a slot between being made and being sent.
+  `tau_ai.loop_cuts` holds the choice in a context variable, true by default.
+  The guard sets it around each step of reading a response and resets it before
+  handing the event on, so it is in force when the chat-completions parser
+  starts on the response and does not reach the caller's other requests. A
+  change of the switch reaches the next request; a response already being read
+  keeps the choice its parser started with. The continuation-summary request
+  carries the run's tools but goes to the provider without the guard, so the
+  session marks it with the switch itself. Both cuts are heuristics with the
+  same remedy, so one switch covers them: a user who turns the guard off to let
+  a long reply through should not have to find a second control. Repeated tool
+  calls stay refused either way: a refusal is an ordinary tool result and loses
+  no output.
 - The guard never edits the prompt prefix or the thinking level, so cached
   prompts stay valid. The only change to later requests is the looped passage
   left out of the cut turn.

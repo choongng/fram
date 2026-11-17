@@ -55,6 +55,7 @@ from tau_agent.session.tree import SessionTreeError, path_to_entry
 from tau_agent.tool_history import ToolHistoryRepair, repair_tool_history
 from tau_agent.tools import AgentTool, AgentToolResult
 from tau_agent.types import JSONValue
+from tau_ai.loop_cuts import cutting_looping_tool_arguments
 from tau_ai.model_catalog import ModelCatalogProvider, RuntimeModel, RuntimeModelCatalog
 from tau_ai.model_limits import ModelLimitsProvider, RuntimeModelLimits
 from tau_ai.model_profile import ModelProfile, ProfileKey
@@ -4824,7 +4825,12 @@ class CodingSession:
             return None
         final: AssistantMessage | None = None
         try:
-            with long_lived_conversation(self._config.long_lived):
+            # This request carries the run's tools and goes past the run's
+            # guard, so it is marked with the session's switch here.
+            with (
+                long_lived_conversation(self._config.long_lived),
+                cutting_looping_tool_arguments(self._reasoning_guard.enabled),
+            ):
                 async for event in self._harness.config.provider.stream_response(
                     model=self.model,
                     system=system,

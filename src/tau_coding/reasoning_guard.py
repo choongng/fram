@@ -38,6 +38,7 @@ from tau_agent.provider_events import (
 )
 from tau_agent.tools import AgentTool
 from tau_agent.types import JSONValue
+from tau_ai.loop_cuts import cutting_looping_tool_arguments
 from tau_ai.model_profile import ModelProfile
 from tau_coding.context_window import (
     CHARS_PER_TOKEN,
@@ -365,9 +366,11 @@ class RequestGuard:
     past its character budget before a tool call, is stopped and ends as a
     length stop, so the session follows up. `setting` is read for every request,
     so a change reaches the run's next request; while it is off, requests go
-    straight to `inner`. `level_chars` is the budget from the session's thinking
-    level, for a format that cannot send one. `limits` gives the served model's
-    ratios and output cap.
+    to `inner` and their events are passed on as they come. The same switch
+    marks each request for a provider that cuts looping tool-call arguments
+    itself (`tau_ai.loop_cuts`), so `off` leaves the whole response alone.
+    `level_chars` is the budget from the session's thinking level, for a
+    format that cannot send one. `limits` gives the served model's ratios and output cap.
     """
 
     def __init__(
@@ -396,15 +399,17 @@ class RequestGuard:
         signal: CancellationToken | None = None,
         session_id: str | None = None,
     ) -> AsyncIterator[AssistantMessageEvent]:
-        stream = self.inner.stream_response(
-            model=model,
-            system=system,
-            messages=messages,
-            tools=tools,
-            signal=signal,
-            session_id=session_id,
-        )
         setting = self.setting()
+        with cutting_looping_tool_arguments(setting.enabled):
+            stream = self.inner.stream_response(
+                model=model,
+                system=system,
+                messages=messages,
+                tools=tools,
+                signal=signal,
+                session_id=session_id,
+            )
+        stream = _marked_for_tool_argument_loops(stream, setting.enabled)
         if not setting.enabled:
             return stream
         limits = self.limits() if self.limits is not None else ServedModelLimits()
@@ -425,6 +430,30 @@ class RequestGuard:
             ),
             context_chars_per_token=limits.context_chars_per_token,
         )
+
+
+async def _marked_for_tool_argument_loops(
+    source: AsyncIterator[AssistantMessageEvent], enabled: bool
+) -> AsyncIterator[AssistantMessageEvent]:
+    """Pass a response's events on, reading it with the request's choice about
+    looping tool-call arguments in force.
+
+    The choice is set for each step of the read and not kept between steps: a
+    response may wait in a queue before it starts, and the caller may read
+    another conversation's response, with another choice, in the meantime.
+    """
+    try:
+        while True:
+            with cutting_looping_tool_arguments(enabled):
+                try:
+                    event = await anext(source)
+                except StopAsyncIteration:
+                    return
+            yield event
+    finally:
+        aclose = getattr(source, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
 
 async def cut_looping_reasoning(

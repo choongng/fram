@@ -15,12 +15,14 @@ from tau_agent.cache_hints import conversation_long_lived
 from tau_agent.messages import UserMessage, assistant_content
 from tau_agent.session import JsonlSessionStorage, MessageEntry
 from tau_ai import FakeProvider
+from tau_ai.loop_cuts import looping_tool_arguments_cut
 from tau_coding import CodingSession, CodingSessionConfig
 from tau_coding.context_window import (
     SUMMARIZATION_SYSTEM_PROMPT,
     UPDATE_SUMMARIZATION_PROMPT,
     build_continuation_summary_request,
 )
+from tau_coding.reasoning_guard import ReasoningGuardSetting
 from tau_coding.session_recall import COMPACTION_INDEX_HEADING, split_compaction_index
 
 
@@ -28,9 +30,11 @@ class _Recording(FakeProvider):
     def __init__(self, streams: list[list[object]]) -> None:
         super().__init__(streams)  # type: ignore[arg-type]
         self.long_lived: list[bool] = []
+        self.cut_looping_tool_arguments: list[bool] = []
 
     def stream_response(self, **kwargs: object):  # type: ignore[no-untyped-def,override]
         self.long_lived.append(conversation_long_lived())
+        self.cut_looping_tool_arguments.append(looping_tool_arguments_cut())
         return super().stream_response(**kwargs)  # type: ignore[arg-type]
 
 
@@ -104,6 +108,23 @@ async def test_the_summary_is_a_continuation_of_the_cached_conversation(tmp_path
     [compaction] = [e for e in await session._config.storage.read_all() if e.type == "compaction"]
     assert compaction.index is not None
     assert compaction.index[0]["caption"] == "Did task 0."
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_the_summary_request_honours_the_reasoning_guard_switch(
+    tmp_path: Path, enabled: bool
+) -> None:
+    """The summary request carries the run's tools past the run's guard, so the
+    session marks it with the switch itself."""
+    reply = "```captions\n#1-#2: Did task 0.\n```\n## Goal\nShip it"
+    provider = _Recording([_reply(AssistantMessage(content=reply))])
+    session = await _session(tmp_path, provider)
+    session.set_reasoning_guard(ReasoningGuardSetting(enabled=enabled))
+
+    await session.compact()
+
+    assert provider.cut_looping_tool_arguments == [enabled]
 
 
 @pytest.mark.anyio

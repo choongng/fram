@@ -396,7 +396,10 @@ def main(
         str | None,
         typer.Option(
             "--reasoning-guard",
-            help="Reasoning loop cut and thinking budget: on, off or characters per turn.",
+            help=(
+                "Reasoning loop cut, thinking budget and tool-argument loop cut: "
+                "on, off or characters per turn."
+            ),
         ),
     ] = None,
     extension: Annotated[

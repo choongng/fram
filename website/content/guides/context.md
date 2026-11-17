@@ -187,7 +187,7 @@ To change it while a session is running, use `/reasoning-guard`:
 ```text
 /reasoning-guard          # show the current state and budget
 /reasoning-guard 20000    # budget of 20,000 characters of reasoning per turn
-/reasoning-guard off      # no loop cut and no budget
+/reasoning-guard off      # no loop cut, no budget, no tool-argument loop cut
 /reasoning-guard on       # back to the default behaviour
 ```
 
@@ -197,9 +197,13 @@ run, and applies to the current session only. A value you set wins over the
 variables. To choose at startup, use `--reasoning-guard` or
 `TAU_REASONING_GUARD`.
 
-A low budget can cut long reasoning that was going somewhere. `off` covers only
-this guard: repeated tool calls and tool arguments that start repeating are
-still stopped.
+A low budget can cut long reasoning that was going somewhere. `off` also stops
+Tau from ending a reply whose tool-call arguments have started repeating one
+block of text, so a file that really holds that much repeated text can be
+written in one call. Tau makes that cut only with providers that speak the chat
+completions API, such as local and OpenAI-compatible servers; with other
+providers there is nothing for `off` to change there. Repeated tool calls are
+still refused.
 
 ## Malformed tool calls
 

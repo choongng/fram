@@ -9,7 +9,7 @@ command palette with **Ctrl+K**.
 | Command | Description |
 | --- | --- |
 | `/quit` | Exit the session |
-| `/reasoning-guard [on\|off\|chars]` | Show or set the reasoning guard for this session: the loop cut and the per-turn reasoning budget, in characters. |
+| `/reasoning-guard [on\|off\|chars]` | Show or set the reasoning guard for this session: the loop cut and the per-turn reasoning budget, in characters. `off` also turns off the cut of tool-call arguments that repeat, which only chat-completions providers have. |
 | `/new` | Start a new session |
 | `/session` | Show session info and stats (model, cwd, tools, skills, context) |
 | `/system` | Show the active system prompt grouped by source without adding it to context or session history |

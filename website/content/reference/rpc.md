@@ -43,9 +43,11 @@ auto-compaction is off).
 
 `set_reasoning_guard` is a Tau extension that switches the reasoning guard of a
 running session. Its `value` is `"on"`, `"off"`, or a whole number of characters
-for the per-turn budget. The next provider request uses the new value. The
-response and `get_state` report `reasoningGuardEnabled` and
-`reasoningBudgetChars` (`null` when no budget applies).
+for the per-turn budget. `"off"` also turns off the cut of tool-call arguments
+that repeat, which only chat-completions providers have. The next provider
+request uses the new value. The response and `get_state` report
+`reasoningGuardEnabled` and `reasoningBudgetChars` (`null` when no budget
+applies).
 
 ```json
 {"id":"g","type":"set_reasoning_guard","value":20000}
