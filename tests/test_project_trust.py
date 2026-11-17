@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -126,6 +127,50 @@ def test_detector_covers_protected_matrix_without_reading_contents(tmp_path: Pat
         "themes": 1,
     }
     assert len(summary.sample_paths) <= 12
+
+
+def test_detector_follows_tau_project_dirname(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Trust is asked for the project folder Tau will load, not `.tau`."""
+    monkeypatch.setenv("TAU_PROJECT_DIRNAME", ".fram")
+    project = tmp_path / "project"
+    for candidate in (
+        project / ".fram/skills/fram/SKILL.md",
+        project / ".fram/SYSTEM.md",
+        project / ".fram/AGENTS.md",
+        project / ".fram/extensions/simple.py",
+        project / ".tau/prompts/tau.md",
+        project / ".tau/themes/theme.json",
+    ):
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        candidate.write_text("protected content", encoding="utf-8")
+
+    summary = ProtectedResourceDetector().detect(canonicalize_project_path(project))
+
+    assert summary.counts == {
+        "context": 1,
+        "extensions": 1,
+        "skills": 1,
+        "system-prompts": 1,
+    }
+
+
+@pytest.mark.anyio
+async def test_trust_follows_an_explicit_project_dirname(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An embedder's TauPaths names the folder trust checks, not the environment."""
+    monkeypatch.delenv("TAU_PROJECT_DIRNAME", raising=False)
+    project = tmp_path / "project"
+    (project / ".fram").mkdir(parents=True)
+    (project / ".fram/SYSTEM.md").write_text("protected content", encoding="utf-8")
+    paths = replace(_paths(tmp_path), project_dirname=".fram")
+
+    summary, resolution = await ProjectTrustCoordinator(ProjectTrustStore(paths)).resolve(project)
+
+    assert summary.counts == {"system-prompts": 1}
+    assert resolution.trusted is False
 
 
 def test_detector_ignores_empty_and_unsupported_resources(tmp_path: Path) -> None:

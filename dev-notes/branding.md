@@ -44,11 +44,12 @@ The lookup scans installed distributions' metadata, about 19 ms including the
 
 Names that other tools, files or services rely on stay Tau's, so by default a
 rebranded build shares configuration, sessions and extensions with Tau. A
-distribution that wants its own home can set `TAU_HOME` before importing
+distribution that wants its own folders can set `TAU_HOME`, and
+`TAU_PROJECT_DIRNAME` to rename project `.tau` folders, before importing
 `tau_coding`:
 
 - `~/.tau`, `TAU_HOME` and the other `TAU_*` variables
-- `.tau` project folders and `[tool.tau]` extension metadata
+- `.tau` project folders (by default) and `[tool.tau]` extension metadata
 - OAuth originators and the Codex `User-Agent` (`tau_ai`)
 - the extension API's `tau` object, RPC source identifiers and protocol errors
 - `updater.py` and the update-check notice, which are about `tau-ai` on PyPI (a

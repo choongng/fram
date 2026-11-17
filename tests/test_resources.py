@@ -116,6 +116,34 @@ def test_system_prompt_files_replace_by_precedence_and_append_in_order(tmp_path:
     ]
 
 
+def test_project_resources_follow_tau_project_dirname(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With `TAU_PROJECT_DIRNAME` set, the project folder it names replaces
+    `.tau` for every project resource, and `.tau` is not read at all."""
+    monkeypatch.setenv("TAU_PROJECT_DIRNAME", ".fram")
+    cwd = tmp_path / "project"
+    tau_home = tmp_path / "home" / ".fram"
+    for folder in (".fram", ".tau"):
+        (cwd / folder).mkdir(parents=True)
+        (cwd / folder / "SYSTEM.md").write_text(f"{folder} base", encoding="utf-8")
+        (cwd / folder / "APPEND_SYSTEM.md").write_text(f"{folder} append", encoding="utf-8")
+    tau_home.mkdir(parents=True)
+
+    paths = TauResourcePaths(root=tau_home, agents_root=None, cwd=cwd)
+    resources = discover_system_prompt_resources(paths)
+
+    assert paths.project_dir == cwd / ".fram"
+    assert paths.skills_dirs == (
+        tau_home / "skills",
+        cwd / ".fram" / "skills",
+        cwd / ".agents" / "skills",
+    )
+    assert paths.themes_dirs == (tau_home / "themes", cwd / ".fram" / "themes")
+    assert resources.custom_prompt == ".fram base"
+    assert resources.append_prompts == (".fram append",)
+
+
 def test_overlapping_user_and_project_append_path_is_loaded_once(tmp_path: Path) -> None:
     tau_home = tmp_path / ".tau"
     tau_home.mkdir()

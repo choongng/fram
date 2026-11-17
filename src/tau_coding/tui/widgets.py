@@ -43,6 +43,7 @@ from textual.widgets.markdown import MarkdownFence
 from tau_agent.tools import AgentTool, ToolCall
 from tau_coding.branding import BRANDING
 from tau_coding.context_window import estimate_text_tokens
+from tau_coding.paths import project_dirname
 from tau_coding.prompt_templates import PromptTemplate
 from tau_coding.session_stats import SessionStats
 from tau_coding.skills import Skill
@@ -3620,18 +3621,22 @@ def _grouped_sidebar_file_widgets[SidebarResource: (Skill, PromptTemplate)](
     return widgets
 
 
+def _resource_origin_rank(origin: str) -> int:
+    """Where an origin label sits in resource precedence, lowest first.
+
+    `~/.agents` follows the user Tau home, then come the project resource
+    folder (`.tau` or `TAU_PROJECT_DIRNAME`) and the project `.agents`. Any
+    other origin is the configurable user Tau home, whose label may be
+    `~/.tau`, another path beneath `~`, or an absolute path, so it comes first.
+    """
+    for rank, prefix in enumerate(("~/.agents", f"./{project_dirname()}", "./.agents"), 1):
+        if origin.startswith(f"{prefix}/"):
+            return rank
+    return 0
+
+
 def _resource_origin_sort_key(origin: str) -> tuple[int, str]:
-    precedence = {
-        "~/.tau/skills": 0,
-        "~/.agents/skills": 1,
-        "./.tau/skills": 2,
-        "./.agents/skills": 3,
-        "~/.tau/prompts": 0,
-        "~/.agents/prompts": 1,
-        "./.tau/prompts": 2,
-        "./.agents/prompts": 3,
-    }
-    return precedence.get(origin, len(precedence)), origin
+    return _resource_origin_rank(origin), origin
 
 
 def _absolute_sidebar_path(path: Path, *, cwd: Path) -> Path:
@@ -3655,7 +3660,7 @@ def _grouped_skill_list(
         origin = skill.path.parent.parent if skill.path.name == "SKILL.md" else skill.path.parent
         label = _resource_origin_label(origin, cwd=cwd)
         grouped.setdefault(label, []).append((skill.name, skill.disable_model_invocation))
-    return _grouped_resource_names(grouped, directory="skills", theme=theme)
+    return _grouped_resource_names(grouped, theme=theme)
 
 
 def _grouped_prompt_list(
@@ -3671,26 +3676,15 @@ def _grouped_prompt_list(
     for template in templates:
         label = _resource_origin_label(template.path.parent, cwd=cwd)
         grouped.setdefault(label, []).append((template.name, False))
-    return _grouped_resource_names(grouped, directory="prompts", theme=theme)
+    return _grouped_resource_names(grouped, theme=theme)
 
 
 def _grouped_resource_names(
     grouped: dict[str, list[tuple[str, bool]]],
     *,
-    directory: str,
     theme: TuiTheme,
 ) -> Text:
-    origin_precedence = {
-        f"~/.agents/{directory}": 1,
-        f"./.tau/{directory}": 2,
-        f"./.agents/{directory}": 3,
-    }
-    # The remaining origin is the configurable user Tau home. Its rendered
-    # path may be ~/.tau, another path beneath ~, or an absolute path.
-    ordered_origins = sorted(
-        grouped,
-        key=lambda origin: (origin_precedence.get(origin, 0), origin),
-    )
+    ordered_origins = sorted(grouped, key=_resource_origin_sort_key)
     text = Text()
     for origin in ordered_origins:
         if text:

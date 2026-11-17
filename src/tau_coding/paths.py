@@ -26,6 +26,25 @@ def _default_tau_home() -> Path:
     return path
 
 
+PROJECT_DIRNAME_ENV = "TAU_PROJECT_DIRNAME"
+"""Names the project-local resource folder in place of ``.tau``."""
+
+
+def project_dirname() -> str:
+    """Return the name of the project-local resource folder.
+
+    It is ``.tau`` unless ``TAU_PROJECT_DIRNAME`` names another, so a
+    redistribution that moves its home with ``TAU_HOME`` can move its project
+    folders too (Fram uses ``.fram`` for both).
+    """
+    value = environ.get(PROJECT_DIRNAME_ENV, "").strip()
+    if not value:
+        return ".tau"
+    if value in {".", ".."} or "/" in value or "\\" in value:
+        raise ValueError(f"{PROJECT_DIRNAME_ENV} must be a single folder name, such as .tau")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class TauPaths:
     """Resolved Tau filesystem locations.
@@ -37,6 +56,7 @@ class TauPaths:
 
     home: Path = field(default_factory=_default_tau_home)
     agents_home: Path = field(default_factory=lambda: Path.home() / ".agents")
+    project_dirname: str = field(default_factory=project_dirname)
 
     @property
     def sessions_dir(self) -> Path:
@@ -109,8 +129,8 @@ class TauPaths:
         return self.agents_home / "prompts"
 
     def project_tau_dir(self, cwd: Path) -> Path:
-        """Return the project-local Tau resource directory."""
-        return cwd / ".tau"
+        """Return the project-local Tau resource directory (``.tau`` by default)."""
+        return cwd / self.project_dirname
 
     def project_agents_dir(self, cwd: Path) -> Path:
         """Return the project-local `.agents` resource directory."""

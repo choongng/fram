@@ -2,10 +2,11 @@
 
 Display text reads these values instead of spelling out "Tau", so a
 redistribution can rebrand without editing every message. Names that other
-tools rely on are identity, not branding, and stay as they are: ``~/.tau`` and
-``TAU_HOME``, ``TAU_*`` environment variables, ``.tau`` project folders,
-``[tool.tau]`` extension metadata, OAuth originators and the extension API's
-``tau`` object.
+tools rely on are identity, not branding, and stay as they are: ``TAU_*``
+environment variables, ``[tool.tau]`` extension metadata, OAuth originators and
+the extension API's ``tau`` object. Where files live is not branding either: a
+redistribution moves ``~/.tau`` with ``TAU_HOME`` and renames project ``.tau``
+folders with ``TAU_PROJECT_DIRNAME``.
 
 A distribution rebrands by declaring one entry point in the
 ``tau_coding.branding`` group. Its object maps ``Branding`` field names to
