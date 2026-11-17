@@ -38,10 +38,18 @@ from tau_coding.line_anchors import row_line_number, strip_row_prefixes
 #: The inline limit is this fraction of the model's context window...
 INLINE_WINDOW_DIVISOR = 50
 #: ...clamped to this many tokens, so a small window still shows a useful
-#: result and a large one does not take in a whole diff. At 4,000 tokens a 200K
-#: window inlines up to 16,000 chars, so a 26,000-char `git diff` is buffered.
-#: See dev-notes/tool-result-buffers.md.
-MIN_INLINE_TOKENS = 1_000
+#: result and a large one does not take in a whole diff. At 2,000 tokens a
+#: window of 32K to 100K inlines up to 8,000 chars and a cut one keeps 4,000,
+#: room for a page of a report at both ends. At 4,000 tokens a 200K window
+#: inlines up to 16,000 chars, so a 26,000-char `git diff` is buffered. See
+#: dev-notes/tool-result-buffers.md.
+MIN_INLINE_TOKENS = 2_000
+#: ...except on a small window, where that floor would let one result take too
+#: large a share: there the floor is this fraction of the window, and never
+#: under 1,000 tokens. An 8K or 16K window inlines 1,000 tokens, a 24K one
+#: 1,500, and 32K and up the full 2,000.
+SMALL_WINDOW_INLINE_DIVISOR = 16
+SMALL_WINDOW_MIN_INLINE_TOKENS = 1_000
 MAX_INLINE_TOKENS = 4_000
 #: Set to a token count, this replaces the computed inline limit for the run.
 INLINE_TOKENS_ENV = "TAU_TOOL_RESULT_INLINE_TOKENS"
@@ -116,9 +124,12 @@ class BufferLimits:
         """
         tokens = _env_inline_tokens() or inline_tokens
         if tokens is None:
+            floor = max(
+                SMALL_WINDOW_MIN_INLINE_TOKENS,
+                min(MIN_INLINE_TOKENS, context_window_tokens // SMALL_WINDOW_INLINE_DIVISOR),
+            )
             tokens = min(
-                MAX_INLINE_TOKENS,
-                max(MIN_INLINE_TOKENS, context_window_tokens // INLINE_WINDOW_DIVISOR),
+                MAX_INLINE_TOKENS, max(floor, context_window_tokens // INLINE_WINDOW_DIVISOR)
             )
         # A fixed 4 characters a token: the served model's measured ratio
         # describes its own output, not the tool output it reads.

@@ -590,3 +590,27 @@ async def test_inline_limit_is_configurable(
     shown = _text(session._buffer_result(diff))
     assert "full output: " in shown and len(shown) < 2_000
     assert BufferLimits.for_context_window(200_000).inline_chars == 2_000
+
+
+def test_the_inline_floor_is_2000_tokens_and_less_on_a_small_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(INLINE_TOKENS_ENV, raising=False)
+    inline = {
+        window: BufferLimits.for_context_window(window).inline_chars // 4
+        for window in (4_000, 8_000, 16_000, 24_000, 32_000, 100_000, 150_000, 1_000_000)
+    }
+    assert inline == {
+        # 1/16 of a small window, and never under 1,000 tokens...
+        4_000: 1_000,
+        8_000: 1_000,
+        16_000: 1_000,
+        24_000: 1_500,
+        # ...2,000 from 32K up, then 1/50 of the window up to 4,000.
+        32_000: 2_000,
+        100_000: 2_000,
+        150_000: 3_000,
+        1_000_000: 4_000,
+    }
+    limits = BufferLimits.for_context_window(32_000)
+    assert (limits.inline_chars, limits.window_chars) == (8_000, 4_000)
