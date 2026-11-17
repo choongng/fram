@@ -532,6 +532,85 @@ async def test_hidden_thinking_moves_nothing_on_screen() -> None:
         assert after[1:] == before[1:]
 
 
+def _silent_tool_burst(steps: int, *, answer: bool) -> list[AgentEvent]:
+    """One run whose messages each think and call a tool with no text, then
+    optionally a last message that thinks and answers."""
+    events: list[AgentEvent] = [AgentStartEvent()]
+    for step in range(steps + (1 if answer else 0)):
+        thinking = f"plan {step}"
+        partial = AssistantMessage()
+        events += [
+            MessageStartEvent(message=partial),
+            _thinking_delta(partial, thinking),
+            MessageUpdateEvent(
+                message=partial,
+                assistant_message_event=ThinkingEndEvent(
+                    content_index=0, content=thinking, partial=partial
+                ),
+            ),
+        ]
+        if step == steps:
+            events += [
+                _text_delta(partial, "done"),
+                MessageEndEvent(
+                    message=AssistantMessage(
+                        content=[ThinkingContent(thinking=thinking), TextContent(text="done")]
+                    )
+                ),
+            ]
+            continue
+        call = ToolCall(
+            id=f"call-{step}",
+            name="bash",
+            arguments={"command": "ls", "description": f"Step {step}"},
+        )
+        events += [
+            MessageEndEvent(
+                message=AssistantMessage(content=[ThinkingContent(thinking=thinking), call])
+            ),
+            ToolExecutionStartEvent(tool_call_id=call.id, tool_name=call.name, args=call.arguments),
+            ToolExecutionEndEvent(
+                tool_call_id=call.id,
+                tool_name=call.name,
+                result=AgentToolResult(content="ok"),
+                is_error=False,
+            ),
+        ]
+    events.append(AgentEndEvent())
+    return events
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("answer", [False, True])
+async def test_hidden_thinking_between_tool_calls_never_moves_the_history_down(
+    answer: bool,
+) -> None:
+    """A tool row that follows another joins it with no blank row above, so
+    the placeholder before it holds no blank row either. Were it taller than
+    the row that replaces it, each call would push the history up and then
+    let it fall back by a row. An answer after the burst brings its own blank
+    row, which only pushes the history further up."""
+    app = TauTuiApp(FakeSession())
+    stream = _streamer(app)
+    async with app.run_test(size=(100, 16)) as pilot:
+        await pilot.pause()
+        # Enough history that the transcript scrolls, so growth moves rows up.
+        for turn in range(3):
+            for event in _turn_events(turn, with_tool=False):
+                await stream(event)
+        await stream(MessageEndEvent(message=UserMessage(content="go")))
+        await pilot.pause()
+        anchor = _rows(app)[-1]
+        last_y = anchor.region.y
+        for event in _silent_tool_burst(3, answer=answer):
+            await stream(event)
+            await pilot.pause()
+            assert anchor.region.y <= last_y, type(event).__name__
+            last_y = anchor.region.y
+        roles = [row.item.role for row in _rows(app)]
+        assert roles.count("tool") == 3
+
+
 @pytest.mark.anyio
 async def test_a_run_that_ends_while_thinking_drops_the_placeholder() -> None:
     """With no answer or tool row to take its place, the blank row goes when

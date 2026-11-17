@@ -25,10 +25,11 @@ In that row the notice sat directly under the transcript's last line, with no
 gap. Then, when the answer arrived, its blank row and first line pushed the
 history up two rows. Now, while thinking is hidden, the transcript ends with a
 `ThinkingPlaceholder`: a blank row with the usual blank row above it, the same
-shape as the first line of an answer or tool row. The notice is lifted one row,
-over the placeholder, so it has a blank row above it. The row that follows takes
-the placeholder's place, and the history does not move. The scroll happens once,
-when thinking starts, rather than when the answer lands.
+shape as the first line of an answer or tool row (after a tool row it drops that
+blank row; see below). The notice is lifted one row, over the placeholder, so it
+has a blank row above it. The row that follows takes the placeholder's place,
+and the history does not move back down. The scroll happens once, when thinking
+starts, rather than when the answer lands.
 
 - `TuiState.hidden_thinking_in_progress` decides from state: a run is going,
   thinking is hidden, no answer text is streaming, and the newest item is
@@ -52,8 +53,12 @@ when thinking starts, rather than when the answer lands.
   widgets from the arrangement before it calls `pre_layout`, so a change of
   `display` made there only takes effect on the following pass.
 - When a tool row directly follows another, the two join with no blank row
-  between them. If thinking ran in between, the joined row is one line shorter
-  than the placeholder it replaces, and the history moves down one row.
+  between them, and `TranscriptView.pre_layout` gives the placeholder the same
+  treatment: after a tool row it drops its blank row too. The placeholder is
+  then never taller than the row that replaces it. A tool row takes its place
+  exactly, and an answer, which keeps its blank row, only pushes the history
+  further up. Before this, each thinking step in a burst of tool calls pushed
+  the history up two rows and let it fall back one, so the transcript bounced.
 
 ### Autocomplete floats above the prompt
 
