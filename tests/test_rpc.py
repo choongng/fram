@@ -1,5 +1,7 @@
+import asyncio
 import json
-from collections.abc import AsyncIterator
+import queue
+from collections.abc import AsyncIterator, Callable
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +30,8 @@ from tau_coding import (
     TauPaths,
 )
 from tau_coding import cli as cli_module
+from tau_coding.extensions import ExtensionAPI
+from tau_coding.extensions.loader import LoadedExtension
 from tau_coding.provider_config import ProviderModelMetadata
 from tau_coding.rpc import RpcServer
 from tau_coding.session_recall import COMPACTION_INDEX_HEADING
@@ -71,6 +75,90 @@ async def test_rpc_streams_correlated_response_and_events(tmp_path: Path) -> Non
     }
     assert any(record["type"] == "agent_start" for record in records)
     assert records[-1]["type"] == "agent_settled"
+
+
+class _ScriptedStdin:
+    """An input stream whose lines the test supplies while the server runs."""
+
+    def __init__(self) -> None:
+        self._lines: queue.Queue[str] = queue.Queue()
+
+    def send(self, record: dict[str, object] | None) -> None:
+        """Supply one command, or end the stream with None."""
+        self._lines.put("" if record is None else json.dumps(record) + "\n")
+
+    def readline(self) -> str:
+        return self._lines.get()
+
+
+async def _wait_for_records(
+    stdout: StringIO, done: Callable[[list[dict[str, object]]], bool]
+) -> list[dict[str, object]]:
+    async def poll() -> list[dict[str, object]]:
+        while True:
+            records = [json.loads(line) for line in stdout.getvalue().split("\n") if line]
+            if done(records):
+                return records
+            await asyncio.sleep(0.01)
+
+    return await asyncio.wait_for(poll(), timeout=5)
+
+
+@pytest.mark.anyio
+async def test_rpc_steer_sent_while_a_run_is_ending_gets_a_run_of_its_own(
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider(
+        [
+            [assistant_start(model="fake"), assistant_done(AssistantMessage(content="one"))],
+            [assistant_start(model="fake"), assistant_done(AssistantMessage(content="two"))],
+        ]
+    )
+    session = await _session(tmp_path, provider)
+    apis: list[ExtensionAPI] = []
+    session.extension_runtime._setup_extension(  # noqa: SLF001 - test seam
+        LoadedExtension(
+            name="probe",
+            path=Path("/virtual/probe.py"),
+            source_id="extension:test:probe",
+            setup=apis.append,
+        )
+    )
+    ending = asyncio.Event()
+    leave = asyncio.Event()
+
+    async def hold_the_end(event: object, context: object) -> None:
+        del event, context
+        if not ending.is_set():
+            ending.set()
+            await leave.wait()
+
+    apis[0].on("agent_end", hold_the_end)
+    stdin = _ScriptedStdin()
+    stdout = StringIO()
+    server = asyncio.create_task(RpcServer(session, stdin=stdin, stdout=stdout).run())  # type: ignore[arg-type]
+
+    try:
+        stdin.send({"id": "one", "type": "prompt", "message": "hi"})
+        await asyncio.wait_for(ending.wait(), timeout=5)
+        # The run still counts as running, but it has read its queues for the
+        # last time.
+        stdin.send({"id": "two", "type": "steer", "message": "and then this"})
+        await _wait_for_records(stdout, lambda records: any(r.get("id") == "two" for r in records))
+        leave.set()
+        records = await _wait_for_records(
+            stdout, lambda records: sum(r["type"] == "agent_settled" for r in records) == 2
+        )
+    finally:
+        # Also when the wait above fails: the server reads in a thread, which
+        # would otherwise never return.
+        stdin.send(None)
+        await asyncio.wait_for(server, timeout=5)
+
+    assert {"type": "response", "command": "steer", "success": True, "id": "two"} in records
+    assert len(provider.calls) == 2
+    assert [message.text for message in provider.calls[1][2]][-1] == "and then this"
+    assert session.queued_message_count == 0
 
 
 @pytest.mark.anyio
