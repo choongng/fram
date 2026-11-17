@@ -39,6 +39,19 @@ persist a queued message at queue time. Persistence still happens after the
 active run finishes, when the harness has injected queued user messages into the
 transcript.
 
+`CodingSession.queue_prompt()` is the queue-only form. `prompt()` awaits the
+`input` hooks before it looks at the harness, so a caller that saw the harness
+running can still get a whole turn when the harness stops in between.
+`queue_prompt()` runs the same hooks and expansion, queues only if the harness
+is still running afterwards, and refuses otherwise, so the caller keeps the
+message. A frontend that queues from an input handler uses it to be sure the
+handler never runs a turn.
+
+Its `QueuePromptResult` has a `status` of `queued`, `handled` or `refused`. A
+refusal after the hooks ran carries `prepared_text`. The caller delivers that
+text with `prepared=True`, on `queue_prompt()` or `prompt()`, which skips the
+hooks and the expansion so that neither runs twice on one message.
+
 ## TUI Behavior
 
 The built-in Textual frontend maps:

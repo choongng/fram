@@ -57,6 +57,38 @@ otherwise stop. Overlapping `session.prompt(...)` calls without
 `streaming_behavior` are rejected so two runs can't mutate one transcript.
 `QueueUpdateEvent` carries pending queued text for badges/status.
 
+`session.prompt(...)` queues only while the agent is running. At any other time
+it runs a whole turn, and the agent can stop while the session awaits its
+`input` hooks, after your own check. A frontend that queues from an input
+handler, and must not run a turn there, calls `queue_prompt` instead:
+
+```python
+result = await session.queue_prompt(user_text, streaming_behavior="steer")
+if result.status == "refused":
+    held = (user_text, result.prepared_text)
+```
+
+It never starts a turn. `result.status` is `queued`, `handled` when an `input`
+hook consumed the message, or `refused` when the agent is not running. The call
+yields no events, so read `session.queue_update_event()` afterwards to refresh
+badges.
+
+On a refusal, keep the message and submit it as the next run. If
+`result.prepared_text` is set, the hooks and prompt expansion have already run,
+and that text is their result. Deliver it with `prepared=True`, which skips
+both, so a hook does not act twice on one message:
+
+```python
+user_text, prepared_text = held
+if prepared_text is None:
+    events = session.prompt(user_text)
+else:
+    events = session.prompt(prepared_text, prepared=True)
+```
+
+`queue_prompt` takes `prepared=True` as well, for offering the message to a
+later agent run. Keep showing `user_text` while the message waits.
+
 ## Slash commands
 
 Slash commands belong to `tau_coding`. Before treating input as a prompt:

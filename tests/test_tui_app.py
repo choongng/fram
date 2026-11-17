@@ -4,14 +4,14 @@ import re
 import sys
 import threading
 import weakref
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from dataclasses import replace
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Literal
 
 import pytest
 from rich.console import Console
@@ -99,6 +99,7 @@ from tau_coding.provider_config import (
 from tau_coding.resources import ResourceDiagnostic
 from tau_coding.session import (
     ModelChoice,
+    QueuePromptResult,
     SessionTreeBranchResult,
     SessionTreeChoice,
     TerminalCommandResult,
@@ -267,6 +268,9 @@ class FakeSessionState:
 
 
 class FakeSession:
+    # Tests set this to simulate an agent run that can queue messages.
+    is_running: bool = False
+
     def __init__(self, messages=(), events=()) -> None:
         self.messages = tuple(messages)
         self.events = tuple(events)
@@ -629,6 +633,16 @@ class FakeSession:
             return
         for event in self.events:
             yield event
+
+    async def queue_prompt(
+        self, text: str, *, streaming_behavior: str, source: str = "interactive"
+    ) -> QueuePromptResult:
+        # Like the real session: queue with the running agent, or refuse.
+        if not self.is_running:
+            return QueuePromptResult("refused")
+        async for _event in self.prompt(text, streaming_behavior=streaming_behavior, source=source):
+            pass
+        return QueuePromptResult("queued")
 
 
 def _visible_footer_bindings(app: TauTuiApp) -> dict[str, str]:
@@ -4224,15 +4238,21 @@ async def test_tui_submit_prompt_optimistically_appends_user_message_without_ful
 
 @pytest.mark.anyio
 async def test_second_prompt_before_first_frame_queues_instead_of_cancelling() -> None:
-    """A submission racing the reserved prompt must queue, not replace it."""
+    """A submission racing a prompt that has not started must queue, not replace it."""
 
     class YieldingFakeSession(FakeSession):
         # Yield control after every event so a second submission observes the
         # running state instead of racing a turn that completes instantly.
         async def prompt(self, text: str, **kwargs: object) -> AsyncIterator[AgentEvent]:
-            async for event in super().prompt(text, **kwargs):
-                yield event
-                await asyncio.sleep(0)
+            starts_run = kwargs.get("streaming_behavior") is None
+            self.is_running = self.is_running or starts_run
+            try:
+                async for event in super().prompt(text, **kwargs):  # type: ignore[arg-type]
+                    yield event
+                    await asyncio.sleep(0)
+            finally:
+                if starts_run:
+                    self.is_running = False
 
     session = YieldingFakeSession(
         events=[
@@ -4247,15 +4267,22 @@ async def test_second_prompt_before_first_frame_queues_instead_of_cancelling() -
         prompt = app.query_one("#prompt", PromptInput)
         prompt.text = "first"
         first = asyncio.create_task(app._submit_prompt_from_editor(streaming_behavior="steer"))
-        while app._pending_prompt_run_id is None:
+        while not _texts(app, "user"):
             await asyncio.sleep(0)
         prompt.text = "second"
         second = asyncio.create_task(app._submit_prompt_from_editor(streaming_behavior="steer"))
+        # The second submission is held, not left waiting for the first to start.
+        await asyncio.wait_for(second, timeout=5)
+        assert session.prompt_texts == []
 
-        for _ in range(100):
-            if first.done() and second.done() and app._pending_prompt_run_id is None:
-                break
-            await pilot.pause()
+        await _pause_until(
+            pilot,
+            lambda: (
+                first.done()
+                and session.prompt_texts == ["first", "second"]
+                and not app.state.running
+            ),
+        )
         await pilot.pause()
 
     # Both prompts reach the session: the first was never cancelled, and the
@@ -4263,7 +4290,787 @@ async def test_second_prompt_before_first_frame_queues_instead_of_cancelling() -
     assert session.prompt_texts == ["first", "second"]
     assert session.streaming_behaviors == [None, "steer"]
     assert app._optimistic_user_messages == []
-    assert app._pending_prompt_run_id is None
+
+
+class _GappedRunSession(FakeSession):
+    """A session whose first run pauses while its agent is not running.
+
+    Like the real session, it queues a message only while its agent runs, and
+    looks at the agent only after the `input` hooks: ``prompt`` then runs a
+    whole turn, and ``queue_prompt`` refuses and hands back the text the hooks
+    made, which is delivered with ``prepared=True`` so that the hooks do not
+    see the message again. The agent counts as running
+    until its last event has been consumed. The pause stands for whatever the
+    run does between agent runs or after the last one: compaction or failover
+    before a retry, or naming and settle hooks.
+    """
+
+    def __init__(
+        self,
+        *,
+        gap_error: Exception | None = None,
+        retries_after_gap: bool = False,
+        pause_in_agent_run: bool = False,
+        handled_texts: tuple[str, ...] = (),
+        slow_hook_texts: tuple[str, ...] = (),
+        failing_texts: tuple[str, ...] = (),
+        hook_rewrites: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__()
+        # What the input hooks turn a text into, for the texts they change.
+        self.hook_rewrites = hook_rewrites or {}
+        self.in_gap = asyncio.Event()
+        self.gap_gate = asyncio.Event()
+        self.gap_error = gap_error
+        self.retries_after_gap = retries_after_gap
+        # The first agent run of the first turn can pause while it is running.
+        self.pause_in_agent_run = pause_in_agent_run
+        self.in_agent_run = asyncio.Event()
+        self.agent_run_gate = asyncio.Event()
+        self.handled_texts = handled_texts
+        self.slow_hook_texts = slow_hook_texts
+        self.in_hook = asyncio.Event()
+        self.hook_gate = asyncio.Event()
+        self.failing_texts = failing_texts
+        # Texts the session's input hooks saw, in order.
+        self.offered: list[str] = []
+        # What became of each text: a "turn", or a "steer" or "follow_up"
+        # queued with the running agent.
+        self.delivered: list[tuple[str, str]] = []
+        self.before_turn: Callable[[str], None] | None = None
+        self.open_turns = 0
+        self.turns_overlapped = False
+
+    @property
+    def started_turns(self) -> list[str]:
+        return [text for text, delivery in self.delivered if delivery == "turn"]
+
+    async def _run_input_hooks(self, text: str) -> str | None:
+        """Return the text to deliver, or None if a hook handled ``text``."""
+        self.offered.append(text)
+        if text in self.slow_hook_texts:
+            self.in_hook.set()
+            await self.hook_gate.wait()
+        if text in self.failing_texts:
+            raise RuntimeError(f"cannot expand {text}")
+        if text in self.handled_texts:
+            return None
+        return self.hook_rewrites.get(text, text)
+
+    def _queue(self, text: str, streaming_behavior: str) -> None:
+        if streaming_behavior == "steer":
+            self.queued_steering_messages = (*self.queued_steering_messages, text)
+        else:
+            self.queued_follow_up_messages = (*self.queued_follow_up_messages, text)
+        self.delivered.append((text, streaming_behavior))
+
+    def queue_follow_up_message(self, content: str, **kwargs: object) -> None:
+        del kwargs
+        self._queue(content, "follow_up")
+
+    async def queue_prompt(
+        self,
+        text: str,
+        *,
+        streaming_behavior: str,
+        source: str = "interactive",
+        prepared: bool = False,
+    ) -> QueuePromptResult:
+        del source
+        if not self.is_running:
+            return QueuePromptResult("refused", prepared_text=text if prepared else None)
+        if not prepared:
+            hooked_text = await self._run_input_hooks(text)
+            if hooked_text is None:
+                return QueuePromptResult("handled")
+            if not self.is_running:
+                return QueuePromptResult("refused", prepared_text=hooked_text)
+            text = hooked_text
+        self._queue(text, streaming_behavior)
+        return QueuePromptResult("queued")
+
+    async def prompt(self, text: str, **kwargs: object) -> AsyncIterator[AgentEvent]:
+        streaming_behavior = kwargs.get("streaming_behavior")
+        if not kwargs.get("prepared"):
+            hooked_text = await self._run_input_hooks(text)
+            if hooked_text is None:
+                return
+            text = hooked_text
+        if self.is_running and isinstance(streaming_behavior, str):
+            self._queue(text, streaming_behavior)
+            yield self.queue_update_event()
+            return
+        if self.before_turn is not None:
+            self.before_turn(text)
+        self.turns_overlapped = self.turns_overlapped or self.open_turns > 0
+        self.open_turns += 1
+        first_turn = not self.started_turns
+        self.delivered.append((text, "turn"))
+        self.prompt_sources.append(str(kwargs.get("source", "interactive")))
+        try:
+            async for event in self._agent_run(text, f"reply to {text}", pause=first_turn):
+                yield event
+            if first_turn:
+                self.in_gap.set()
+                await self.gap_gate.wait()
+                if self.gap_error is not None:
+                    raise self.gap_error
+                if self.retries_after_gap:
+                    async for event in self._agent_run(None, f"retried reply to {text}"):
+                        yield event
+            yield AgentSettledEvent()
+        finally:
+            self.is_running = False
+            self.open_turns -= 1
+
+    async def _agent_run(
+        self, prompt: str | None, reply: str, *, pause: bool = False
+    ) -> AsyncIterator[AgentEvent]:
+        self.is_running = True
+        try:
+            yield AgentStartEvent()
+            await asyncio.sleep(0)
+            if prompt is not None:
+                yield MessageEndEvent(message=UserMessage(content=prompt))
+            if pause and self.pause_in_agent_run:
+                self.in_agent_run.set()
+                await self.agent_run_gate.wait()
+            yield MessageEndEvent(message=AssistantMessage(content=reply))
+            yield SessionAgentEndEvent(will_retry=self.retries_after_gap and prompt is not None)
+        finally:
+            # Like the harness: still running until the last event is consumed.
+            self.is_running = False
+
+
+async def _submit_from_editor(
+    app: TauTuiApp, text: str, streaming_behavior: Literal["steer", "follow_up"] = "steer"
+) -> None:
+    """Submit ``text`` like Enter does, failing if the handler waits on a run."""
+    app.query_one("#prompt", PromptInput).text = text
+    await asyncio.wait_for(
+        app._submit_prompt_from_editor(streaming_behavior=streaming_behavior), timeout=5
+    )
+
+
+async def _pause_until(pilot: Any, condition: Any) -> None:
+    for _ in range(200):
+        if condition():
+            return
+        await pilot.pause()
+    raise AssertionError("condition was not met")
+
+
+def _texts(app: TauTuiApp, role: str) -> list[str]:
+    return [item.text for item in app.state.items if item.role == role]
+
+
+def _is_idle(app: TauTuiApp, session: _GappedRunSession) -> bool:
+    return session.open_turns == 0 and not app._is_working() and app._prompt_worker is None
+
+
+def _record_notices(app: TauTuiApp) -> list[str]:
+    notices: list[str] = []
+
+    def fake_notify(message: str, **kwargs: object) -> None:
+        del kwargs
+        notices.append(message)
+
+    app._notify = fake_notify  # type: ignore[method-assign]
+    return notices
+
+
+@pytest.mark.anyio
+async def test_prompt_while_previous_run_settles_starts_after_it_settles() -> None:
+    """A prompt sent after the agent stopped but before the run settled runs next.
+
+    The session cannot queue once its agent has stopped, so queueing would run
+    the whole new turn inside the key handler and freeze the UI.
+    """
+    session = _GappedRunSession()
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit_from_editor(app, "first")
+        await asyncio.wait_for(session.in_gap.wait(), timeout=5)
+        assert app.state.running
+
+        await _submit_from_editor(app, "second")
+        for _ in range(5):
+            await pilot.pause()
+        # The second prompt is held until the first run settles.
+        assert session.offered == ["first"]
+        assert app.state.running
+        # Input still works while it is held.
+        await pilot.press("x")
+        assert app.query_one("#prompt", PromptInput).text == "x"
+
+        session.gap_gate.set()
+        await _pause_until(
+            pilot, lambda: session.started_turns == ["first", "second"] and _is_idle(app, session)
+        )
+
+    assert session.delivered == [("first", "turn"), ("second", "turn")]
+    assert not session.turns_overlapped
+    assert _texts(app, "user") == ["first", "second"]
+    assert _texts(app, "assistant") == ["reply to first", "reply to second"]
+
+
+@pytest.mark.anyio
+async def test_follow_up_while_previous_run_settles_starts_after_it_settles() -> None:
+    """A follow-up has no run left to follow, so it becomes the next run too."""
+    session = _GappedRunSession()
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit_from_editor(app, "first")
+        await asyncio.wait_for(session.in_gap.wait(), timeout=5)
+        await _submit_from_editor(app, "second", "follow_up")
+        for _ in range(5):
+            await pilot.pause()
+        assert session.offered == ["first"]
+
+        session.gap_gate.set()
+        await _pause_until(
+            pilot, lambda: session.started_turns == ["first", "second"] and _is_idle(app, session)
+        )
+
+    assert session.delivered == [("first", "turn"), ("second", "turn")]
+    assert not session.turns_overlapped
+    assert _texts(app, "assistant") == ["reply to first", "reply to second"]
+
+
+@pytest.mark.anyio
+async def test_escape_while_previous_run_settles_drops_the_held_prompt() -> None:
+    """An interrupt cancels a held prompt along with the run it waits on."""
+    session = _GappedRunSession()
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit_from_editor(app, "first")
+        await asyncio.wait_for(session.in_gap.wait(), timeout=5)
+        await _submit_from_editor(app, "second")
+        worker = app._prompt_worker
+        assert worker is not None
+
+        await pilot.press("escape")
+        assert not app.state.running
+        assert session.cancel_count == 1
+        await _pause_until(pilot, lambda: worker.is_finished and session.open_turns == 0)
+        session.gap_gate.set()
+        for _ in range(5):
+            await pilot.pause()
+
+        assert session.offered == ["first"]
+        assert not app.state.running
+
+        # The TUI is idle again: the next prompt starts a run of its own.
+        await _submit_from_editor(app, "third")
+        await _pause_until(pilot, lambda: _texts(app, "assistant")[-1:] == ["reply to third"])
+
+    assert session.delivered == [("first", "turn"), ("third", "turn")]
+    assert not session.turns_overlapped
+
+
+@pytest.mark.anyio
+async def test_app_exit_while_previous_run_settles_drops_the_held_prompt() -> None:
+    session = _GappedRunSession()
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)):
+        await _submit_from_editor(app, "first")
+        await asyncio.wait_for(session.in_gap.wait(), timeout=5)
+        await _submit_from_editor(app, "second")
+
+    assert session.open_turns == 0
+    assert session.offered == ["first"]
+
+
+@pytest.mark.anyio
+async def test_run_failing_while_settling_shows_its_error_before_the_held_prompt() -> None:
+    session = _GappedRunSession(gap_error=RuntimeError("settle hook exploded"))
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit_from_editor(app, "first")
+        await asyncio.wait_for(session.in_gap.wait(), timeout=5)
+        await _submit_from_editor(app, "second")
+
+        session.gap_gate.set()
+        await _pause_until(pilot, lambda: _texts(app, "assistant")[-1:] == ["reply to second"])
+        await _pause_until(pilot, lambda: _is_idle(app, session))
+
+        roles = [item.role for item in app.state.items]
+
+    errors = _texts(app, "error")
+    assert len(errors) == 1
+    assert "settle hook exploded" in errors[0]
+    # The failed run's error precedes the held prompt's turn.
+    assert roles.index("error") < [item.text for item in app.state.items].index("second")
+    assert session.delivered == [("first", "turn"), ("second", "turn")]
+    assert not session.turns_overlapped
+    assert not app.state.running
+
+
+@pytest.mark.anyio
+async def test_held_prompt_handled_by_input_hook_leaves_the_tui_idle() -> None:
+    """A held prompt whose run produces no events must not leave the TUI running.
+
+    The hook runs when the prompt is delivered, not in the key handler while
+    the earlier run still owns the session.
+    """
+    session = _GappedRunSession(handled_texts=("second",))
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit_from_editor(app, "first")
+        await asyncio.wait_for(session.in_gap.wait(), timeout=5)
+        await _submit_from_editor(app, "second")
+        for _ in range(5):
+            await pilot.pause()
+        assert session.offered == ["first"]
+
+        session.gap_gate.set()
+        await _pause_until(pilot, lambda: session.offered == ["first", "second"])
+        await _pause_until(pilot, lambda: _is_idle(app, session))
+
+        # Idle means the next prompt starts a run instead of being held.
+        await _submit_from_editor(app, "third")
+        await _pause_until(pilot, lambda: _texts(app, "assistant")[-1:] == ["reply to third"])
+
+    assert session.delivered == [("first", "turn"), ("third", "turn")]
+    assert not session.turns_overlapped
+
+
+@pytest.mark.anyio
+async def test_prompts_held_while_previous_run_settles_keep_their_order() -> None:
+    """Further prompts sent while a run settles neither block nor jump the queue."""
+    session = _GappedRunSession()
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit_from_editor(app, "first")
+        await asyncio.wait_for(session.in_gap.wait(), timeout=5)
+        await _submit_from_editor(app, "second")
+        await _submit_from_editor(app, "third", "follow_up")
+        await _submit_from_editor(app, "fourth")
+        assert session.offered == ["first"]
+
+        session.gap_gate.set()
+        await _pause_until(pilot, lambda: len(session.delivered) == 4 and _is_idle(app, session))
+
+    # The oldest held prompt starts the next run; the rest are queued with it
+    # as soon as its agent runs, as if they had been sent during that run.
+    assert session.delivered == [
+        ("first", "turn"),
+        ("second", "turn"),
+        ("third", "follow_up"),
+        ("fourth", "steer"),
+    ]
+    assert not session.turns_overlapped
+    assert not app.state.running
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("streaming_behavior", ["steer", "follow_up"])
+async def test_prompt_between_agent_runs_of_one_turn_does_not_abandon_the_retry(
+    streaming_behavior: Literal["steer", "follow_up"],
+) -> None:
+    """A prompt sent while a run compacts or fails over joins the retry.
+
+    The agent is not running then either, but the run is not over: starting a
+    new run would abandon the retry or overlap it.
+    """
+    session = _GappedRunSession(retries_after_gap=True)
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit_from_editor(app, "first")
+        await asyncio.wait_for(session.in_gap.wait(), timeout=5)
+        await _submit_from_editor(app, "second", streaming_behavior)
+        for _ in range(5):
+            await pilot.pause()
+        assert session.offered == ["first"]
+
+        session.gap_gate.set()
+        await _pause_until(pilot, lambda: len(session.delivered) == 2 and _is_idle(app, session))
+
+    assert _texts(app, "assistant") == ["reply to first", "retried reply to first"]
+    assert session.delivered == [("first", "turn"), ("second", streaming_behavior)]
+    assert not session.turns_overlapped
+    assert not app.state.running
+
+
+@pytest.mark.anyio
+async def test_agent_stopping_during_input_hooks_does_not_run_a_turn_in_the_key_handler() -> None:
+    """The agent can stop while a queued prompt's `input` hooks are awaited.
+
+    The session then has nothing to queue the prompt with. It must come back
+    to the app and start the next run from a worker, not run as a turn inside
+    the key handler that submitted it.
+    """
+    session = _GappedRunSession(pause_in_agent_run=True, slow_hook_texts=("second",))
+    session.gap_gate.set()
+    app = TauTuiApp(session)
+    handler_done_at_turn_start: dict[str, bool] = {}
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit_from_editor(app, "first")
+        await asyncio.wait_for(session.in_agent_run.wait(), timeout=5)
+        app.query_one("#prompt", PromptInput).text = "second"
+        handler = asyncio.create_task(app._submit_prompt_from_editor(streaming_behavior="steer"))
+        session.before_turn = lambda text: handler_done_at_turn_start.update({text: handler.done()})
+        await asyncio.wait_for(session.in_hook.wait(), timeout=5)
+
+        # The first run ends while the hooks for "second" are still running.
+        session.agent_run_gate.set()
+        await _pause_until(pilot, lambda: session.open_turns == 0)
+        assert session.delivered == [("first", "turn")]
+        session.hook_gate.set()
+        await asyncio.wait_for(handler, timeout=5)
+
+        await _pause_until(
+            pilot, lambda: session.started_turns == ["first", "second"] and _is_idle(app, session)
+        )
+
+    assert handler_done_at_turn_start == {"second": True}
+    assert not session.turns_overlapped
+    assert _texts(app, "user") == ["first", "second"]
+    assert _texts(app, "assistant") == ["reply to first", "reply to second"]
+
+
+async def _hold_prompt_refused_after_input_hooks(
+    app: TauTuiApp, session: _GappedRunSession, pilot: Any
+) -> None:
+    """Leave "second" held: its hooks ran, then the agent stopped before it queued.
+
+    The first run is left paused after its agent run, so "second" stays held.
+    """
+    await _submit_from_editor(app, "first")
+    await asyncio.wait_for(session.in_agent_run.wait(), timeout=5)
+    app.query_one("#prompt", PromptInput).text = "second"
+    handler = asyncio.create_task(app._submit_prompt_from_editor(streaming_behavior="steer"))
+    await asyncio.wait_for(session.in_hook.wait(), timeout=5)
+    session.agent_run_gate.set()
+    await asyncio.wait_for(session.in_gap.wait(), timeout=5)
+    session.hook_gate.set()
+    await asyncio.wait_for(handler, timeout=5)
+    await pilot.pause()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("retries_after_gap", "delivery"),
+    [(False, "turn"), (True, "steer")],
+    ids=["starts the next run", "queues with a later agent run"],
+)
+async def test_held_prompt_refused_after_input_hooks_does_not_run_them_again(
+    retries_after_gap: bool, delivery: str
+) -> None:
+    """A prompt the session refused after its `input` hooks ran is hooked once.
+
+    A hook can log, count, or handle some inputs and rewrite others. Sending
+    the refused prompt's original text again would make it act twice on one
+    message. What is delivered is the text the hooks made; what is listed as
+    waiting is still the text that was typed.
+    """
+    session = _GappedRunSession(
+        pause_in_agent_run=True,
+        retries_after_gap=retries_after_gap,
+        slow_hook_texts=("second",),
+        hook_rewrites={"second": "second, rewritten"},
+    )
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _hold_prompt_refused_after_input_hooks(app, session, pilot)
+        assert session.delivered == [("first", "turn")]
+        assert _waiting_rows(app) == ["… waiting · queued: second"]
+
+        session.gap_gate.set()
+        await _pause_until(
+            pilot,
+            lambda: (
+                session.delivered[1:] == [("second, rewritten", delivery)]
+                and _is_idle(app, session)
+            ),
+        )
+
+    assert session.offered == ["first", "second"]
+    assert not session.turns_overlapped
+    if delivery == "turn":
+        assert _texts(app, "user") == ["first", "second, rewritten"]
+        assert _texts(app, "assistant") == ["reply to first", "reply to second, rewritten"]
+
+
+@pytest.mark.anyio
+async def test_held_prompt_refused_after_input_hooks_is_edited_as_typed() -> None:
+    """Up gives back what was typed, not what the hooks made of it."""
+    session = _GappedRunSession(
+        pause_in_agent_run=True,
+        slow_hook_texts=("second",),
+        hook_rewrites={"second": "second, rewritten"},
+    )
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _hold_prompt_refused_after_input_hooks(app, session, pilot)
+
+        await pilot.press("up")
+        assert app.query_one("#prompt", PromptInput).text == "second"
+
+        session.gap_gate.set()
+        await _pause_until(pilot, lambda: _is_idle(app, session))
+        for _ in range(5):
+            await pilot.pause()
+
+    assert session.delivered == [("first", "turn")]
+
+
+@pytest.mark.anyio
+async def test_resume_is_refused_while_a_prompt_is_held() -> None:
+    """A prompt held for one session must not run in another one."""
+    session = _GappedRunSession()
+    app = TauTuiApp(session)
+    notices = _record_notices(app)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit_from_editor(app, "first")
+        await asyncio.wait_for(session.in_gap.wait(), timeout=5)
+        await _submit_from_editor(app, "second")
+
+        await _submit_from_editor(app, "/resume other-1")
+        app._handle_session_picker_result("other-2")
+        for _ in range(5):
+            await pilot.pause()
+        assert session.resumed_session_ids == []
+        # One refusal for the command, one for the picker.
+        assert len(notices) == 2
+        assert all("Cannot resume" in notice for notice in notices)
+
+        session.gap_gate.set()
+        await _pause_until(
+            pilot, lambda: session.started_turns == ["first", "second"] and _is_idle(app, session)
+        )
+
+        # Nothing is held any more, so the switch goes through.
+        await _submit_from_editor(app, "/resume other-1")
+
+    assert session.resumed_session_ids == ["other-1"]
+    assert not session.turns_overlapped
+
+
+@pytest.mark.anyio
+async def test_new_session_drops_held_prompts() -> None:
+    session = _GappedRunSession()
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit_from_editor(app, "first")
+        await asyncio.wait_for(session.in_gap.wait(), timeout=5)
+        await _submit_from_editor(app, "second")
+
+        await _submit_from_editor(app, "/new")
+        assert session.new_session_count == 1
+        assert session.cancel_count == 1
+        session.gap_gate.set()
+        await _pause_until(pilot, lambda: _is_idle(app, session))
+        for _ in range(5):
+            await pilot.pause()
+        assert session.offered == ["first"]
+
+        await _submit_from_editor(app, "third")
+        await _pause_until(pilot, lambda: _texts(app, "assistant")[-1:] == ["reply to third"])
+
+    assert session.delivered == [("first", "turn"), ("third", "turn")]
+    assert not session.turns_overlapped
+
+
+@pytest.mark.anyio
+async def test_extension_message_waits_behind_held_prompts() -> None:
+    """An extension message arriving as a run ends must not start a run of its own.
+
+    The run has released the session and the oldest held prompt is about to
+    start the next run. A message that started one first would take the
+    session from it.
+    """
+    session = _GappedRunSession()
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit_from_editor(app, "first")
+        await asyncio.wait_for(session.in_gap.wait(), timeout=5)
+        await _submit_from_editor(app, "second")
+
+        session.gap_gate.set()
+        while session.open_turns:
+            await asyncio.sleep(0)
+        await app._deliver_extension_message("from extension")
+
+        await _pause_until(pilot, lambda: len(session.delivered) == 3 and _is_idle(app, session))
+
+    assert session.delivered == [
+        ("first", "turn"),
+        ("second", "turn"),
+        ("from extension", "follow_up"),
+    ]
+    assert not session.turns_overlapped
+
+
+@pytest.mark.anyio
+async def test_extension_message_while_a_run_settles_follows_it() -> None:
+    session = _GappedRunSession()
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit_from_editor(app, "first")
+        await asyncio.wait_for(session.in_gap.wait(), timeout=5)
+        await app._deliver_extension_message("from extension")
+        for _ in range(5):
+            await pilot.pause()
+        assert session.delivered == [("first", "turn")]
+
+        session.gap_gate.set()
+        await _pause_until(pilot, lambda: len(session.delivered) == 2 and _is_idle(app, session))
+
+    assert session.delivered == [("first", "turn"), ("from extension", "turn")]
+    assert session.prompt_sources == ["interactive", "extension"]
+    assert not session.turns_overlapped
+
+
+@pytest.mark.anyio
+async def test_prompt_the_session_cannot_queue_is_named_in_the_notice() -> None:
+    session = _GappedRunSession(pause_in_agent_run=True, failing_texts=("second",))
+    session.gap_gate.set()
+    app = TauTuiApp(session)
+    notices = _record_notices(app)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit_from_editor(app, "first")
+        await asyncio.wait_for(session.in_agent_run.wait(), timeout=5)
+        await _submit_from_editor(app, "second")
+        await _submit_from_editor(app, "third")
+
+        assert len(notices) == 1
+        assert '"second"' in notices[0]
+        assert "cannot expand second" in notices[0]
+
+        session.agent_run_gate.set()
+        await _pause_until(pilot, lambda: _is_idle(app, session))
+
+    # The failure costs only the prompt that failed.
+    assert session.delivered == [("first", "turn"), ("third", "steer")]
+
+
+@pytest.mark.anyio
+async def test_run_cancelled_without_an_interrupt_names_the_prompts_it_drops() -> None:
+    """Held prompts are not lost silently when their run is cancelled under them."""
+    session = _GappedRunSession()
+    app = TauTuiApp(session)
+    notices = _record_notices(app)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit_from_editor(app, "first")
+        await asyncio.wait_for(session.in_gap.wait(), timeout=5)
+        await _submit_from_editor(app, "second")
+        await _submit_from_editor(app, "third\nwith detail")
+        worker = app._prompt_worker
+        assert worker is not None
+
+        # For example, another exclusive worker replaced the run's worker.
+        worker.cancel()
+        await _pause_until(pilot, lambda: worker.is_finished and session.open_turns == 0)
+        for _ in range(5):
+            await pilot.pause()
+
+    assert session.offered == ["first"]
+    assert len(notices) == 1
+    assert '"second", "third"' in notices[0]
+
+
+def _waiting_rows(app: TauTuiApp) -> list[str]:
+    """Return the rows shown above the prompt for queued and held messages."""
+    queued_messages = app.query_one("#queued-messages", Static)
+    if not queued_messages.display:
+        return []
+    return [str(row) for row in queued_messages.content.renderables]  # type: ignore[union-attr]
+
+
+@pytest.mark.anyio
+async def test_held_prompt_is_listed_and_can_be_pulled_back_for_editing() -> None:
+    session = _GappedRunSession()
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit_from_editor(app, "first")
+        await asyncio.wait_for(session.in_gap.wait(), timeout=5)
+        await _submit_from_editor(app, "second\nwith extra detail")
+        await pilot.pause()
+        assert _waiting_rows(app) == ["… waiting · queued: second"]
+
+        # Up on an empty prompt takes the held prompt back before it runs.
+        await pilot.press("up")
+        assert app.query_one("#prompt", PromptInput).text == "second\nwith extra detail"
+        await pilot.pause()
+        assert _waiting_rows(app) == []
+
+        session.gap_gate.set()
+        await _pause_until(pilot, lambda: _is_idle(app, session))
+        for _ in range(5):
+            await pilot.pause()
+
+    assert session.offered == ["first"]
+
+
+@pytest.mark.anyio
+async def test_held_prompt_being_queued_cannot_also_be_pulled_back() -> None:
+    """Up while a held prompt is offered to the session must not deliver it twice.
+
+    The offer awaits the session's `input` hooks. Until it returns, the prompt
+    belongs to it: still listed, but not available for editing.
+    """
+    session = _GappedRunSession(retries_after_gap=True, slow_hook_texts=("second",))
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit_from_editor(app, "first")
+        await asyncio.wait_for(session.in_gap.wait(), timeout=5)
+        await _submit_from_editor(app, "second")
+        session.gap_gate.set()
+        await asyncio.wait_for(session.in_hook.wait(), timeout=5)
+        await pilot.pause()
+        assert _waiting_rows(app) == ["… waiting · queued: second"]
+
+        assert app.action_edit_queued_message() is False
+        assert app.query_one("#prompt", PromptInput).text == ""
+
+        session.hook_gate.set()
+        await _pause_until(pilot, lambda: len(session.delivered) == 2 and _is_idle(app, session))
+        assert app.query_one("#prompt", PromptInput).text == ""
+
+    assert session.delivered == [("first", "turn"), ("second", "steer")]
+
+
+@pytest.mark.anyio
+async def test_extension_message_held_behind_a_prompt_is_not_listed_or_pulled_back() -> None:
+    session = _GappedRunSession()
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit_from_editor(app, "first")
+        await asyncio.wait_for(session.in_gap.wait(), timeout=5)
+        await _submit_from_editor(app, "second")
+        await app._deliver_extension_message("from extension")
+        await pilot.pause()
+        assert _waiting_rows(app) == ["… waiting · queued: second"]
+
+        assert app.action_edit_queued_message() is True
+        assert app.query_one("#prompt", PromptInput).text == "second"
+        assert app.action_edit_queued_message() is False
+
+        session.gap_gate.set()
+        await _pause_until(pilot, lambda: len(session.delivered) == 2 and _is_idle(app, session))
+
+    assert session.delivered == [("first", "turn"), ("from extension", "turn")]
 
 
 @pytest.mark.anyio
@@ -11558,6 +12365,7 @@ async def test_tui_app_queues_steering_prompt_while_running() -> None:
 
     async with app.run_test() as pilot:
         app.state.running = True
+        session.is_running = True
         prompt = app.query_one("#prompt", TextArea)
         prompt.text = "adjust course\nwith extra detail"
 
@@ -11596,6 +12404,7 @@ async def test_tui_app_queues_follow_up_prompt_from_keybinding() -> None:
 
     async with app.run_test() as pilot:
         app.state.running = True
+        session.is_running = True
         prompt = app.query_one("#prompt", TextArea)
         prompt.text = "after this\nwith extra detail"
 
