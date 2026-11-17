@@ -31,6 +31,11 @@ def _isolate_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "isolated-home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
+    # A run from inside Fram inherits `TAU_HOME=~/.fram` and
+    # `TAU_PROJECT_DIRNAME=.fram`; without this they would point the tests,
+    # and their children, back at real folders.
+    monkeypatch.delenv("TAU_HOME", raising=False)
+    monkeypatch.delenv("TAU_PROJECT_DIRNAME", raising=False)
     return home
 
 

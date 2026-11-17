@@ -5,6 +5,9 @@ Agent types are markdown files with frontmatter, mirroring pi-subagents:
     .tau/agents/<name>.md          project agent types (win on conflicts)
     ~/.tau/agents/<name>.md        user agent types
 
+(`TAU_HOME` moves `~/.tau` and `TAU_PROJECT_DIRNAME` renames the project
+`.tau`, as they do for Tau.)
+
 The filename is the type name, the body is the subagent's system prompt, and
 frontmatter supports `description`, `tools` (comma-separated allow-list of
 built-in tool names, or `*`), `model`, `thinking` (a Tau thinking level),
@@ -25,6 +28,8 @@ from pathlib import Path
 
 from tau_coding.resources import parse_markdown_resource
 from tau_coding.thinking import THINKING_LEVELS
+
+from .paths import project_tau_dir, tau_home
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,8 +88,7 @@ DEFAULT_AGENT_TYPES: tuple[AgentDefinition, ...] = (
 def load_agent_definitions(cwd: Path, home: Path | None = None) -> dict[str, AgentDefinition]:
     """Load agent types: built-in defaults, then user files, then project files."""
     definitions = {definition.name: definition for definition in DEFAULT_AGENT_TYPES}
-    home_dir = home if home is not None else Path.home()
-    for agents_dir in (home_dir / ".tau" / "agents", cwd / ".tau" / "agents"):
+    for agents_dir in (tau_home(home) / "agents", project_tau_dir(cwd) / "agents"):
         if not agents_dir.is_dir():
             continue
         for path in sorted(agents_dir.glob("*.md")):

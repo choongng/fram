@@ -30,6 +30,12 @@ variables. It is an application-profile boundary, not a security sandbox.
 Embedding applications that supply an explicit `TauPaths` keep using those
 paths regardless of the environment.
 
+To rename the project-level `.tau` folder, set `TAU_PROJECT_DIRNAME` to a single
+folder name, such as `.fram`. Tau then reads project skills, prompts, themes,
+system prompts, `AGENTS.md` and extensions from that folder instead, and asks
+for project trust about it; a `.tau` folder beside it is ignored. `.agents`
+folders are unaffected. Fram sets it to `.fram`.
+
 For profiles containing OAuth credentials, create the directories with private
 permissions before signing in:
 

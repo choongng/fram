@@ -90,8 +90,8 @@ def extension_dirs(
     project trust store, because they execute at session startup.
     """
     dirs: list[Path] = []
-    if include_project_dir and paths.cwd is not None and paths.project_resources_enabled:
-        dirs.append(paths.cwd / ".tau" / "extensions")
+    if include_project_dir and paths.project_dir is not None and paths.project_resources_enabled:
+        dirs.append(paths.project_dir / "extensions")
     if include_user_dir:
         dirs.append(paths.root / "extensions")
     return tuple(_dedupe(dirs))
@@ -147,8 +147,12 @@ def discover_extensions(
 
     if include_resource_dirs:
         directories: list[tuple[Path, ExtensionSource]] = []
-        if include_project_dir and paths.cwd is not None and paths.project_resources_enabled:
-            directories.append((paths.cwd / ".tau" / "extensions", "project"))
+        if (
+            include_project_dir
+            and paths.project_dir is not None
+            and paths.project_resources_enabled
+        ):
+            directories.append((paths.project_dir / "extensions", "project"))
         if include_user_dir:
             directories.append((paths.root / "extensions", "user"))
         seen_directories: set[Path] = set()

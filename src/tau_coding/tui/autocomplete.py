@@ -8,6 +8,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from tau_coding.commands import CommandRegistry, SlashCommand
+from tau_coding.paths import project_dirname
 from tau_coding.prompt_templates import PromptTemplate
 from tau_coding.skills import Skill
 
@@ -28,6 +29,11 @@ IGNORED_FILE_COMPLETION_DIRS = frozenset(
     }
 )
 MAX_FILE_COMPLETIONS = 50
+
+
+def _ignored_completion_dirs() -> frozenset[str]:
+    """The folders file completion skips, with the project resource folder."""
+    return IGNORED_FILE_COMPLETION_DIRS | {project_dirname()}
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,7 +246,7 @@ def _external_file_reference_completions(
         return None
 
     parent_text, name_prefix = prefix.rsplit("/", 1)
-    if any(part in IGNORED_FILE_COMPLETION_DIRS for part in Path(parent_text).parts):
+    if any(part in _ignored_completion_dirs() for part in Path(parent_text).parts):
         return ()
     parent_dir = cwd / parent_text
     if not parent_dir.is_dir():
@@ -253,7 +259,7 @@ def _external_file_reference_completions(
 
     suggestions: list[CompletionItem] = []
     for child in children:
-        if child.name in IGNORED_FILE_COMPLETION_DIRS:
+        if child.name in _ignored_completion_dirs():
             continue
         if not child.name.lower().startswith(name_prefix.lower()):
             continue
@@ -311,7 +317,7 @@ def _is_ignored_file_completion_path(path: Path, *, cwd: Path) -> bool:
         relative_parts = path.relative_to(cwd).parts
     except ValueError:
         return True
-    return any(part in IGNORED_FILE_COMPLETION_DIRS for part in relative_parts)
+    return any(part in _ignored_completion_dirs() for part in relative_parts)
 
 
 def _shell_path_completions(

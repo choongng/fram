@@ -788,6 +788,37 @@ def test_session_sidebar_orders_configured_tau_home_before_shared_and_project_re
     )
 
 
+def test_session_sidebar_orders_a_renamed_project_folder_after_shared_resources(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    isolate_home(monkeypatch, tmp_path)
+    monkeypatch.setenv("TAU_HOME", str(tmp_path / ".fram"))
+    monkeypatch.setenv("TAU_PROJECT_DIRNAME", ".fram")
+    session = FakeSession()
+    session.cwd = tmp_path / "project"
+    session.skills = (
+        Skill("project-agents", session.cwd / ".agents/skills/project-agents/SKILL.md", ""),
+        Skill("user-fram", tmp_path / ".fram/skills/user-fram/SKILL.md", ""),
+        Skill("project-fram", session.cwd / ".fram/skills/project-fram/SKILL.md", ""),
+        Skill("user-agents", tmp_path / ".agents/skills/user-agents/SKILL.md", ""),
+    )
+    console = Console(record=True, width=80)
+
+    console.print(render_session_sidebar(session))
+
+    output = console.export_text()
+    expected_origins = (
+        "~/.fram/skills",
+        "~/.agents/skills",
+        "./.fram/skills",
+        "./.agents/skills",
+    )
+    assert [output.index(origin) for origin in expected_origins] == sorted(
+        output.index(origin) for origin in expected_origins
+    )
+
+
 def test_session_sidebar_groups_and_shows_all_prompts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

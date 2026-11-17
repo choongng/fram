@@ -36,7 +36,7 @@ from tau_coding.models_dev_store import (
     ModelsDevRefreshResult,
     refresh_models_dev_catalog,
 )
-from tau_coding.paths import TauPaths
+from tau_coding.paths import TauPaths, project_dirname
 from tau_coding.project_trust import TrustDefault, TrustOverride
 from tau_coding.provider_config import (
     DEFAULT_MODEL,
@@ -439,7 +439,10 @@ def main(
         bool,
         typer.Option(
             "--project-extensions",
-            help="Also load trusted project .tau/extensions (additional code opt-in).",
+            help=(
+                f"Also load trusted project {project_dirname()}/extensions "
+                "(additional code opt-in)."
+            ),
         ),
     ] = False,
     approve: Annotated[

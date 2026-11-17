@@ -6,6 +6,9 @@ Agent types opt in with frontmatter `memory: user|project|local`, mapping to:
     project   <cwd>/.tau/agent-memory/<name>/
     local     <cwd>/.tau/agent-memory-local/<name>/
 
+(`TAU_HOME` moves `~/.tau` and `TAU_PROJECT_DIRNAME` renames the project
+`.tau`, as they do for Tau.)
+
 The agent maintains its memory with the ordinary read/write/edit tools; a
 prompt block injected at spawn describes the directory and shows the first
 200 lines of MEMORY.md. Agents whose toolset cannot write get a read-only
@@ -17,6 +20,8 @@ from __future__ import annotations
 import asyncio
 import re
 from pathlib import Path
+
+from .paths import project_tau_dir, tau_home
 
 MEMORY_SCOPES = ("user", "project", "local")
 MAX_MEMORY_LINES = 200
@@ -47,13 +52,12 @@ def resolve_memory_dir(
     """Map a memory scope to its directory; None for invalid scope or name."""
     if scope not in MEMORY_SCOPES or not is_valid_agent_name(agent_name):
         return None
-    home_dir = home if home is not None else Path.home()
     if scope == "user":
-        base = home_dir / ".tau" / "agent-memory"
+        base = tau_home(home) / "agent-memory"
     elif scope == "project":
-        base = cwd / ".tau" / "agent-memory"
+        base = project_tau_dir(cwd) / "agent-memory"
     else:
-        base = cwd / ".tau" / "agent-memory-local"
+        base = project_tau_dir(cwd) / "agent-memory-local"
     memory_dir = base / agent_name
     if memory_dir.is_symlink():
         return None

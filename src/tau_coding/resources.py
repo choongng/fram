@@ -52,8 +52,8 @@ class TauResourcePaths:
 
     By default Tau loads Tau-native resources from the configured Tau home and
     `.agents` resources from the user home directory. When a cwd is provided,
-    project-local `.tau` and `.agents` resources are loaded automatically as
-    well.
+    project-local `.tau` (or `TAU_PROJECT_DIRNAME`) and `.agents` resources are
+    loaded automatically as well.
     """
 
     root: Path = field(default_factory=lambda: TauPaths().home)
@@ -132,6 +132,13 @@ class TauResourcePaths:
             )
         return tuple(_dedupe_paths(dirs))
 
+    @property
+    def project_dir(self) -> Path | None:
+        """Return the project-local Tau resource directory, if there is a cwd."""
+        if self.cwd is None:
+            return None
+        return self._paths().project_tau_dir(self.cwd)
+
     def _paths(self) -> TauPaths:
         agents_home = self.agents_root or Path.home() / ".agents"
         return self.paths or TauPaths(home=self.root, agents_home=agents_home)
@@ -190,8 +197,8 @@ def _discover_system_prompt_file(
     diagnostics: list[ResourceDiagnostic],
 ) -> tuple[str | None, Path | None]:
     candidates: list[tuple[str, Path]] = []
-    if paths.cwd is not None and paths.project_resources_enabled:
-        candidates.append(("project", paths.cwd / ".tau" / filename))
+    if paths.project_dir is not None and paths.project_resources_enabled:
+        candidates.append(("project", paths.project_dir / filename))
     candidates.append(("user", paths.root / filename))
 
     existing: list[tuple[str, Path]] = []
@@ -255,8 +262,8 @@ def _discover_append_system_prompt_files(
 ) -> tuple[tuple[str, ...], tuple[Path, ...]]:
     """Read every append file in broad-to-specific order."""
     candidates: list[tuple[str, Path]] = [("user", paths.root / "APPEND_SYSTEM.md")]
-    if paths.cwd is not None and paths.project_resources_enabled:
-        candidates.append(("project", paths.cwd / ".tau" / "APPEND_SYSTEM.md"))
+    if paths.project_dir is not None and paths.project_resources_enabled:
+        candidates.append(("project", paths.project_dir / "APPEND_SYSTEM.md"))
 
     contents: list[str] = []
     selected_paths: list[Path] = []

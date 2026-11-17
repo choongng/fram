@@ -58,9 +58,14 @@ uv tool upgrade fram-agent
 (`fram update` is not currently supported, because Tau's updater would install
 `tau-ai`. `fram update --models` still refreshes the model catalogs.)
 
-Fram keeps its configuration and sessions in `~/.fram`. Set `TAU_HOME` to use
-another folder, including Tau's `~/.tau`. Project `.tau/` folders are shared
-with Tau.
+Fram keeps its configuration and sessions in `~/.fram`, and reads project
+resources from `.fram/` folders. Set `TAU_HOME` to use another home, including
+Tau's `~/.tau`, and `TAU_PROJECT_DIRNAME=.tau` to share Tau's project folders.
+
+Fram before 0.4.10.5 read project resources from `.tau/`. A project's `.tau/`
+skills, `SYSTEM.md`, `AGENTS.md`, extensions and subagent settings no longer
+load under Fram: rename the folder to `.fram`, or set
+`TAU_PROJECT_DIRNAME=.tau`.
 
 ## Quickstart
 

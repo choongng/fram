@@ -130,6 +130,10 @@ Three built-in types ship with the extension:
 - `explore` — read-only (`read` + `bash`), for searching and summarizing
 - `fork` — a fork of the current conversation (see "Forking the conversation")
 
+(Every `~/.tau` path in this README follows `TAU_HOME`, and every project
+`.tau/` follows `TAU_PROJECT_DIRNAME`, as Tau's own do. Fram sets them to
+`~/.fram` and `.fram`.)
+
 Add your own as markdown files at `.tau/agents/<name>.md` (project) or
 `~/.tau/agents/<name>.md` (user). The filename is the type name, the body is
 the subagent's system prompt, and frontmatter supports:

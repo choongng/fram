@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Literal
 
-from tau_coding.paths import TauPaths
+from tau_coding.paths import TauPaths, project_dirname
 from tau_coding.prompt_templates import is_prompt_template_candidate
 from tau_coding.skills import is_skill_candidate
 
@@ -172,15 +172,18 @@ def canonicalize_project_path(path: Path, *, base: Path | None = None) -> Canoni
 class ProtectedResourceDetector:
     """Detect protected candidates using names and file metadata only."""
 
-    def __init__(self, *, max_sample_paths: int = 12) -> None:
+    def __init__(self, *, max_sample_paths: int = 12, project_dirname: str | None = None) -> None:
         self.max_sample_paths = max_sample_paths
+        # The project folder the loaders read; see TauPaths.project_dirname.
+        self.project_dirname = project_dirname
 
     def detect(self, cwd: CanonicalProjectPath) -> ProtectedResourceSummary:
         root = cwd.value
+        project = self.project_dirname or project_dirname()
         found: dict[str, list[Path]] = {category: [] for category in _RESOURCE_CATEGORIES}
         # Project settings are not supported by a Tau loader, so they cannot
         # trigger trust until that loader exists.
-        for namespace in (".tau", ".agents"):
+        for namespace in (project, ".agents"):
             self._glob(
                 found,
                 "skills",
@@ -195,11 +198,11 @@ class ProtectedResourceDetector:
                 "*.md",
                 predicate=is_prompt_template_candidate,
             )
-        self._glob(found, "themes", root / ".tau" / "themes", "*.json")
-        self._file(found, "system-prompts", root / ".tau" / "SYSTEM.md")
-        self._file(found, "system-prompts", root / ".tau" / "APPEND_SYSTEM.md")
+        self._glob(found, "themes", root / project / "themes", "*.json")
+        self._file(found, "system-prompts", root / project / "SYSTEM.md")
+        self._file(found, "system-prompts", root / project / "APPEND_SYSTEM.md")
         self._context(found, root)
-        self._extensions(found, root / ".tau" / "extensions")
+        self._extensions(found, root / project / "extensions")
         counts = {
             category: len(found[category]) for category in _RESOURCE_CATEGORIES if found[category]
         }
@@ -263,7 +266,8 @@ class ProtectedResourceDetector:
         for part in relative.parts:
             current /= part
             self._file(found, "context", current / "AGENTS.md")
-        self._file(found, "context", cwd / ".tau" / "AGENTS.md")
+        project = self.project_dirname or project_dirname()
+        self._file(found, "context", cwd / project / "AGENTS.md")
         self._file(found, "context", cwd / ".agents" / "AGENTS.md")
 
     def _extensions(self, found: dict[str, list[Path]], directory: Path) -> None:
@@ -488,7 +492,9 @@ class ProjectTrustCoordinator:
         self, store: ProjectTrustStore, detector: ProtectedResourceDetector | None = None
     ) -> None:
         self.store = store
-        self.detector = detector or ProtectedResourceDetector()
+        self.detector = detector or ProtectedResourceDetector(
+            project_dirname=store.paths.project_dirname
+        )
         self._cache: dict[Path, ProjectTrustResolution] = {}
 
     async def resolve(

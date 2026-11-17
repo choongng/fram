@@ -2,7 +2,8 @@
 
 Themes are data, not code. The built-in themes ship as JSON files next to this
 module and load through the same parser as user themes, which live in
-``<Tau home>/themes/*.json`` and ``<project>/.tau/themes/*.json``.
+``<Tau home>/themes/*.json`` and ``<project>/.tau/themes/*.json`` (or the
+project folder ``TAU_PROJECT_DIRNAME`` names).
 """
 
 from __future__ import annotations

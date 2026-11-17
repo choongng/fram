@@ -205,6 +205,20 @@ def test_project_extensions_load_first_when_enabled(tmp_path: Path) -> None:
     assert [entry.name for entry in discovered] == ["ext_b", "ext_a"]
 
 
+def test_project_extensions_follow_tau_project_dirname(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TAU_PROJECT_DIRNAME", ".fram")
+    paths = _paths(tmp_path)
+    assert paths.cwd is not None
+    _write_extension(paths.cwd / ".fram" / "extensions", "fram_ext", "def setup(tau):\n    pass\n")
+    _write_extension(paths.cwd / ".tau" / "extensions", "tau_ext", "def setup(tau):\n    pass\n")
+
+    discovered, _ = discover_extensions(paths, include_project_dir=True)
+
+    assert [entry.name for entry in discovered] == ["fram_ext"]
+
+
 def test_duplicate_extension_names_prefer_first_loaded(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
     _write_extension(_user_extensions_dir(paths), "dup", "def setup(tau):\n    pass\n")

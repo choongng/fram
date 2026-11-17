@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from tau_coding.paths import TauPaths
+from tau_coding.paths import TauPaths, project_dirname
 
 
 def test_tau_paths_user_locations(tmp_path: Path) -> None:
@@ -25,6 +25,31 @@ def test_tau_paths_project_locations(tmp_path: Path) -> None:
     assert paths.project_prompts_dir(cwd) == cwd / ".tau" / "prompts"
     assert paths.project_agents_skills_dir(cwd) == cwd / ".agents" / "skills"
     assert paths.project_agents_prompts_dir(cwd) == cwd / ".agents" / "prompts"
+
+
+def test_project_folder_follows_tau_project_dirname(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cwd = tmp_path / "project"
+    assert project_dirname() == ".tau"
+    monkeypatch.setenv("TAU_PROJECT_DIRNAME", " .fram ")
+
+    paths = TauPaths(home=tmp_path / "home", agents_home=tmp_path / "agents")
+
+    assert project_dirname() == ".fram"
+    assert paths.project_tau_dir(cwd) == cwd / ".fram"
+    assert paths.project_skills_dir(cwd) == cwd / ".fram" / "skills"
+    assert paths.project_themes_dir(cwd) == cwd / ".fram" / "themes"
+
+
+@pytest.mark.parametrize("value", [".", "..", "a/b", "a\\b"])
+def test_project_folder_must_be_one_folder_name(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("TAU_PROJECT_DIRNAME", value)
+
+    with pytest.raises(ValueError, match="TAU_PROJECT_DIRNAME"):
+        project_dirname()
 
 
 def test_default_session_path_uses_home_sessions_and_readable_project_path(
