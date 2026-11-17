@@ -12,7 +12,8 @@ import pytest
 from pi_event_helpers import assistant_done, assistant_start
 from tau_agent import AssistantMessage, ToolCall
 from tau_agent.cache_hints import conversation_long_lived
-from tau_agent.messages import UserMessage, assistant_content
+from tau_agent.loop import REASONING_ONLY_TURN_TEXT, provider_context
+from tau_agent.messages import ThinkingContent, UserMessage, assistant_content
 from tau_agent.session import JsonlSessionStorage, MessageEntry
 from tau_ai import FakeProvider
 from tau_ai.loop_cuts import looping_tool_arguments_cut
@@ -48,15 +49,20 @@ def _cut_off(text: str) -> list[object]:
 
 
 async def _session(
-    tmp_path: Path, provider: FakeProvider, *, turns: int = 3, long_lived: bool = False
+    tmp_path: Path,
+    provider: FakeProvider,
+    *,
+    turns: int = 3,
+    long_lived: bool = False,
+    last_reply: AssistantMessage | None = None,
 ) -> CodingSession:
     storage = JsonlSessionStorage(tmp_path / "s.jsonl")
     parent = None
     for n in range(turns):
-        for message in (
-            UserMessage(content=f"task {n} " + "context " * 2_000),
-            AssistantMessage(content=f"answer {n}"),
-        ):
+        reply = AssistantMessage(content=f"answer {n}")
+        if last_reply is not None and n == turns - 1:
+            reply = last_reply
+        for message in (UserMessage(content=f"task {n} " + "context " * 2_000), reply):
             entry = MessageEntry(parent_id=parent, message=message)
             await storage.append(entry)
             parent = entry.id
@@ -108,6 +114,26 @@ async def test_the_summary_is_a_continuation_of_the_cached_conversation(tmp_path
     [compaction] = [e for e in await session._config.storage.read_all() if e.type == "compaction"]
     assert compaction.index is not None
     assert compaction.index[0]["caption"] == "Did task 0."
+
+
+@pytest.mark.anyio
+async def test_the_summary_request_follows_a_reply_that_was_reasoning_alone(
+    tmp_path: Path,
+) -> None:
+    """The request for a summary is the message after the last reply, so that
+    reply is sent as every later request would send it."""
+    reply = "```captions\n#1-#2: Did task 0.\n```\n## Goal\nShip it"
+    provider = _Recording([_reply(AssistantMessage(content=reply))])
+    thought = AssistantMessage(content=[ThinkingContent(thinking="Plan the last task.")])
+    session = await _session(tmp_path, provider, last_reply=thought)
+    later_request = provider_context([*session.messages, UserMessage(content="Next task.")])
+
+    await session.compact()
+
+    [(_model, _system, messages, _tools)] = provider.calls
+    assert messages[:-1] == later_request[:-1]
+    assert messages[-2].text == REASONING_ONLY_TURN_TEXT
+    assert isinstance(messages[-1], UserMessage)
 
 
 @pytest.mark.anyio

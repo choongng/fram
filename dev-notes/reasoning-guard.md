@@ -12,6 +12,13 @@ budget. `guards.py` then queues a follow-up asking the model to act.
 - **Budget cut.** A per-turn budget in characters. The reasoning is kept, so the
   next reply can build on it. A token budget converts to characters at the
   model's measured thinking ratio.
+- **Replay of a reasoning-only turn.** A budget cut usually leaves a turn that
+  holds reasoning and nothing else. Once another message follows such a turn,
+  `provider_context` in `tau_agent` sends it with one line of text after the
+  reasoning (`BUDGET_CUT_TURN_TEXT`, or `REASONING_ONLY_TURN_TEXT` for a turn
+  that ended that way for another reason, a failed or aborted one included).
+  While the turn is the last message it is left out of the request. The session
+  file keeps the turn as it was streamed.
 - **Switch.** `/reasoning-guard`, RPC `set_reasoning_guard`, `--reasoning-guard`
   and `TAU_REASONING_GUARD`. The same switch governs the tool-argument loop cut
   in `tau_ai`, which ends a chat-completions reply whose tool-call arguments
@@ -48,8 +55,32 @@ looks healthy, so stall detection doesn't help, and the user pays for the time.
   calls stay refused either way: a refusal is an ordinary tool result and loses
   no output.
 - The guard never edits the prompt prefix or the thinking level, so cached
-  prompts stay valid. The only change to later requests is the looped passage
-  left out of the cut turn.
+  prompts stay valid. The only changes to later requests are the looped passage
+  left out of a cut turn and the line of text on a reasoning-only one.
+- A reasoning-only turn was not a well-formed turn in any provider's request.
+  Chat completions (every thinking format, `qwen-chat-template` included) and
+  Mistral sent `content: ""` beside `reasoning_content`, which some servers
+  reject and some chat templates drop. The Responses and Codex builders sent
+  nothing for the turn, and Anthropic's dropped it once its thinking was pruned,
+  each leaving two user turns in a row. Google sent a turn of thought parts
+  only. The text is added where the context is built rather than in each
+  builder, so all of them get it, and it depends on the stored turn alone, so
+  the turn has the same bytes in every later request.
+- "No reply" means no tool call and no text beyond whitespace, which servers
+  treat as no text. Blank text blocks are replaced by the line, not kept beside
+  it. A turn that ended normally with no reasoning either gets
+  `EMPTY_TURN_TEXT`, since it did not end "after its reasoning"; a failed,
+  aborted or cut-off turn with no reasoning is left out, as before.
+- A reasoning-only turn that is the last message is left out of the request. A
+  failed turn keeps its partial reasoning, and `continue` or a retry sends the
+  context with that turn last; with the line on it, the request would end on an
+  assistant turn, which a server reads as the start of the reply to continue or
+  refuses. Everything before the turn is sent the same either way, and the turn
+  appears, already in its final form, in the first request that has a message
+  after it, so the cached prefix is never rewritten. The continuation-summary
+  request builds its context with its own message in place for the same reason.
+  Sessions written before this change replay the same way; their first request
+  afterwards misses the prompt cache from that turn on, once.
 - Thresholds are heuristics. A loop cut rarely loses anything, since a reply the
   detector catches would usually have run to the output limit anyway, but a
   budget can cut useful long reasoning, which is why the switch exists.

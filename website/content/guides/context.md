@@ -176,6 +176,12 @@ reply and asks the model to act on what it has. A looped passage is left out of
 the follow-up request; reasoning cut by a budget is kept so the model can build
 on it.
 
+Any reply that holds reasoning and no answer or tool call, whether Tau cut it or
+it ended that way by itself, carries a short bracketed line in later requests
+that says so, because some providers do not accept a reply that holds reasoning
+alone. The line is added only once another message follows the reply, and the
+saved session keeps the reply as it arrived.
+
 A budget applies when you set one, or when the thinking level is sent to the
 provider only as on or off, so the level would otherwise have no effect. Those
 level budgets are 4,096 characters for `minimal`, 8,192 for `low`, 32,768 for

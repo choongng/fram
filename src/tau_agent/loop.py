@@ -7,6 +7,7 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from inspect import isawaitable
 from time import monotonic_ns
+from typing import TypeGuard
 
 from tau_agent.cache_hints import long_lived_conversation
 from tau_agent.events import (
@@ -25,6 +26,7 @@ from tau_agent.events import (
 )
 from tau_agent.messages import (
     AgentMessage,
+    AssistantContent,
     AssistantMessage,
     ResponseTiming,
     TextContent,
@@ -32,6 +34,7 @@ from tau_agent.messages import (
     ToolCall,
     ToolResultMessage,
     UserMessage,
+    reasoning_budget_cut,
     reasoning_loop_cut,
     tool_call_loop_cut,
 )
@@ -334,32 +337,79 @@ def provider_context(messages: list[AgentMessage]) -> list[AgentMessage]:
 
     A turn the reasoning-loop guard cut keeps its reasoning in history only:
     handed a loop, a model tends to pick the same thread up.
+
+    A turn with no text and no tool call is sent with a line of text in their
+    place, and left out while it is the last message: there the line would be
+    the start of a reply for the model to continue. Each of these depends on
+    the stored turn alone, so once another message follows a turn it reads the
+    same in every later request and the cached prefix holds.
     """
-    replayable = tuple(
-        message
-        for message in map(_without_looped_reasoning, messages)
-        if not (
-            isinstance(message, AssistantMessage)
-            and message.stop_reason in {"error", "aborted", "length"}
-            and not message.content
-        )
-    )
-    return list(repair_tool_history(replayable).messages)
+    kept = [message for message in messages if not _empty_failure(message)]
+    while kept and _is_assistant_without_reply(kept[-1]):
+        kept.pop()
+    return list(repair_tool_history(tuple(map(_replayed, kept))).messages)
 
 
 LOOPED_TURN_TEXT = "[Reasoning stopped here because it had started to repeat.]"
+#: What stands as the text of a replayed turn that has reasoning but no text and
+#: no tool call: one cut at its thinking budget, and any other.
+BUDGET_CUT_TURN_TEXT = "[Reasoning stopped here because it reached its budget.]"
+REASONING_ONLY_TURN_TEXT = "[This reply ended after its reasoning, before an answer or tool call.]"
+#: The same for a turn that ended normally with nothing at all in it.
+EMPTY_TURN_TEXT = "[This reply was empty.]"
 
 
-def _without_looped_reasoning(message: AgentMessage) -> AgentMessage:
-    """Drop the reasoning of a turn the reasoning-loop guard cut."""
-    if not isinstance(message, AssistantMessage) or not reasoning_loop_cut(message):
+def _is_assistant_without_reply(message: AgentMessage) -> TypeGuard[AssistantMessage]:
+    """Whether `message` is an assistant turn with no tool call and no text
+    beyond whitespace, which providers treat as no text at all."""
+    return (
+        isinstance(message, AssistantMessage)
+        and not message.tool_calls
+        and not message.text.strip()
+    )
+
+
+def _empty_failure(message: AgentMessage) -> bool:
+    """Whether `message` is a failed, aborted or cut-off turn that got nowhere:
+    not even reasoning."""
+    return (
+        _is_assistant_without_reply(message)
+        and message.stop_reason in {"error", "aborted", "length"}
+        and not _reasoning(message)
+    )
+
+
+def _reasoning(message: AssistantMessage) -> list[AssistantContent]:
+    return [block for block in message.content if isinstance(block, ThinkingContent)]
+
+
+def _replayed(message: AgentMessage) -> AgentMessage:
+    """`message` as a request carries it.
+
+    The reasoning of a turn the reasoning-loop guard cut is dropped.
+
+    A turn with no reply gets a line of text in place of any blank text.
+    Providers carry reasoning beside a turn's content or not at all, so without
+    the line such a turn reaches the server with empty or blank content, which
+    some reject, or is left out of the request, which puts two user turns in a
+    row. Its reasoning stays for the formats that replay it.
+    """
+    if not isinstance(message, AssistantMessage):
         return message
-    content = [block for block in message.content if not isinstance(block, ThinkingContent)]
-    if len(content) == len(message.content):
-        return message
-    # Dropping the turn would leave two user turns in a row, which strict chat
-    # templates reject.
-    return message.model_copy(update={"content": content or [TextContent(text=LOOPED_TURN_TEXT)]})
+    looped = reasoning_loop_cut(message)
+    if not _is_assistant_without_reply(message):
+        if not (looped and _reasoning(message)):
+            return message
+        content = [block for block in message.content if not isinstance(block, ThinkingContent)]
+        return message.model_copy(update={"content": content})
+    reasoning = _reasoning(message)
+    if looped:
+        reasoning, text = [], LOOPED_TURN_TEXT
+    elif reasoning_budget_cut(message):
+        text = BUDGET_CUT_TURN_TEXT
+    else:
+        text = REASONING_ONLY_TURN_TEXT if reasoning else EMPTY_TURN_TEXT
+    return message.model_copy(update={"content": [*reasoning, TextContent(text=text)]})
 
 
 async def _assistant_events(

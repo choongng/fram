@@ -4811,7 +4811,7 @@ class CodingSession:
         messages: list[AgentMessage] | None = None
         transcripts = (self._harness.messages, summarized) if send_kept_tail else (summarized,)
         for transcript in transcripts:
-            candidate = [*provider_context(list(transcript)), request]
+            candidate = provider_context([*transcript, request])
             needed = estimate_context_tokens(
                 system=system,
                 messages=tuple(candidate),
