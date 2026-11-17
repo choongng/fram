@@ -52,6 +52,7 @@ from tau_ai.env import OpenAICompatibleConfig
 from tau_ai.events import AssistantMessageEvent
 from tau_ai.http import create_async_client
 from tau_ai.http_errors import provider_http_error_message
+from tau_ai.loop_cuts import looping_tool_arguments_cut
 from tau_ai.openai_cache import is_direct_openai_url, openai_prompt_cache_key
 from tau_ai.provider import CancellationToken
 from tau_ai.retry import (
@@ -509,6 +510,9 @@ class _ChatStreamParser:
     def __init__(self) -> None:
         self.emitted_content = False
         self.fatal = False
+        # Read as the response starts: by then the request has left any queue,
+        # in the context of the caller reading the stream.
+        self._cut_argument_loops = looping_tool_arguments_cut()
         self._content_parts: list[str] = []
         self._thinking_parts: list[str] = []
         self._thinking_signature: str | None = None
@@ -568,7 +572,7 @@ class _ChatStreamParser:
             index = int(tool_call_delta.get("index", 0))
             builder = self._tool_call_builders.setdefault(index, _ToolCallBuilder())
             builder.add_delta(tool_call_delta)
-            loop = builder.repeating()
+            loop = builder.repeating() if self._cut_argument_loops else None
             if loop is not None:
                 # Stop reading: the rest would repeat to the output limit. The
                 # call ends cut off at the limit, and the loop answers it.

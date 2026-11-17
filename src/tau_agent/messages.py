@@ -338,6 +338,14 @@ def reasoning_loop_cut(message: AssistantMessage) -> bool:
     )
 
 
+def reasoning_budget_cut(message: AssistantMessage) -> bool:
+    """Whether this turn was ended at the output limit because its thinking ran
+    past its budget."""
+    return message.stop_reason == "length" and any(
+        diagnostic.type == REASONING_BUDGET_CUT for diagnostic in message.diagnostics or []
+    )
+
+
 def tool_call_loop_cut(message: AssistantMessage) -> bool:
     """Whether this turn was ended at the output limit because the arguments of
     its tool call had started repeating."""

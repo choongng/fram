@@ -14,7 +14,7 @@ from tau_agent import (
     ToolCall,
     UserMessage,
 )
-from tau_agent.loop import provider_context
+from tau_agent.loop import REASONING_ONLY_TURN_TEXT, provider_context
 from tau_agent.session import JsonlSessionStorage
 from tau_ai import FakeProvider
 from tau_coding import CodingSession, CodingSessionConfig
@@ -149,7 +149,11 @@ def test_an_empty_cut_off_reply_is_not_replayed() -> None:
     empty = AssistantMessage(content=[], stop_reason="length")
     kept = AssistantMessage(content=[ThinkingContent(thinking="so far")], stop_reason="length")
 
-    assert provider_context([empty, kept]) == [kept]
+    # The reply that got as far as reasoning stays, with a line of text after it.
+    replayed, _ = provider_context([empty, kept, UserMessage(content="Go on.")])
+    assert isinstance(replayed, AssistantMessage)
+    assert replayed.thinking_text == "so far"
+    assert replayed.text == REASONING_ONLY_TURN_TEXT
 
 
 @pytest.mark.anyio

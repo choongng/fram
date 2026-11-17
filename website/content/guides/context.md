@@ -176,6 +176,12 @@ reply and asks the model to act on what it has. A looped passage is left out of
 the follow-up request; reasoning cut by a budget is kept so the model can build
 on it.
 
+Any reply that holds reasoning and no answer or tool call, whether Tau cut it or
+it ended that way by itself, carries a short bracketed line in later requests
+that says so, because some providers do not accept a reply that holds reasoning
+alone. The line is added only once another message follows the reply, and the
+saved session keeps the reply as it arrived.
+
 A budget applies when you set one, or when the thinking level is sent to the
 provider only as on or off, so the level would otherwise have no effect. Those
 level budgets are 4,096 characters for `minimal`, 8,192 for `low`, 32,768 for
@@ -187,7 +193,7 @@ To change it while a session is running, use `/reasoning-guard`:
 ```text
 /reasoning-guard          # show the current state and budget
 /reasoning-guard 20000    # budget of 20,000 characters of reasoning per turn
-/reasoning-guard off      # no loop cut and no budget
+/reasoning-guard off      # no loop cut, no budget, no tool-argument loop cut
 /reasoning-guard on       # back to the default behaviour
 ```
 
@@ -197,9 +203,13 @@ run, and applies to the current session only. A value you set wins over the
 variables. To choose at startup, use `--reasoning-guard` or
 `TAU_REASONING_GUARD`.
 
-A low budget can cut long reasoning that was going somewhere. `off` covers only
-this guard: repeated tool calls and tool arguments that start repeating are
-still stopped.
+A low budget can cut long reasoning that was going somewhere. `off` also stops
+Tau from ending a reply whose tool-call arguments have started repeating one
+block of text, so a file that really holds that much repeated text can be
+written in one call. Tau makes that cut only with providers that speak the chat
+completions API, such as local and OpenAI-compatible servers; with other
+providers there is nothing for `off` to change there. Repeated tool calls are
+still refused.
 
 ## Malformed tool calls
 
