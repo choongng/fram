@@ -5420,6 +5420,11 @@ class TauTuiApp(App[None]):
         """Return whether the session's agent is running and can queue messages."""
         return bool(getattr(self.session, "is_running", False))
 
+    def _can_queue_with_session(self) -> bool:
+        """Return whether a message queued now would be read by the running agent."""
+        can_queue = getattr(self.session, "can_queue_messages", None)
+        return self._is_session_running() if can_queue is None else bool(can_queue)
+
     def _has_held_prompts(self) -> bool:
         return bool(self._held_prompts) or self._queueing_prompt is not None
 
@@ -5440,7 +5445,7 @@ class TauTuiApp(App[None]):
         if self._queueing_prompt is not None:
             # The offer in flight carries on with the rest when it returns.
             return
-        while self._held_prompts and self._is_session_running():
+        while self._held_prompts and self._can_queue_with_session():
             held = self._held_prompts.popleft()
             self._queueing_prompt = held
             try:

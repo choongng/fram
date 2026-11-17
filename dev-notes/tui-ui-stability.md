@@ -161,7 +161,8 @@ Held prompts are delivered at the first point the session can take them:
   sent during compaction steers the retry instead of abandoning it. The agent's
   last event is skipped: the agent still reports running until that event is
   consumed, but it reads its queues no more, so a message queued then would be
-  stranded.
+  stranded. `CodingSession` says so itself, see "The end of a run" below; the
+  skip remains for sessions that do not.
 - When the run's worker finishes with prompts still held, as it does after a
   settle, `_release_prompt_run` schedules `_start_next_held_prompt` with
   `call_later`. It starts the oldest held prompt as the next run, whether it was
@@ -223,6 +224,35 @@ Two things were tried or considered and left out:
 - A prompt submitted right after Escape. The interrupt releases the session at
   once, but the cancelled run's worker takes a moment to unwind, so the new run
   can overlap its teardown. This is older than held prompts and is unchanged.
+
+### The end of a run
+
+`AgentHarness.is_running` stays true until the run's event stream is closed. The
+run reads its queues for the last time before it emits `agent_end`, and does not
+read them after a cancel. A message queued in between is not lost, but no run is
+left to deliver it: it waits in the queue until the user happens to send
+something else.
+
+That window was open to extensions. A handler of `agent_end` that sent a
+message, which is where an extension that reacts to a finished run sends one,
+had it queued with the run that had just ended, and no turn followed.
+
+`AgentHarness.delivers_queued_messages` turns false when the current run will
+not read its queues again, and `CodingSession.can_queue_messages` passes it on.
+`queue_prompt` refuses on it, and the extension runtime chooses between queueing
+and asking the frontend for a turn on it, where both used to look at
+`is_running`. In the TUI the message then takes the ordinary path of an
+extension message that arrives in a gap: it is held behind any waiting prompts
+and starts the next run when the worker is done.
+
+The property cannot see the other way a message is stranded. A run that ends on
+a provider error, the turn limit, a final report or a `finish_turn` hook does
+not read its queues after its last turn, and during that turn nothing says it is
+the last. A message queued then, typed or sent by an extension, stays queued
+when the run ends: the TUI is idle, the message shows as queued, `/compact` and
+`/tree` are refused, and the next prompt delivers it. This is older than held
+prompts and is not fixed here;
+`dev-notes/architecture/queued-steering-follow-ups.md` says why.
 
 ## Next steps
 

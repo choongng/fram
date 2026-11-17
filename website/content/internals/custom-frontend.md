@@ -69,9 +69,17 @@ if result.status == "refused":
 ```
 
 It never starts a turn. `result.status` is `queued`, `handled` when an `input`
-hook consumed the message, or `refused` when the agent is not running. The call
+hook consumed the message, or `refused` when no run would deliver it. The call
 yields no events, so read `session.queue_update_event()` afterwards to refresh
 badges.
+
+A run stops reading its queues a little before `session.is_running` turns false:
+from its `agent_end` event on, and once it has been cancelled. `queue_prompt`
+refuses there too. `session.can_queue_messages` is the same test without the
+call: false once the current run will not read its queues again. True is not a
+promise. A run that ends on a provider error or at its turn limit does not read
+its queues after that turn, and a message queued during it stays queued for the
+next prompt.
 
 On a refusal, keep the message and submit it as the next run. If
 `result.prepared_text` is set, the hooks and prompt expansion have already run,

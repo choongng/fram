@@ -1791,6 +1791,16 @@ class CodingSession:
         """Return whether this session currently has an active agent run."""
         return self._harness.is_running
 
+    @property
+    def can_queue_messages(self) -> bool:
+        """Return whether the active run will deliver a message queued now.
+
+        False with no active run, and also at the end of one: from its
+        `agent_end` event on, and once it has been cancelled. A message queued
+        then would wait for a later run instead.
+        """
+        return self._harness.delivers_queued_messages
+
     def _require_idle(self, operation: str) -> None:
         """Reject replacement-like operations until an active turn is drained."""
         if self._harness.is_running:
@@ -4050,8 +4060,10 @@ class CodingSession:
         """Queue a message for the running agent; never start a turn.
 
         The result is ``queued``, ``handled`` (an `input` hook consumed the
-        message) or ``refused`` (the agent is not running, so the caller still
-        owns the message). The agent can stop while the hooks are awaited. A
+        message) or ``refused`` (no run would deliver it, so the caller still
+        owns the message): the agent is not running, or it is at the end of a
+        run and reads its queues no more. The agent can stop while the hooks
+        are awaited. A
         refusal then carries ``prepared_text``, the text after the hooks and
         prompt expansion. Pass that with ``prepared=True`` to this method or to
         ``prompt``; sending the original again would run the hooks twice on one
@@ -4060,9 +4072,10 @@ class CodingSession:
         ``prompt`` with a ``streaming_behavior`` queues too, but when the agent
         is not running it runs a whole turn instead. A frontend that calls it
         from an input handler cannot rule that out beforehand, because of the
-        same wait on the hooks.
+        same wait on the hooks. It also queues with a running agent that reads
+        its queues no more, where this method refuses.
         """
-        if not self._harness.is_running:
+        if not self._harness.delivers_queued_messages:
             return QueuePromptResult("refused", prepared_text=content if prepared else None)
         prepared_text = content
         if not prepared:
@@ -4074,7 +4087,7 @@ class CodingSession:
             )
             if hooked_text is None:
                 return QueuePromptResult("handled")
-            if not self._harness.is_running:
+            if not self._harness.delivers_queued_messages:
                 return QueuePromptResult("refused", prepared_text=hooked_text)
             prepared_text = hooked_text
         await self._queue_for_running_agent(

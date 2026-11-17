@@ -7983,6 +7983,34 @@ async def test_queue_prompt_queues_only_while_the_agent_is_running(tmp_path: Pat
 
 
 @pytest.mark.anyio
+async def test_queue_prompt_refuses_once_the_run_has_read_its_queues_for_the_last_time(
+    tmp_path: Path,
+) -> None:
+    # The agent still reports running while its `agent_end` event is handled.
+    # A message queued then would stay in the queue with no run to deliver it.
+    storage = JsonlSessionStorage(tmp_path / "session.jsonl")
+    provider = FakeProvider(
+        [[assistant_start(model="fake"), assistant_done(message=AssistantMessage(content="Hi"))]]
+    )
+    session = await CodingSession.load(_config(tmp_path, provider, storage))
+    at_agent_end: list[tuple[bool, bool, QueuePromptResult]] = []
+
+    async for event in session.prompt("Hello"):
+        if getattr(event, "type", None) == "agent_end":
+            at_agent_end.append(
+                (
+                    session.is_running,
+                    session.can_queue_messages,
+                    await session.queue_prompt("Too late", streaming_behavior="follow_up"),
+                )
+            )
+
+    assert at_agent_end == [(True, False, QueuePromptResult("refused"))]
+    assert session.queue_update_event() == QueueUpdateEvent()
+    assert len(provider.calls) == 1
+
+
+@pytest.mark.anyio
 async def test_queue_prompt_refuses_when_the_agent_stops_during_input_hooks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
