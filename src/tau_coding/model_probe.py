@@ -123,6 +123,7 @@ async def probe_model(
 ) -> ModelProfile:
     """Probe ``key``'s model and store what it measured as its profile's warm start."""
     profile = store.get(key)
+    prompt_cache = profile.prompt_cache
 
     prefill = await _ask(
         provider_for, key.model, PREFILL_MAX_TOKENS, prefill_prompt(current_timestamp_ms())
@@ -133,6 +134,9 @@ async def probe_model(
     for message in (prefill, decode, capped):
         if message is not None:
             profile = profile.with_message(message, current_timestamp_ms())
+    # The probe's prompts are built to miss the cache, so they would count as
+    # cold requests of a session; they measure speed only.
+    profile = replace(profile, prompt_cache=prompt_cache)
 
     honoured = cap_honoured(capped, CAP_MAX_TOKENS)
     if honoured is not None:

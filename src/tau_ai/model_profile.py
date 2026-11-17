@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from typing import Any, Literal
 
 from tau_agent.messages import AssistantMessage, ToolCall, Usage
@@ -152,6 +152,53 @@ def averaged(
     return current.updated(sample, tokens, now_ms)
 
 
+def _field_names(cls: type) -> tuple[str, ...]:
+    return tuple(item.name for item in fields(cls))
+
+
+@dataclass(frozen=True, slots=True)
+class PromptCacheCounts:
+    """How much of the prompts sent to a model its server had cached: sums.
+
+    ``cached_tokens`` were read from the server's prompt cache, and
+    ``uncached_tokens`` were read anew (``uncached_prompt_tokens``), so the
+    share cached is ``cached_tokens / (cached_tokens + uncached_tokens)``.
+    ``cold_requests`` counts requests of at least ``MIN_PREFILL_TOKENS`` uncached
+    tokens with fewer than that cached: a session's first request is one, and
+    any other is a request whose prompt prefix changed, or whose cache was
+    evicted. The threshold, not zero, because a server that matches a changed
+    prompt still reuses the few tokens before the change (llama.cpp's BOS and
+    role header).
+    """
+
+    requests: int = 0
+    cached_tokens: int = 0
+    uncached_tokens: int = 0
+    cold_requests: int = 0
+
+    def counted(self, cached: int, uncached: int) -> PromptCacheCounts:
+        """These counts with one request's prompt added."""
+        cold = cached < MIN_PREFILL_TOKENS <= uncached
+        return PromptCacheCounts(
+            requests=self.requests + 1,
+            cached_tokens=self.cached_tokens + cached,
+            uncached_tokens=self.uncached_tokens + uncached,
+            cold_requests=self.cold_requests + int(cold),
+        )
+
+    def to_json(self) -> dict[str, int]:
+        return {
+            "requests": self.requests,
+            "cached_tokens": self.cached_tokens,
+            "uncached_tokens": self.uncached_tokens,
+            "cold_requests": self.cold_requests,
+        }
+
+    @classmethod
+    def from_json(cls, data: Mapping[str, Any]) -> PromptCacheCounts:
+        return cls(**{name: _optional_int(data.get(name)) or 0 for name in _field_names(cls)})
+
+
 @dataclass(frozen=True, slots=True)
 class RateSample:
     """One measured ratio and the number of tokens behind it."""
@@ -179,6 +226,8 @@ class ResponseSamples:
     thinking_chars_per_token: RateSample | None = None
     output_chars_per_token: RateSample | None = None
     combined_chars_per_token: RateSample | None = None
+    cached_prompt_tokens: int = 0
+    uncached_prompt_tokens: int = 0
 
 
 def _usage_estimated(message: AssistantMessage) -> bool:
@@ -253,6 +302,8 @@ def samples_from_response(message: AssistantMessage) -> ResponseSamples | None:
         thinking_chars_per_token=thinking_cpt,
         output_chars_per_token=output_cpt,
         combined_chars_per_token=_ratio(thinking_chars + visible_chars, usage.output),
+        cached_prompt_tokens=usage.cache_read,
+        uncached_prompt_tokens=uncached_prompt_tokens(usage),
     )
 
 
@@ -275,6 +326,7 @@ class ModelProfile:
     thinking_chars_per_token: AveragedValue | None = None
     output_chars_per_token: AveragedValue | None = None
     combined_chars_per_token: AveragedValue | None = None
+    prompt_cache: PromptCacheCounts = PromptCacheCounts()
     context_window: int | None = None
     max_output_tokens: int | None = None
     largest_output_tokens: int | None = None
@@ -309,6 +361,9 @@ class ModelProfile:
             combined_chars_per_token=fold(
                 self.combined_chars_per_token, samples.combined_chars_per_token
             ),
+            prompt_cache=self.prompt_cache.counted(
+                samples.cached_prompt_tokens, samples.uncached_prompt_tokens
+            ),
             largest_output_tokens=max(self.largest_output_tokens or 0, samples.output_tokens),
             updated_at_ms=now_ms,
         )
@@ -334,6 +389,7 @@ class ModelProfile:
                 "output": _optional_json(self.output_chars_per_token),
                 "combined": _optional_json(self.combined_chars_per_token),
             },
+            "prompt_cache": self.prompt_cache.to_json(),
             "limits": {
                 "context_window": self.context_window,
                 "max_output_tokens": self.max_output_tokens,
@@ -349,6 +405,7 @@ class ModelProfile:
         chars = data.get("chars_per_token") or {}
         limits = data.get("limits") or {}
         parameters = data.get("request_parameters") or {}
+        cache = data.get("prompt_cache")
         honoured = parameters.get("max_tokens_honoured")
         return cls(
             key=ProfileKey(
@@ -365,6 +422,11 @@ class ModelProfile:
             thinking_chars_per_token=_optional(chars, "thinking"),
             output_chars_per_token=_optional(chars, "output"),
             combined_chars_per_token=_optional(chars, "combined"),
+            prompt_cache=(
+                PromptCacheCounts.from_json(cache)
+                if isinstance(cache, Mapping)
+                else PromptCacheCounts()
+            ),
             context_window=_optional_int(limits.get("context_window")),
             max_output_tokens=_optional_int(limits.get("max_output_tokens")),
             largest_output_tokens=_optional_int(limits.get("largest_output_tokens")),

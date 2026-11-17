@@ -190,9 +190,17 @@ to. The profile is updated after every response that reports usage. It holds:
 - characters per token, for thinking, for visible output, and combined
 - the limits seen
 - whether the server honours `max_tokens`
+- how many prompt tokens the server had cached, and how many it read anew
 
-Each value is a token-weighted moving average, stored with its sample count and
-last update time.
+Each speed and ratio is a token-weighted moving average, stored with its sample
+count and last update time. The prompt cache counts are running totals.
+`cold_requests` counts requests that read at least 128 prompt tokens and had
+fewer than 128 cached. A session's first request is one. Many more than one per
+session means something changes the start of the prompt between requests, or the
+server evicts its cache. Hosted APIs cache nothing below a minimum prompt size
+(often 1,024 tokens), so short requests there count as cold too. A server that
+reports no cache reads at all shows as "no cache reads reported". `tau probe`
+requests are not counted.
 
 `tau probe` gives a new model a starting estimate, usually in under a minute.
 Other programs can read the profiles with `tau profile show --json`:
@@ -212,6 +220,7 @@ Other programs can read the profiles with `tau profile show --json`:
       },
       "prefill_tokens_per_second": {"value": 310.0, "samples": 9, "weight": 15400.0, "updated_at_ms": 1761300000000},
       "chars_per_token": {"thinking": null, "output": null, "combined": {"value": 2.7, "samples": 20, "weight": 9800.0, "updated_at_ms": 1761300000000}},
+      "prompt_cache": {"requests": 20, "cached_tokens": 410000, "uncached_tokens": 36000, "cold_requests": 1},
       "limits": {"context_window": 131072, "max_output_tokens": 16384, "largest_output_tokens": 15980},
       "request_parameters": {"max_tokens_honoured": true},
       "updated_at_ms": 1761300000000
