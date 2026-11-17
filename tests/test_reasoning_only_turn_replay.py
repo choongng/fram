@@ -297,15 +297,18 @@ async def test_continuing_after_a_failed_reasoning_only_turn_ends_on_the_user() 
     provider = FakeProvider(
         [[assistant_start(), assistant_done(AssistantMessage(content="Written."))]]
     )
+    # One instance: a message's timestamp is taken when it is made, so a second
+    # one built to compare against differs whenever the clock ticks between.
+    request = UserMessage(content="Write the encoder.")
     harness = AgentHarness(
         AgentHarnessConfig(provider=provider, model="fake", system=""),
-        messages=[UserMessage(content="Write the encoder."), failed],
+        messages=[request, failed],
     )
 
     _ = [event async for event in harness.continue_()]
 
     [(_model, _system, sent, _tools)] = provider.calls
-    assert sent == [UserMessage(content="Write the encoder.")]
+    assert sent == [request]
     # The failed turn stays in the session, and is sent once the reply follows it.
     assert harness.messages[1] is failed
     after = provider_context(list(harness.messages))
