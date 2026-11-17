@@ -102,6 +102,11 @@ class RecordingSession:
             tuple[str | None, dict[str, object] | None]
         ] = []
 
+    @property
+    def can_queue_messages(self) -> bool:
+        """Later Tau asks this, not `is_running`, before it queues a message."""
+        return self.is_running
+
     def queue_steering_message(
         self,
         content: str,
@@ -814,11 +819,13 @@ async def test_build_child_system_prompt_append_mode(tmp_path: Path) -> None:
         parent_prompt="PARENT PROMPT.",
         environment=environment,
         skill_blocks=[("foo", "FOO BLOCK")],
+        role="ROLE",
     )
 
     expected_prefix = (
         "PARENT PROMPT.\n\n"
         f"{prompts.SUB_AGENT_BRIDGE}\n\n"  # type: ignore[attr-defined]
+        "ROLE\n\n"
         '<active_agent name="helper"/>\n\n'
         f"{environment}"
     )
@@ -1331,11 +1338,14 @@ def test_sweep_transcripts_deletes_old_and_prunes(tmp_path: Path) -> None:
     new_file = new_dir / "agent-2.jsonl"
     old_file.write_text("{}\n")
     new_file.write_text("{}\n")
+    # A report kept beside a transcript goes when its transcript does.
+    old_report = old_dir / "agent-1.report.md"
+    old_report.write_text("report\n")
     stale = time.time() - 15 * 86_400
     os.utime(old_file, (stale, stale))
 
     assert sweep_transcripts(14) == 1
-    assert not old_file.exists()
+    assert not old_file.exists() and not old_report.exists()
     assert new_file.exists()
     # Emptied ancestors are pruned; populated ones and the root survive.
     assert not old_dir.exists()
@@ -3040,7 +3050,7 @@ def _record_child_sessions(
 async def test_child_session_gets_runtime_provider_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """R38: without the config tau could not build the child's thinking-off
+    """Without the config tau could not build the child's thinking-off
     twin, so its output-limit nudges went out with thinking on."""
     runtime = _load_runtime(tmp_path)
     runtime.bind(RecordingSession(tmp_path))

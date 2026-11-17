@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted (2026-08-21).
+Accepted (2026-08-21). Amended (2026-11-17): ADR 0006 adds a depth limit and
+replaces the "No depth limit" paragraph below.
 
 ## Context
 

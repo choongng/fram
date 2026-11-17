@@ -31,10 +31,13 @@ FORK_FILLER_RESULT = "(forked here — this call's result is not part of the for
 
 # The parent system prompt is kept byte-identical (appending anything there
 # would break the shared prompt cache), so the fork framing rides on the task
-# prompt instead.
+# prompt instead, and with it the instruction every other child gets from
+# `prompts.sub_agent_role`: a fork has the parent's tools, `agent` included.
 _FORK_TASK_TEMPLATE = """<fork_task>
-You are a fork of the conversation above and share its full context. Only
-your final message is returned to the parent session.
+You are a fork of the conversation above and share its full context. Do
+this task yourself with your own tools: do not hand it, or a reworded copy
+of it, to another agent. Only your final message is returned to the parent
+session.
 {worktree_note}
 {prompt}
 </fork_task>"""

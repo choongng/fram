@@ -8,7 +8,7 @@ user:
 
 Keys mirror pi's camelCase (`maxConcurrent`, `defaultMaxTurns`, `graceTurns`,
 `defaultJoinMode`, `transcriptRetentionDays`, `stallNoticeSeconds`,
-`jobsRetentionDays`, `jobsLogMaxBytes`). Missing files are treated as empty;
+`jobsRetentionDays`, `jobsLogMaxBytes`, `maxDepth`). Missing files are treated as empty;
 malformed JSON is ignored rather than crashing the session. Out-of-range or
 wrong-typed values are silently dropped and the field keeps its default.
 """
@@ -28,6 +28,10 @@ TRANSCRIPT_RETENTION_DAYS_DEFAULT: int | None = None
 # Fifteen quiet minutes: long enough that a slow build or test suite rarely
 # trips it, short enough that a wedged agent is not left for an hour.
 STALL_NOTICE_SECONDS_DEFAULT = 900
+# A backstop, not a working limit: a parent, its sub-agents, and two further
+# levels cover every sensible use, and a chain that reaches it is a model
+# passing its task on instead of doing it.
+MAX_DEPTH_DEFAULT = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +55,9 @@ class SubagentSettings:
     # outcome "log_overflow". 0 means no cap, which is the default because a
     # cap nobody asked for is a job killed for talking too much.
     jobs_log_max_bytes: int = JOBS_LOG_MAX_BYTES_DEFAULT
+    # Levels of sub-agents below the session a person started. A sub-agent at
+    # this depth cannot spawn another.
+    max_depth: int = MAX_DEPTH_DEFAULT
 
 
 def load_subagent_settings(cwd: Path, home: Path | None = None) -> SubagentSettings:
@@ -105,6 +112,9 @@ def _from_dict(data: dict[str, object]) -> SubagentSettings:
     log_bytes = _int_in_range(data.get("jobsLogMaxBytes"), 0, 2**40)
     if log_bytes is not None:
         settings = replace(settings, jobs_log_max_bytes=log_bytes)
+    max_depth = _int_in_range(data.get("maxDepth"), 1, 64)
+    if max_depth is not None:
+        settings = replace(settings, max_depth=max_depth)
     return settings
 
 
