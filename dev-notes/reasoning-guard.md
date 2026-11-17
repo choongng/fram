@@ -81,6 +81,16 @@ looks healthy, so stall detection doesn't help, and the user pays for the time.
   request builds its context with its own message in place for the same reason.
   Sessions written before this change replay the same way; their first request
   afterwards misses the prompt cache from that turn on, once.
+- Budgets have no floor. A replay of 28,477 stored reasoning turns found 47 over
+  32,768 characters that ended normally, so the `medium` level budget cuts about
+  one sound turn in 600, and lower budgets cut more. A floor on the level
+  budgets would have to sit near that size to save those turns, which would make
+  `minimal`, `low` and `medium` the same budget on the formats where the budget
+  is the only thing a level changes. A floor on a budget the user set would
+  override what they asked for. A wrong budget cut is also cheap: the reasoning
+  is kept and the follow-up asks the model to act on it. Users who need longer
+  thinking can raise the level (`xhigh` and `max` have no budget), set a larger
+  budget, or switch the guard off.
 - Thresholds are heuristics. A loop cut rarely loses anything, since a reply the
   detector catches would usually have run to the output limit anyway, but a
   budget can cut useful long reasoning, which is why the switch exists.
