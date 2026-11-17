@@ -117,6 +117,58 @@ async def test_harness_rejects_overlap_and_drains_followups() -> None:
 
 
 @pytest.mark.anyio
+async def test_harness_delivers_queued_messages_until_its_last_event() -> None:
+    # The run is still running while its last event is handled, but a message
+    # queued then is read by no one.
+    provider = FakeProvider([[assistant_start(), assistant_done(AssistantMessage(content="Hi"))]])
+    harness = AgentHarness(
+        AgentHarnessConfig(provider=provider, model="fake", system="You are Tau.")
+    )
+    heard: dict[str, tuple[bool, bool]] = {}
+    harness.subscribe(
+        lambda event: heard.setdefault(
+            event.type, (harness.is_running, harness.delivers_queued_messages)
+        )
+    )
+
+    assert not harness.delivers_queued_messages
+    seen = [
+        (event.type, harness.is_running, harness.delivers_queued_messages)
+        async for event in harness.prompt("Hi")
+    ]
+
+    assert seen[0] == ("agent_start", True, True)
+    assert seen[-2] == ("turn_end", True, True)
+    assert seen[-1] == ("agent_end", True, False)
+    assert heard["turn_end"] == (True, True)
+    assert heard["agent_end"] == (True, False)
+    assert not harness.delivers_queued_messages
+
+
+@pytest.mark.anyio
+async def test_cancelled_harness_no_longer_delivers_queued_messages() -> None:
+    tool_started = asyncio.Event()
+    release = asyncio.Event()
+    harness = _blocking_run_harness(tool_started, release)
+
+    async def consume() -> None:
+        async for _event in harness.prompt("go"):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(tool_started.wait(), timeout=5)
+    assert harness.delivers_queued_messages
+
+    harness.cancel()
+
+    assert harness.is_running
+    assert not harness.delivers_queued_messages
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.anyio
 async def test_harness_queue_mode_all_drains_messages_together() -> None:
     first = AssistantMessage(content="First")
     second = AssistantMessage(content="Second")
@@ -273,6 +325,39 @@ async def test_cancelled_run_notifies_listeners_of_interrupted_tool_repair() -> 
         if isinstance(event, MessageEndEvent) and isinstance(event.message, ToolResultMessage)
     ]
     assert [event.message.tool_call_id for event in repair_ends] == ["call-1"]
+
+
+@pytest.mark.anyio
+async def test_run_cancelled_again_during_its_repair_leaves_the_harness_usable() -> None:
+    # A listener that saves the repair can be awaited when a second
+    # cancellation arrives. The harness must not stay marked as running.
+    tool_started = asyncio.Event()
+    release = asyncio.Event()
+    harness = _blocking_run_harness(tool_started, release)
+    saving = asyncio.Event()
+
+    async def save_slowly(event: object) -> None:
+        if isinstance(event, MessageEndEvent) and isinstance(event.message, ToolResultMessage):
+            saving.set()
+            await asyncio.Event().wait()
+
+    harness.subscribe(save_slowly)
+
+    async def consume() -> None:
+        async for _event in harness.prompt("go"):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(tool_started.wait(), timeout=5)
+    harness.cancel()
+    task.cancel()
+    await asyncio.wait_for(saving.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert not harness.is_running
+    assert not harness.cancel_requested
 
 
 @pytest.mark.anyio

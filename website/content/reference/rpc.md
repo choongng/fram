@@ -53,6 +53,11 @@ applies).
 {"id":"g","type":"set_reasoning_guard","value":20000}
 ```
 
+`steer` and `follow_up` queue a message with the run in progress. A run that is
+ending, or was aborted, reads its queue no more. A message sent then is held and
+gets a run of its own as soon as the current one has settled, with the usual
+events. `abort` drops messages that are held this way.
+
 Use `agent_settled`, not `agent_end`, to decide that a run is fully idle: retries, overflow
 compaction, or queued continuations can follow `agent_end`.
 

@@ -939,6 +939,100 @@ async def test_completed_prompt_dispatches_and_yields_same_agent_settled_event(
 
 
 @pytest.mark.anyio
+async def test_abandoning_settle_hooks_ends_the_run_without_cancelling_its_reader(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    done = [
+        assistant_start(model="fake"),
+        assistant_done(message=AssistantMessage(content="Done.")),
+    ]
+    provider = FakeProvider([done, done, done])
+    session = await CodingSession.load(
+        _config(tmp_path, provider, JsonlSessionStorage(tmp_path / "session.jsonl"))
+    )
+    settling = asyncio.Event()
+    settled: list[str] = []
+    emit_event = session.extension_runtime.emit_event
+
+    async def settle_slowly(event: object) -> None:
+        if isinstance(event, AgentSettledEvent):
+            settling.set()
+            if not settled:
+                await asyncio.Event().wait()
+            settled.append("settled")
+            return
+        await emit_event(event)
+
+    monkeypatch.setattr(session.extension_runtime, "emit_event", settle_slowly)
+
+    # Hooks that never return: abandoned, they are cancelled and the run ends.
+    reader = asyncio.create_task(_collect_session_events(session.prompt("one")))
+    await asyncio.wait_for(settling.wait(), timeout=5)
+    session.abandon_settle_hooks()
+    events = await asyncio.wait_for(reader, timeout=5)
+    assert not any(isinstance(event, AgentSettledEvent) for event in events)
+    assert settled == []
+
+    # Abandoned before they start, they are not run.
+    settled.append("unblock")
+    events = []
+    async for event in session.prompt("two"):
+        events.append(event)
+        if getattr(event, "type", None) == "agent_end":
+            session.abandon_settle_hooks()
+    assert not any(isinstance(event, AgentSettledEvent) for event in events)
+    assert settled == ["unblock"]
+
+    # The next run settles as usual.
+    events = await _collect_session_events(session.prompt("three"))
+    assert isinstance(events[-1], AgentSettledEvent)
+    assert settled == ["unblock", "settled"]
+
+
+@pytest.mark.anyio
+async def test_reader_cancelled_after_abandoning_settle_hooks_is_still_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider(
+        [[assistant_start(model="fake"), assistant_done(message=AssistantMessage(content="Done."))]]
+    )
+    session = await CodingSession.load(
+        _config(tmp_path, provider, JsonlSessionStorage(tmp_path / "session.jsonl"))
+    )
+    settling = asyncio.Event()
+    abandoned = asyncio.Event()
+    emit_event = session.extension_runtime.emit_event
+
+    async def settle_stubbornly(event: object) -> None:
+        if not isinstance(event, AgentSettledEvent):
+            await emit_event(event)
+            return
+        settling.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # A hook that does not stop when it is abandoned.
+            abandoned.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(session.extension_runtime, "emit_event", settle_stubbornly)
+
+    reader = asyncio.create_task(_collect_session_events(session.prompt("one")))
+    await asyncio.wait_for(settling.wait(), timeout=5)
+    session.abandon_settle_hooks()
+    await asyncio.wait_for(abandoned.wait(), timeout=5)
+    assert not reader.done()
+
+    # Cancelling the reader is not another abandon: it must end cancelled, and
+    # not carry on as a reader whose hooks were given up.
+    reader.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(reader, timeout=5)
+
+
+@pytest.mark.anyio
 async def test_cancellation_during_settled_dispatch_does_not_redispatch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -7980,6 +8074,34 @@ async def test_queue_prompt_queues_only_while_the_agent_is_running(tmp_path: Pat
     ) == QueuePromptResult("refused")
     texts = [message.text for message in session.messages if isinstance(message, UserMessage)]
     assert texts == ["Hello", "Steer", "Follow up"]
+
+
+@pytest.mark.anyio
+async def test_queue_prompt_refuses_once_the_run_has_read_its_queues_for_the_last_time(
+    tmp_path: Path,
+) -> None:
+    # The agent still reports running while its `agent_end` event is handled.
+    # A message queued then would stay in the queue with no run to deliver it.
+    storage = JsonlSessionStorage(tmp_path / "session.jsonl")
+    provider = FakeProvider(
+        [[assistant_start(model="fake"), assistant_done(message=AssistantMessage(content="Hi"))]]
+    )
+    session = await CodingSession.load(_config(tmp_path, provider, storage))
+    at_agent_end: list[tuple[bool, bool, QueuePromptResult]] = []
+
+    async for event in session.prompt("Hello"):
+        if getattr(event, "type", None) == "agent_end":
+            at_agent_end.append(
+                (
+                    session.is_running,
+                    session.can_queue_messages,
+                    await session.queue_prompt("Too late", streaming_behavior="follow_up"),
+                )
+            )
+
+    assert at_agent_end == [(True, False, QueuePromptResult("refused"))]
+    assert session.queue_update_event() == QueueUpdateEvent()
+    assert len(provider.calls) == 1
 
 
 @pytest.mark.anyio

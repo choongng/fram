@@ -832,14 +832,18 @@ retired.
 
 ### Messages and persistence
 
-`send_user_message` delivers a user message into the conversation. During a
-run it queues as steering or a follow-up; when the session is idle the TUI
-starts a new turn with it — this is how background work reports back.
-`append_entry(namespace, data)` persists extension-owned data as a durable
-session entry replayed on resume. `set_label(entry_id, label)` creates, changes,
-or clears (`None`/empty) a bookmark on an existing session entry using the same
-validation and append-only storage as the `/tree` label editor. It raises for an
-unknown entry ID.
+`send_user_message` delivers a user message into the conversation. During a run
+it queues as steering or a follow-up; when the session is idle the TUI starts a
+new turn with it — this is how background work reports back. A run that has
+emitted `agent_end`, or was cancelled, takes no more messages. In the TUI a
+message sent from an `agent_end` or `agent_settled` handler therefore starts a
+new turn once that run has finished. Print and RPC modes start no turn for an
+extension: there the message joins the follow-up queue and is delivered with the
+next prompt. `append_entry(namespace, data)` persists extension-owned data as a
+durable session entry replayed on resume. `set_label(entry_id, label)` creates,
+changes, or clears (`None`/empty) a bookmark on an existing session entry using
+the same validation and append-only storage as the `/tree` label editor. It
+raises for an unknown entry ID.
 
 ### Custom message rendering
 

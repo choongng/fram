@@ -142,6 +142,7 @@ class RecordingSession:
             trusted=True, source="saved"
         )
         self.is_running = running
+        self.can_queue_messages = running
         self.messages: tuple[AgentMessage, ...] = ()
         self.steered: list[str] = []
         self.followed_up: list[str] = []
@@ -3536,6 +3537,34 @@ def test_send_custom_message_idle_delivers_metadata_via_turn_callback(tmp_path: 
     api.send_custom_message("body", custom_type="c", details={"n": 1})
 
     assert delivered == [("body", "c", {"n": 1})]
+
+
+def test_send_user_message_asks_for_a_turn_when_the_run_is_past_its_queues(
+    tmp_path: Path,
+) -> None:
+    # A run that is ending still runs. Queued with it, the message would wait
+    # for a later run that nothing starts.
+    runtime = ExtensionRuntime()
+    api = _inline_api(runtime, "notifier")
+    session = RecordingSession(tmp_path, running=True)
+    session.can_queue_messages = False
+    runtime.bind(session)
+    delivered: list[str] = []
+
+    def record_turn(
+        content: str,
+        custom_type: str | None = None,
+        details: dict[str, JSONValue] | None = None,
+    ) -> None:
+        del custom_type, details
+        delivered.append(content)
+
+    runtime.set_turn_requested_callback(record_turn)
+
+    api.send_user_message("after the run")
+
+    assert delivered == ["after the run"]
+    assert session.queued_custom == []
 
 
 def test_send_custom_message_without_trigger_turn_queues(tmp_path: Path) -> None:

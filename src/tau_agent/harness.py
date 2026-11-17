@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from inspect import isawaitable
 from typing import Literal
 
-from tau_agent.events import AgentEvent, MessageEndEvent, MessageStartEvent
+from tau_agent.events import AgentEndEvent, AgentEvent, MessageEndEvent, MessageStartEvent
 from tau_agent.loop import AfterToolCall, BeforeToolCall, run_agent_loop
 from tau_agent.messages import (
     AgentMessage,
@@ -78,6 +78,7 @@ class AgentHarness:
         self._listeners: list[EventListener] = []
         self._current_signal: SimpleCancellationToken | None = None
         self._running = False
+        self._run_ended = False
         self._steering_queue: deque[AgentMessage] = deque()
         self._follow_up_queue: deque[AgentMessage] = deque()
 
@@ -92,6 +93,24 @@ class AgentHarness:
     @property
     def is_running(self) -> bool:
         return self._running
+
+    @property
+    def delivers_queued_messages(self) -> bool:
+        """Whether the current run may still deliver a message queued now.
+
+        False means it will not. A run stays running a little longer than it
+        reads its queues: while its last event is handled, and while it stops
+        after a cancel. A message queued then is not lost, but no run is left
+        to deliver it. It waits in its queue for the next run, whenever that
+        is.
+
+        True is not a promise. A run reads its queues between turns, and
+        cannot know during a turn that it is the last: a provider error, the
+        turn limit, a final report or a hook that ends the run all stop it
+        without another read. A message queued in that turn waits for the
+        next run as well.
+        """
+        return self._running and not self._run_ended and not self.cancel_requested
 
     @property
     def queued_messages(self) -> QueuedMessages:
@@ -164,6 +183,7 @@ class AgentHarness:
     def prompt_message(self, message: AgentMessage) -> AsyncIterator[AgentEvent]:
         self._ensure_not_running()
         self._running = True
+        self._run_ended = False
         return self._run(prompts=(message,))
 
     def prompt(self, content: str) -> AsyncIterator[AgentEvent]:
@@ -172,6 +192,7 @@ class AgentHarness:
     def continue_(self) -> AsyncIterator[AgentEvent]:
         self._ensure_not_running()
         self._running = True
+        self._run_ended = False
         return self._run()
 
     async def _run(
@@ -207,22 +228,32 @@ class AgentHarness:
                 long_lived=self._config.long_lived,
                 finish_turn=self._config.finish_turn,
             ):
+                if isinstance(event, AgentEndEvent):
+                    # Before the listeners hear of it: one that sends a
+                    # message in answer must learn that this run is past
+                    # delivering it.
+                    self._run_ended = True
                 await self._notify(event)
                 yield event
         finally:
-            if signal.is_cancelled():
-                repaired_from = len(self._messages)
-                self._append_interrupted_tool_results()
-                # The consumer is usually gone here; push the repairs to
-                # subscribers. Listener errors are suppressed; cancellation
-                # itself is not.
-                for message in self._messages[repaired_from:]:
-                    with suppress(Exception):
-                        await self._notify(MessageStartEvent(message=message))
-                        await self._notify(MessageEndEvent(message=message))
-            if self._current_signal is signal:
-                self._current_signal = None
-            self._running = False
+            try:
+                if signal.is_cancelled():
+                    repaired_from = len(self._messages)
+                    self._append_interrupted_tool_results()
+                    # The consumer is usually gone here; push the repairs to
+                    # subscribers. Listener errors are suppressed; cancellation
+                    # itself is not.
+                    for message in self._messages[repaired_from:]:
+                        with suppress(Exception):
+                            await self._notify(MessageStartEvent(message=message))
+                            await self._notify(MessageEndEvent(message=message))
+            finally:
+                # Whatever ends the repair, a cancellation of the awaited
+                # listeners included, the run is over. Left marked as running,
+                # the harness would refuse every later run.
+                if self._current_signal is signal:
+                    self._current_signal = None
+                self._running = False
 
     async def _notify(self, event: AgentEvent) -> None:
         for listener in list(self._listeners):

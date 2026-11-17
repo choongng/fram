@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections import deque
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
@@ -19,7 +20,7 @@ from tau_agent.session.entries import SessionEntry
 from tau_agent.types import JSONValue
 from tau_coding.commands import CommandRegistry
 from tau_coding.context_window import parse_auto_compaction_threshold
-from tau_coding.events import CodingSessionEvent
+from tau_coding.events import CodingSessionEvent, QueueUpdateEvent
 from tau_coding.provider_config import (
     AnthropicProviderConfig,
     OpenAICompatibleProviderConfig,
@@ -31,6 +32,7 @@ from tau_coding.session import (
     CodingSession,
     ManualCompactionResult,
     ModelChoice,
+    QueuePromptResult,
     TerminalCommandResult,
 )
 from tau_coding.session_manager import SessionManager
@@ -106,7 +108,17 @@ class RpcSession(Protocol):
         content: str,
         *,
         streaming_behavior: Literal["steer", "follow_up"] | None = None,
+        prepared: bool = False,
     ) -> AsyncIterator[CodingSessionEvent]: ...
+
+    async def queue_prompt(
+        self,
+        content: str,
+        *,
+        streaming_behavior: Literal["steer", "follow_up"],
+    ) -> QueuePromptResult: ...
+
+    def queue_update_event(self) -> QueueUpdateEvent: ...
 
     def cancel(self) -> None: ...
 
@@ -170,6 +182,9 @@ class RpcServer:
         self._stdout = stdout or sys.stdout
         self._write_lock = anyio.Lock()
         self._active_prompt_tasks = 0
+        # Messages no run would deliver, each waiting for a run of its own:
+        # the text, and whether the session has already prepared it.
+        self._held_prompts: deque[tuple[str, bool]] = deque()
 
     async def run(self) -> None:
         """Serve commands until stdin reaches EOF."""
@@ -197,6 +212,7 @@ class RpcServer:
                     await self._error(None, "parse", "Command must be a JSON object")
                     continue
                 await self._dispatch(cast(dict[str, object], value), tasks)
+            self._held_prompts.clear()
             if self._active_prompt_tasks:
                 self._session.cancel()
         await self._session.aclose()
@@ -224,6 +240,12 @@ class RpcServer:
                     raise ValueError(
                         "Agent is already streaming; set streamingBehavior to steer or followUp"
                     )
+                if self._active_prompt_tasks and behavior is not None:
+                    queued = await self._queue_or_hold(message, behavior)
+                    await self._response(request_id, command_type)
+                    if queued:
+                        await self._write(self._session.queue_update_event())
+                    return
                 stream = self._session.prompt(message, streaming_behavior=behavior)
                 try:
                     first_event = await anext(stream)
@@ -235,6 +257,7 @@ class RpcServer:
                 tasks.start_soon(self._run_prompt, stream, first_event)
                 return
             if command_type == "abort":
+                self._held_prompts.clear()
                 self._session.cancel()
                 await self._response(request_id, command_type)
                 return
@@ -544,13 +567,55 @@ class RpcServer:
         first_event: CodingSessionEvent,
     ) -> None:
         try:
-            await self._write(first_event)
-            async for event in stream:
-                await self._write(event)
-        except (RuntimeError, ValueError) as exc:
-            await self._write({"type": "rpc_error", "error": str(exc)})
+            while True:
+                try:
+                    await self._write(first_event)
+                    async for event in stream:
+                        await self._write(event)
+                except (RuntimeError, ValueError) as exc:
+                    await self._write({"type": "rpc_error", "error": str(exc)})
+                held = await self._start_held_prompt()
+                if held is None:
+                    break
+                stream, first_event = held
         finally:
             self._active_prompt_tasks -= 1
+
+    async def _queue_or_hold(self, message: str, behavior: Literal["steer", "follow_up"]) -> bool:
+        """Queue a message with the run in progress, or hold it for a run of its own.
+
+        A run that is ending, was aborted, or is between two agent runs does
+        not read its queues. A message queued then would wait, undelivered,
+        for whatever prompt the client sends next. Return whether it was
+        queued.
+        """
+        result = await self._session.queue_prompt(message, streaming_behavior=behavior)
+        if result.status == "refused":
+            if result.prepared_text is None:
+                self._held_prompts.append((message, False))
+            else:
+                self._held_prompts.append((result.prepared_text, True))
+        return result.status == "queued"
+
+    async def _start_held_prompt(
+        self,
+    ) -> tuple[AsyncIterator[CodingSessionEvent], CodingSessionEvent] | None:
+        """Start a run for the oldest held message that still needs one."""
+        while self._held_prompts:
+            text, prepared = self._held_prompts.popleft()
+            stream = (
+                self._session.prompt(text, prepared=True)
+                if prepared
+                else self._session.prompt(text)
+            )
+            try:
+                return stream, await anext(stream)
+            except StopAsyncIteration:
+                # An `input` hook handled it.
+                continue
+            except (RuntimeError, ValueError) as exc:
+                await self._write({"type": "rpc_error", "error": str(exc)})
+        return None
 
     async def _response(
         self,

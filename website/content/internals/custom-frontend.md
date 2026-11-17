@@ -69,9 +69,17 @@ if result.status == "refused":
 ```
 
 It never starts a turn. `result.status` is `queued`, `handled` when an `input`
-hook consumed the message, or `refused` when the agent is not running. The call
+hook consumed the message, or `refused` when no run would deliver it. The call
 yields no events, so read `session.queue_update_event()` afterwards to refresh
 badges.
+
+A run stops reading its queues a little before `session.is_running` turns false:
+from its `agent_end` event on, and once it has been cancelled. `queue_prompt`
+refuses there too. `session.can_queue_messages` is the same test without the
+call: false once the current run will not read its queues again. True is not a
+promise. A run that ends on a provider error or at its turn limit does not read
+its queues after that turn, and a message queued during it stays queued for the
+next prompt.
 
 On a refusal, keep the message and submit it as the next run. If
 `result.prepared_text` is set, the hooks and prompt expansion have already run,
@@ -88,6 +96,15 @@ else:
 
 `queue_prompt` takes `prepared=True` as well, for offering the message to a
 later agent run. Keep showing `user_text` while the message waits.
+
+A cancelled run is not over when you stop reading its events. Close the event
+stream (`await events.aclose()`) and wait for that before you start the next
+run: the session stops the agent, saves the run's messages and awaits the
+`agent_settled` hooks there. A prompt submitted meanwhile should be held like a
+refused one. Starting it at once runs two turns on one session. If the user
+interrupts again while you wait, call `session.abandon_settle_hooks()` and do
+not cancel the task that is closing the stream: the hooks are stopped or
+skipped, and the save is left to finish.
 
 ## Slash commands
 

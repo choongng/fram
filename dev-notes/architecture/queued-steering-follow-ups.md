@@ -16,6 +16,25 @@ The harness exposes `steer()`, `follow_up()`, `clear_queues()`,
 `prompt()` and `continue_()` calls are rejected so callers cannot mutate one
 transcript from two active runs.
 
+`is_running` does not say that a queued message will be delivered. A run reads
+its queues for the last time before it emits `agent_end`, and not at all after a
+cancel, but it runs until its event stream is closed. A message queued in that
+stretch stays in its queue for the next run, whenever that is.
+`delivers_queued_messages` is the narrower test: false once the current run will
+not read the queues again. Callers that choose between queueing a message and
+delivering it some other way use it.
+
+True is not a promise of delivery. A run reads its queues between turns and
+cannot know during a turn that it is the last one. A provider error, the turn
+limit, a final report and a `finish_turn` hook that ends the run all stop it
+without another read, so a message queued during that turn stays queued as well.
+Nothing delivers it when the run ends, in any frontend: it shows as a queued
+message and goes with the next prompt. Delivering it at the end of the run was
+considered and left out. What is left in the queues then is a mix: messages the
+run missed, and messages an extension sent with `trigger_turn=False` after the
+last read, which are meant to wait. Nothing records which is which, and a turn
+started for the first kind would also start for the second, after every run.
+
 `run_agent_loop()` accepts provider-neutral queue-drain callbacks. When a queue
 drains, the loop appends the queued user message to the same message list used
 for normal prompts and emits ordinary user `MessageStartEvent` and
@@ -43,9 +62,16 @@ transcript.
 `input` hooks before it looks at the harness, so a caller that saw the harness
 running can still get a whole turn when the harness stops in between.
 `queue_prompt()` runs the same hooks and expansion, queues only if the harness
-is still running afterwards, and refuses otherwise, so the caller keeps the
-message. A frontend that queues from an input handler uses it to be sure the
-handler never runs a turn.
+still delivers queued messages afterwards, and refuses otherwise, so the caller
+keeps the message. A frontend that queues from an input handler uses it to be
+sure the handler never runs a turn.
+
+`CodingSession.can_queue_messages` passes on the harness's
+`delivers_queued_messages`. The extension runtime decides on it where a message
+from `send_user_message` or `send_custom_message` goes: into the run's queue, or
+to the frontend's turn-requested callback, which starts a turn for it. A message
+sent from an `agent_end` handler therefore gets a turn of its own instead of
+waiting in the queue of the run that just ended.
 
 Its `QueuePromptResult` has a `status` of `queued`, `handled` or `refused`. A
 refusal after the hooks ran carries `prepared_text`. The caller delivers that

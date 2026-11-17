@@ -151,6 +151,9 @@ class BoundSession(Protocol):
     def is_running(self) -> bool: ...
 
     @property
+    def can_queue_messages(self) -> bool: ...
+
+    @property
     def messages(self) -> tuple[AgentMessage, ...]: ...
 
     def queue_steering_message(
@@ -1134,7 +1137,9 @@ class ExtensionRuntime:
         details: dict[str, JSONValue] | None = None,
     ) -> None:
         session = self.session_view
-        if session.is_running:
+        # Not `is_running`: a run that is ending still runs, but would leave
+        # the message in its queue with nothing to deliver it.
+        if session.can_queue_messages:
             if deliver_as == "steer":
                 session.queue_steering_message(content, custom_type=custom_type, details=details)
             else:
