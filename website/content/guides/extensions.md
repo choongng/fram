@@ -424,6 +424,16 @@ example a subagent tool showing its `description` argument rather than the
 raw JSON. Return `None` to fall back to the generic line. Renderer errors
 are swallowed (diagnosed once per tool) and never crash the UI.
 
+A result too large to show whole is saved to a file and cut to a window (see
+[Large tool results](context.md#large-tool-results)). Set `output_window` to say
+which part is worth keeping: `"ends"` (the default) keeps the start and the end
+around a marker, `"head"` the start, `"tail"` the end, and `"whole"` all of it.
+Use `"whole"` for a result that is useless with a piece missing, such as a
+sub-agent's final report. Tau still cuts a `"whole"` result larger than 1/8 of
+the context window, so keep such results short. `output_window` is new in this
+version; an extension that must also load on an older Tau should pass it only
+when `AgentTool` has the field.
+
 While a tool is executing, the TUI animates its row: a braille spinner
 stands in for the line's leading marker (`→ ` / `▸ `) and, after the first
 second, a live elapsed time is appended (`… (1m 23s)`). Keep `render_call`

@@ -117,14 +117,31 @@ at the selected model's own limit while that model is active.
 A tool result larger than the inline limit does not go into context whole. Tau
 saves the full text to a file beside the session
 (`<session>.outputs/<tool>-<call-id>.txt`) and the model sees a window of it
-(the last 60 lines; for `read`, as many whole lines from the start as fit half
-the limit) plus the file's path, which it can page through with `read` or search
-with `grep`. A cut `read` is not saved: it points back at the source file and
-the offset to continue from.
+plus the file's path, which it can page through with `read` or search with
+`grep`. The window is half the limit. It starts with a line saying the result
+was cut, such as `[Output cut: 145 lines, middle omitted, see marker below.]`.
 
-The limit is 1/50 of the model's context window, between 1,000 and 4,000 tokens
-(at about 4 characters per token): about 16,000 characters on a 200K-token
-window. To change it, set a token count in `~/.tau/settings.json`:
+By default the window keeps both ends of the result: about 40% from the start
+and 60% from the end, each cut between lines. A marker where the middle was
+gives the omitted lines, the saved file, and any headings or definitions that
+were left out:
+
+```text
+[… lines 25–88 omitted (3,100 chars); full output: <path>. Page it with read offset/limit or grep it. Omitted sections: Highlights (L30), Priorities (L41).]
+```
+
+A tool can ask for something else. `read` keeps as many whole lines from the
+start as fit, and is not saved: it points back at the source file and the offset
+to continue from. A tool whose result is a finished report, such as a sub-agent
+tool from an extension, can ask for it whole: such a result is shown uncut up to
+1/8 of the context window, and cut like any other beyond that. See
+[`output_window`](extensions.md#tools) for how a tool declares this.
+
+The limit is 1/50 of the model's context window, between 2,000 and 4,000 tokens
+(at about 4 characters per token): 8,000 characters on a window of 32K to 100K
+tokens, and 16,000 on a 200K-token window. On a window under 32K tokens the
+lower bound is 1/16 of the window, and never under 1,000 tokens. To change it,
+set a token count in `~/.tau/settings.json`:
 
 ```json
 {
