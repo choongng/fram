@@ -7,6 +7,7 @@ dev-notes/tool-result-buffers.md.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from tau_agent.messages import assistant_content
 from tau_agent.session import JsonlSessionStorage
 from tau_agent.tools import ToolOutputWindow
 from tau_ai import FakeProvider
+from tau_ai.openai_compatible import _build_chat_payload
 from tau_coding import (
     CodingSession,
     CodingSessionConfig,
@@ -63,9 +65,19 @@ def _status_report(chars: int) -> str:
                 return "\n".join(lines)[:chars]
 
 
+def _says(text: str) -> list[object]:
+    return [assistant_start(model="fake"), assistant_done(message=AssistantMessage(content=text))]
+
+
 async def _session_calling(
-    tmp_path: Path, tools: list[AgentTool], calls: list[ToolCall], *, context_window: int
+    tmp_path: Path,
+    tools: list[AgentTool],
+    calls: list[ToolCall],
+    *,
+    context_window: int,
+    later_answers: int = 0,
 ) -> tuple[CodingSession, FakeProvider]:
+    """A session whose model makes `calls` in its first turn, then answers."""
     provider = FakeProvider(
         [
             [
@@ -76,7 +88,7 @@ async def _session_calling(
                     )
                 ),
             ],
-            [assistant_start(model="fake"), assistant_done(message=AssistantMessage(content="ok"))],
+            *[_says("ok") for _ in range(1 + later_answers)],
         ]
     )
     settings = ProviderSettings(
@@ -225,3 +237,58 @@ def test_an_extension_tool_keeps_its_declaration_through_the_hook_wrapper() -> N
     [wrapped] = runtime.compose_tools([_tool("report", "", "whole")])
 
     assert wrapped.output_window == "whole"
+
+
+def _sent(provider: FakeProvider, request: int) -> list[dict[str, object]]:
+    """The chat messages of one request, as a provider would put them on the wire."""
+    _model, system, messages, tools = provider.calls[request]
+    return _build_chat_payload(model="fake", system=system, messages=messages, tools=tools)[
+        "messages"
+    ]
+
+
+@pytest.mark.anyio
+async def test_a_result_is_cut_once_and_replayed_as_it_was_cut(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A server's prompt cache holds only while each request starts with the
+    bytes of the last. A result is cut when it comes back, the transcript
+    stores the cut text, and every later request sends that text again."""
+    monkeypatch.delenv(INLINE_TOKENS_ENV, raising=False)
+    log = "\n".join(f"line {n}" for n in range(20_000))
+    tools = [
+        _tool("log", log),
+        _tool("tail_log", log, "tail"),
+        _tool("page", log, "head"),
+        _tool("subagent", _status_report(12_000), "whole"),
+        _tool("big_subagent", _status_report(40_000), "whole"),
+    ]
+    calls = [ToolCall(id=f"c{n}", name=tool.name, arguments={}) for n, tool in enumerate(tools)]
+    session, provider = await _session_calling(
+        tmp_path, tools, calls, context_window=32_000, later_answers=1
+    )
+
+    for prompt in ("Look at the logs.", "And again?"):
+        async for _ in session.prompt(prompt):
+            pass
+
+    first, second = _sent(provider, 1), _sent(provider, 2)
+    results = [m for m in first if m["role"] == "tool"]
+    assert len(results) == 5
+    cut = [str(m["content"]).startswith("[Output cut: ") for m in results]
+    assert cut == [True, True, True, False, True]
+    # The next request starts with every message of this one, unchanged.
+    assert second[: len(first)] == first
+    # What was sent is what the transcript holds...
+    stored = (tmp_path / "session.jsonl").read_text()
+    for message in results:
+        assert json.dumps(message["content"], ensure_ascii=False)[1:-1] in stored
+    assert "line 10000" not in stored
+    await session.aclose()
+
+    # ...so a session resumed from it sends the same bytes again.
+    resumed, later = await _session_calling(tmp_path, tools, [], context_window=32_000)
+    async for _ in resumed.prompt("Once more."):
+        pass
+    assert _sent(later, 0)[: len(second)] == second
+    await resumed.aclose()
