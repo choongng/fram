@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import traceback
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -281,6 +282,21 @@ class LoginRequiredProvider:
 
 
 _DialogResult = TypeVar("_DialogResult")
+
+
+@dataclass(frozen=True, slots=True)
+class _HeldPrompt:
+    """A message waiting for the session to take it, as a queued message or a run."""
+
+    text: str
+    streaming_behavior: Literal["steer", "follow_up"]
+    source: Literal["interactive", "extension"] = "interactive"
+    custom_type: str | None = None
+    details: dict[str, JSONValue] | None = None
+    # What to deliver in place of ``text``, once the session has run its
+    # `input` hooks and expansion on it and then refused it. ``text`` stays
+    # what the user typed, for the waiting row and for editing.
+    prepared_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -4773,12 +4789,20 @@ class TauTuiApp(App[None]):
         self._extension_component_failures_reported: set[str] = set()
         self._connect_extension_runtime(session)
         self._prompt_worker: Worker[None] | None = None
-        # A submitted prompt is "pending" from its submit call until its worker
-        # receives the session's first event (or is cancelled). Submissions
-        # arriving in that window must queue instead of replacing the reserved
-        # exclusive worker, which would cancel the prompt before it ever runs.
-        self._pending_prompt_run_id: int | None = None
-        self._pending_prompt_started = asyncio.Event()
+        # The run that owns the session, from its submit call until its worker
+        # finishes or is interrupted. The session accepts queued messages only
+        # while its agent runs, which is a shorter span: not before the first
+        # event, not while the run compacts or fails over, and not while it
+        # settles. Prompts submitted in those gaps are held here, in order,
+        # until the session can queue them or the run finishes. Starting them
+        # at once would abandon or overlap the live run, and waiting for it in
+        # the key handler would stop input.
+        self._active_prompt_run_id: int | None = None
+        self._held_prompts: deque[_HeldPrompt] = deque()
+        # The held prompt being offered to the session right now. It is out of
+        # the deque so nothing else can take it, and still counts as held so
+        # later submissions line up behind it.
+        self._queueing_prompt: _HeldPrompt | None = None
         self._compaction_worker: Worker[None] | None = None
         self._compacting = False
         self._suspended_while_working = False
@@ -5376,25 +5400,144 @@ class TauTuiApp(App[None]):
                 self.exit()
             return
 
-        if self._pending_prompt_run_id is not None:
-            # A submitted prompt is waiting for its first frame; hold this
-            # submission so it cannot replace the reserved exclusive worker
-            # before the session run starts.
-            started = self._pending_prompt_started
-            await started.wait()
-            if self.state.running or bool(getattr(self.session, "is_running", False)):
-                # The reserved run is live; queue as during any running turn.
-                self._remember_prompt(text)
-                await self._queue_prompt(text, streaming_behavior=streaming_behavior)
-                return
-            # The reserved run resolved without starting; submit fresh below.
-        if self.state.running:
-            self._remember_prompt(text)
-            await self._queue_prompt(text, streaming_behavior=streaming_behavior)
-            return
-
         self._remember_prompt(text)
-        await self._submit_prompt(text)
+        if (
+            self._active_prompt_run_id is None
+            and not self._has_held_prompts()
+            and not self._is_session_running()
+        ):
+            await self._submit_prompt(text)
+            return
+        # A run owns the session, so this prompt joins it as a queued message
+        # or follows it as the next run. Calling `session.prompt` here would
+        # run a whole turn inside this key handler whenever the agent is not
+        # running: between a run's agent runs, while it settles, or because
+        # the agent stopped while the session's `input` hooks were awaited.
+        self._hold_prompt(_HeldPrompt(text, streaming_behavior))
+        await self._queue_held_prompts()
+
+    def _is_session_running(self) -> bool:
+        """Return whether the session's agent is running and can queue messages."""
+        return bool(getattr(self.session, "is_running", False))
+
+    def _has_held_prompts(self) -> bool:
+        return bool(self._held_prompts) or self._queueing_prompt is not None
+
+    def _hold_prompt(self, held: _HeldPrompt) -> None:
+        """Hold a message behind the ones already held, until it is delivered."""
+        self._held_prompts.append(held)
+        self._refresh_chrome_if_mounted()
+
+    async def _queue_held_prompts(self) -> None:
+        """Offer held prompts to the session, oldest first, while its agent runs."""
+        if self._queueing_prompt is not None:
+            # The offer in flight carries on with the rest when it returns.
+            return
+        while self._held_prompts and self._is_session_running():
+            held = self._held_prompts.popleft()
+            self._queueing_prompt = held
+            try:
+                refused = await self._offer_held_prompt(held)
+            finally:
+                # An interrupt meanwhile has already dropped it.
+                interrupted = self._queueing_prompt is not held
+                if not interrupted:
+                    self._queueing_prompt = None
+            if interrupted:
+                return
+            if refused is not None:
+                # The agent stopped first. The prompt keeps its place.
+                self._held_prompts.appendleft(refused)
+                break
+        self._sync_queue_state()
+        self._refresh_chrome_if_mounted()
+        if self._held_prompts and self._active_prompt_run_id is None:
+            # The run ended while an offer was in flight, so it could not
+            # start the prompts that were left.
+            self.call_later(self._start_next_held_prompt)
+
+    async def _offer_held_prompt(self, held: _HeldPrompt) -> _HeldPrompt | None:
+        """Queue one prompt with the running agent.
+
+        Return None once nothing is left to deliver. If the session refused the
+        prompt, return the entry to keep holding. It carries the text the
+        session prepared, when the refusal came after the `input` hooks ran, so
+        that the next delivery does not run them again.
+        """
+        try:
+            if held.source == "extension":
+                queue_follow_up = getattr(self.session, "queue_follow_up_message", None)
+                if callable(queue_follow_up):
+                    queue_follow_up(held.text, custom_type=held.custom_type, details=held.details)
+                return None
+            if held.prepared_text is None:
+                result = await self.session.queue_prompt(
+                    held.text, streaming_behavior=held.streaming_behavior
+                )
+            else:
+                result = await self.session.queue_prompt(
+                    held.prepared_text, streaming_behavior=held.streaming_behavior, prepared=True
+                )
+        except Exception as exc:  # noqa: BLE001 - surface queueing failures in the TUI
+            self._notify(
+                f"Could not queue {_quoted_prompt(held.text)}, so it was dropped: {exc}",
+                severity="error",
+            )
+            return None
+        if result.status != "refused":
+            return None
+        if result.prepared_text is None:
+            return held
+        return replace(held, prepared_text=result.prepared_text)
+
+    async def _start_next_held_prompt(self) -> None:
+        """Start the oldest held prompt once no run owns the session."""
+        if (
+            self._exit
+            or self._active_prompt_run_id is not None
+            or self._queueing_prompt is not None
+            or not self._held_prompts
+        ):
+            return
+        # Later held prompts stay held; the new run queues them when it starts.
+        held = self._held_prompts.popleft()
+        self._refresh_chrome_if_mounted()
+        await self._submit_prompt(
+            held.text,
+            source=held.source,
+            custom_type=held.custom_type,
+            details=held.details,
+            prepared_text=held.prepared_text,
+        )
+
+    def _release_prompt_run(self, run_id: int, *, start_held: bool) -> None:
+        """Give up the session at the end of ``run_id``, if it still owns it."""
+        if self._active_prompt_run_id != run_id:
+            # An interrupt released the run and dropped the held prompts.
+            return
+        self._active_prompt_run_id = None
+        if not start_held:
+            # Nothing is left to deliver them. Say so, unless the app is
+            # closing and nobody would read it.
+            self._drop_held_prompts(announce=not self._exit)
+        elif self._held_prompts:
+            # Not from the run's own worker: a new run replaces that worker.
+            self.call_later(self._start_next_held_prompt)
+
+    def _drop_held_prompts(self, *, announce: bool = False) -> None:
+        """Forget every held prompt, so none of them reaches the session."""
+        dropped = [held.text for held in self._held_prompts if held.source == "interactive"]
+        if self._queueing_prompt is not None and self._queueing_prompt.source == "interactive":
+            dropped.insert(0, self._queueing_prompt.text)
+        self._held_prompts.clear()
+        self._queueing_prompt = None
+        if announce and dropped:
+            listed = ", ".join(_quoted_prompt(text) for text in dropped)
+            self._notify(
+                f"The run did not finish, so these waiting prompts were not sent: {listed}",
+                severity="warning",
+            )
+        self._refresh_chrome_if_mounted()
 
     def _remember_prompt(self, text: str) -> None:
         """Remember a submitted user prompt for lightweight input recall."""
@@ -5424,12 +5567,12 @@ class TauTuiApp(App[None]):
         self._sync_queue_state()
         worker = self._prompt_worker
         is_worker_active = worker is not None and not worker.is_finished and not worker.is_cancelled
-        is_session_running = bool(getattr(self.session, "is_running", False))
         return (
             self.state.running
-            or is_session_running
+            or self._is_session_running()
             or is_worker_active
             or self.state.queued_message_count > 0
+            or self._has_held_prompts()
         )
 
     async def _run_compaction(self, summary: str) -> None:
@@ -5469,17 +5612,21 @@ class TauTuiApp(App[None]):
         source: Literal["interactive", "extension"] = "interactive",
         custom_type: str | None = None,
         details: dict[str, JSONValue] | None = None,
+        prepared_text: str | None = None,
     ) -> None:
-        """Add a prompt to the transcript and start the agent worker."""
+        """Add a prompt to the transcript and start the agent worker.
+
+        ``text`` is what the user sent and what the transcript shows first.
+        ``prepared_text``, when set, is what the session made of it before
+        refusing to queue it, and is delivered in its place.
+        """
         self._prompt_run_id += 1
         run_id = self._prompt_run_id
-        # Reserve the run before any await: a submission arriving while this
-        # one renders its optimistic row or waits for its first frame must
-        # queue instead of replacing the reserved exclusive worker, which
-        # would cancel the prompt before it ever reaches the session.
-        started = asyncio.Event()
-        self._pending_prompt_run_id = run_id
-        self._pending_prompt_started = started
+        # Take the session before any await: a submission arriving while this
+        # one renders its optimistic row or waits for its first frame must be
+        # held instead of replacing the exclusive worker, which would cancel
+        # the prompt before it ever reaches the session.
+        self._active_prompt_run_id = run_id
         try:
             # Custom messages are never rendered optimistically: the optimistic
             # dedupe matches on exact content equality with the post-expansion
@@ -5493,19 +5640,17 @@ class TauTuiApp(App[None]):
                 self._run_prompt_after_refresh(
                     text,
                     run_id,
-                    started=started,
                     source=source,
                     custom_type=custom_type,
                     details=details,
+                    prepared_text=prepared_text,
                 ),
                 exclusive=True,
             )
         except BaseException:
             # The run never started, so its optimistic row has no confirming
-            # event coming; release submitters and drop the reservation.
-            if self._pending_prompt_run_id == run_id:
-                self._pending_prompt_run_id = None
-            started.set()
+            # event coming.
+            self._release_prompt_run(run_id, start_held=False)
             self._clear_optimistic_user_messages(run_id=run_id)
             raise
 
@@ -5514,10 +5659,10 @@ class TauTuiApp(App[None]):
         text: str,
         run_id: int,
         *,
-        started: asyncio.Event,
         source: Literal["interactive", "extension"],
         custom_type: str | None,
         details: dict[str, JSONValue] | None,
+        prepared_text: str | None = None,
     ) -> None:
         """Start a prompt run once the optimistic prompt has been painted."""
         # Textual starts workers eagerly, so without this wait the session's
@@ -5531,10 +5676,8 @@ class TauTuiApp(App[None]):
                 await refreshed.wait()
         except asyncio.CancelledError:
             # The run never started, so its optimistic row has no confirming
-            # event coming; release submitters and drop the reservation.
-            if self._pending_prompt_run_id == run_id:
-                self._pending_prompt_run_id = None
-            started.set()
+            # event coming.
+            self._release_prompt_run(run_id, start_held=False)
             self._clear_optimistic_user_messages(run_id=run_id)
             raise
         await self._run_prompt(
@@ -5543,7 +5686,7 @@ class TauTuiApp(App[None]):
             source=source,
             custom_type=custom_type,
             details=details,
-            on_started=started,
+            prepared_text=prepared_text,
         )
 
     async def _append_optimistic_user_message(
@@ -5674,15 +5817,29 @@ class TauTuiApp(App[None]):
         custom_type: str | None = None,
         details: dict[str, JSONValue] | None = None,
     ) -> None:
-        if self.session.is_running or self._prompt_worker is not None:
-            # A run started while the delivery was in flight; drain with it.
-            queue_follow_up = getattr(self.session, "queue_follow_up_message", None)
-            if callable(queue_follow_up):
-                queue_follow_up(content, custom_type=custom_type, details=details)
+        if (
+            self._active_prompt_run_id is None
+            and self._prompt_worker is None
+            and not self._has_held_prompts()
+            and not self._is_session_running()
+        ):
+            await self._submit_prompt(
+                content, source="extension", custom_type=custom_type, details=details
+            )
             return
-        await self._submit_prompt(
-            content, source="extension", custom_type=custom_type, details=details
+        # A run owns the session, or prompts are waiting for one. The message
+        # takes its turn behind them instead of starting a run of its own,
+        # which would replace the live run's worker or overtake the prompts.
+        self._hold_prompt(
+            _HeldPrompt(
+                content,
+                "follow_up",
+                source="extension",
+                custom_type=custom_type,
+                details=details,
+            )
         )
+        await self._queue_held_prompts()
 
     # -- component seam ------------------------------------------------------
 
@@ -6415,21 +6572,6 @@ class TauTuiApp(App[None]):
         self.theme = theme
         self._refresh()
 
-    async def _queue_prompt(
-        self,
-        text: str,
-        *,
-        streaming_behavior: Literal["steer", "follow_up"],
-    ) -> None:
-        """Queue a prompt for the active agent worker."""
-        try:
-            async for event in self.session.prompt(text, streaming_behavior=streaming_behavior):
-                self.adapter.apply(event)
-        except Exception as exc:  # noqa: BLE001 - surface queueing failures in the TUI
-            self._notify(f"Could not queue message: {exc}", severity="error")
-            return
-        self._refresh_chrome()
-
     async def _run_prompt(
         self,
         text: str,
@@ -6438,21 +6580,26 @@ class TauTuiApp(App[None]):
         source: Literal["interactive", "extension"] = "interactive",
         custom_type: str | None = None,
         details: dict[str, JSONValue] | None = None,
-        on_started: asyncio.Event | None = None,
+        prepared_text: str | None = None,
     ) -> None:
         """Run one prompt and stream session events into the TUI state."""
         active_run_id = self._prompt_run_id if run_id is None else run_id
-        run_started = False
+        cancelled = False
         try:
-            async for event in self.session.prompt(
-                text, source=source, custom_type=custom_type, details=details
-            ):
-                if not run_started:
-                    # The session is running from the first event on; release
-                    # submitters waiting for the reserved prompt to start.
-                    run_started = True
-                    if on_started is not None:
-                        on_started.set()
+            if prepared_text is None:
+                events = self.session.prompt(
+                    text, source=source, custom_type=custom_type, details=details
+                )
+            else:
+                # The session's `input` hooks and expansion already ran on it.
+                events = self.session.prompt(
+                    prepared_text,
+                    source=source,
+                    custom_type=custom_type,
+                    details=details,
+                    prepared=True,
+                )
+            async for event in events:
                 if active_run_id != self._prompt_run_id:
                     return
                 if self._consume_optimistic_user_event(event, run_id=active_run_id):
@@ -6485,6 +6632,16 @@ class TauTuiApp(App[None]):
                     self.call_after_refresh(_collect_garbage_while_idle)
                     if not self._app_has_focus:
                         self._terminal_notification.notify_turn_finished()
+                if self._held_prompts and getattr(event, "type", None) != "agent_end":
+                    # The agent is running from the run's first event on, and
+                    # again when the run retries after compaction or failover.
+                    # Its last event is too late: it still reports running
+                    # until that event is consumed, but reads its queues no
+                    # more, so a message queued now would be stranded.
+                    await self._queue_held_prompts()
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         except Exception as exc:  # noqa: BLE001 - surface unexpected worker errors in the TUI
             if active_run_id != self._prompt_run_id:
                 return
@@ -6502,14 +6659,12 @@ class TauTuiApp(App[None]):
             self._refresh()
         finally:
             self._clear_optimistic_user_messages(run_id=active_run_id)
-            if self._pending_prompt_run_id == active_run_id:
-                self._pending_prompt_run_id = None
-            if on_started is not None:
-                # Runs without events (for example an input hook that handled
-                # the prompt) must still release submitters.
-                on_started.set()
             if active_run_id == self._prompt_run_id:
                 self._prompt_worker = None
+            # Runs without events (for example an input hook that handled the
+            # prompt) release the session here too. A run cancelled without an
+            # interrupt (the app is exiting) takes the held prompts with it.
+            self._release_prompt_run(active_run_id, start_held=not cancelled)
 
     async def _apply_streaming_transcript_event(self, event: CodingSessionEvent) -> None:
         """Apply an agent event to mounted transcript widgets without full redraws."""
@@ -6698,11 +6853,20 @@ class TauTuiApp(App[None]):
         del interrupt
         worker = self._prompt_worker
         is_worker_active = worker is not None and not worker.is_cancelled
-        is_session_running = bool(getattr(self.session, "is_running", False))
-        if not (self.state.running or is_session_running or is_worker_active):
+        if not (
+            self.state.running
+            or self._is_session_running()
+            or is_worker_active
+            or self._active_prompt_run_id is not None
+            or self._has_held_prompts()
+        ):
             return
 
         self._prompt_run_id += 1
+        # Held prompts go with the run they were waiting on, so none of them
+        # reaches the session after an interrupt.
+        self._active_prompt_run_id = None
+        self._drop_held_prompts()
         cancel = getattr(self.session, "cancel", None)
         if callable(cancel):
             cancel()
@@ -7241,6 +7405,16 @@ class TauTuiApp(App[None]):
             self._notify(f"Restored project: {_short_path(Path(cwd))}")
 
     async def _resume_session(self, session_id: str) -> None:
+        if self._active_prompt_run_id is not None or self._has_held_prompts():
+            # The session refuses to be replaced while its agent runs. A run
+            # that is between agent runs or settling still owns it, and held
+            # prompts were written for it, not for the session resumed.
+            self._notify(
+                f"Error: Cannot resume while {BRANDING.product_name} is working. "
+                "Press Escape to interrupt and wait for it to finish.",
+                severity="error",
+            )
+            return
         try:
             previous_cwd = Path(self.session.cwd).resolve()
             resume_message = await self.session.resume(session_id)
@@ -8808,6 +8982,14 @@ def _is_thinking_cycle_key(key: str, configured_key: str) -> bool:
     if key == configured_key:
         return True
     return configured_key == "shift+tab" and key == "backtab"
+
+
+def _quoted_prompt(text: str, *, limit: int = 40) -> str:
+    """Return the start of a prompt's first line in quotes, for a notice."""
+    first_line = text.strip().splitlines()[0] if text.strip() else ""
+    if len(first_line) > limit:
+        first_line = first_line[: limit - 1] + "…"
+    return f'"{first_line}"'
 
 
 def _render_queued_messages(state: TuiState, *, theme: TuiTheme) -> Group:
