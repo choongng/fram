@@ -99,7 +99,6 @@ def test_an_unwritable_outputs_dir_does_not_fail_a_small_result(tmp_path: Path) 
 
     kept = buffer_tool_result(
         result,
-        tool_name="echo",
         buffer_dir=blocker,
         limits=BufferLimits.for_context_window(200_000),
         output_name="echo-1.txt",
@@ -114,14 +113,13 @@ def test_an_oversized_result_names_its_per_call_file(tmp_path: Path) -> None:
 
     shown = buffer_tool_result(
         result,
-        tool_name="bash",
         buffer_dir=tmp_path,
         limits=BufferLimits.for_context_window(200_000),
         output_name="bash-c1.txt",
     )
 
     assert (tmp_path / "bash-c1.txt").read_text() == text
-    assert f"Full output: {tmp_path / 'bash-c1.txt'}" in shown.content[0].text  # type: ignore[union-attr]
+    assert f"full output: {tmp_path / 'bash-c1.txt'}" in shown.content[0].text  # type: ignore[union-attr]
     assert list(tmp_path.iterdir()) == [tmp_path / "bash-c1.txt"]
 
 
@@ -130,7 +128,6 @@ def test_a_reused_call_id_does_not_overwrite_the_earlier_output(tmp_path: Path) 
     for text in ("first", "second"):
         buffer_tool_result(
             AgentToolResult(content=[TextContent(text=text)]),
-            tool_name="bash",
             buffer_dir=tmp_path,
             limits=limits,
             output_name="bash-call_0.txt",
@@ -149,7 +146,6 @@ def test_a_symlinked_buffer_directory_is_refused(tmp_path: Path) -> None:
 
     shown = buffer_tool_result(
         AgentToolResult(content=[TextContent(text=text)]),
-        tool_name="bash",
         buffer_dir=link,
         limits=BufferLimits.for_context_window(200_000),
         output_name="bash-c1.txt",
@@ -165,7 +161,7 @@ def test_a_tail_cut_inside_a_line_does_not_count_the_fragment(tmp_path: Path) ->
 
     shown = buffer_tool_result(
         AgentToolResult(content=[TextContent(text=text)]),
-        tool_name="bash",
+        output_window="tail",
         buffer_dir=tmp_path,
         limits=limits,
     )

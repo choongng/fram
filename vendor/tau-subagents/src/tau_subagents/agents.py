@@ -59,7 +59,7 @@ DEFAULT_AGENT_TYPES: tuple[AgentDefinition, ...] = (
         name="general",
         description=(
             "General-purpose agent with the full coding toolset for research and"
-            " multi-step tasks."
+            " multi-step tasks; does the work itself."
         ),
     ),
     AgentDefinition(

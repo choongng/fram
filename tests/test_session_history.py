@@ -252,7 +252,7 @@ async def test_a_session_holds_history_answers_to_its_inline_limit(
     answer = await history.execute("c", {"refs": "#1-#12"})
 
     # The answer fits inline, so the window, which keeps the end, leaves it whole.
-    assert session._buffer_result(answer, tool_name="history") is answer
+    assert session._buffer_result(answer) is answer
     text = answer.content[0]
     assert isinstance(text, TextContent)
     assert text.text.startswith("#1 user\nturn 0 ")

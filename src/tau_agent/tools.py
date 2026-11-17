@@ -72,6 +72,10 @@ class ToolExecutor(Protocol):
 
 ToolExecutionMode = Literal["sequential", "parallel"]
 ToolArgumentPreparer = Callable[[object], Mapping[str, JSONValue]]
+#: Which part of a result too large to show whole a tool asks its host to keep:
+#: both ends, the start, the end, or all of it. The agent loop does not read
+#: it; a host that cuts large results does, and decides what each value costs.
+ToolOutputWindow = Literal["ends", "head", "tail", "whole"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +96,11 @@ class AgentTool:
     #: The call can change the files other calls read (write, edit), so a
     #: harness that remembers what a call gave forgets it after this one.
     changes_workspace: bool = False
+    #: The part of an oversized result worth keeping (see `ToolOutputWindow`).
+    #: "head" suits a tool that returns a file's text from a line on, "tail"
+    #: one whose output ends with what matters, and "whole" one whose result
+    #: is a finished report that is useless with a piece missing.
+    output_window: ToolOutputWindow = "ends"
 
     @property
     def input_schema(self) -> Mapping[str, JSONValue]:
@@ -118,5 +127,6 @@ __all__ = [
     "ToolExecutionMode",
     "ToolResultRenderer",
     "ToolExecutor",
+    "ToolOutputWindow",
     "ToolUpdateCallback",
 ]

@@ -1211,6 +1211,7 @@ class ExtensionRuntime:
             changes_workspace=tool.changes_workspace,
             render_call=tool.render_call,
             render_result=tool.render_result,
+            output_window=tool.output_window,
         )
 
     async def _run_tool_call_hooks(

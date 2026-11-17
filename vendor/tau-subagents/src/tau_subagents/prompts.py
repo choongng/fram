@@ -5,15 +5,21 @@ Two modes, selected by agent frontmatter `prompt_mode`:
 - `replace` (default): the agent body becomes the child's base prompt
   (`custom_system_prompt`), with any preloaded skill sections appended.
 - `append`: the parent session's full system prompt is kept verbatim as a
-  byte-identical prefix, followed by pi's sub-agent bridge, an
-  `<active_agent/>` tag, an environment block, the agent body wrapped in
-  `<agent_instructions>`, and skill sections. The result is a full system
-  prompt override.
+  byte-identical prefix, followed by pi's sub-agent bridge, the sub-agent
+  role, an `<active_agent/>` tag, an environment block, the agent body
+  wrapped in `<agent_instructions>`, and skill sections. The result is a
+  full system prompt override.
+
+Every child is told it is a sub-agent (`sub_agent_role`), in either mode and
+also when it has no prompt of its own and runs on Tau's default one. Without
+that, a child reads its task as a request from a person and may hand it to
+another agent, as its parent did.
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -41,6 +47,39 @@ You are operating as a sub-agent invoked to handle a specific task.
 - Do not use emojis
 - Be concise but complete
 </sub_agent_context>"""
+
+# Kept short and first-person-plain: small models follow it, and it is paid
+# for on every child request.
+_ROLE_DO_THE_WORK = (
+    "You are a sub-agent. Another agent gave you this task to do, not to pass on.\n"
+    "Do the work yourself with your own tools, then report what you found or did."
+)
+_ROLE_WHEN_TO_SPAWN = (
+    "Do not hand your task, or a reworded copy of it, to another agent. Spawn an\n"
+    "agent only for a clearly separate piece of work that can run alongside yours,\n"
+    "and never when you could do it with a few tool calls."
+)
+_ROLE_NO_AGENT_TOOL = "You have no agent tool; ignore any mention of one."
+_ROLE_SECTION = re.compile(
+    r"(?:\n\n)?<sub_agent_role>\n.*?\n</sub_agent_role>", re.DOTALL
+)
+
+
+def sub_agent_role(*, can_spawn: bool, agent_listed: bool = False) -> str:
+    """The section telling a child it is a delegate and must do its own task.
+
+    A child that has no `agent` tool is not told when to use one. Its prompt
+    can still name the tool, where the prompt was written before the tool
+    was taken away; `agent_listed` says so, and the section then says the
+    tool is not there.
+    """
+    lines = [_ROLE_DO_THE_WORK]
+    if can_spawn:
+        lines.append(_ROLE_WHEN_TO_SPAWN)
+    elif agent_listed:
+        lines.append(_ROLE_NO_AGENT_TOOL)
+    body = "\n".join(lines)
+    return f"<sub_agent_role>\n{body}\n</sub_agent_role>"
 
 
 PARENT_CONTEXT_HEADER = """# Parent Conversation Context
@@ -120,14 +159,20 @@ def build_child_system_prompt(
     environment: str,
     skill_blocks: list[tuple[str, str]],
     memory_block: str | None = None,
+    role: str | None = None,
 ) -> str | None:
     """Assemble the child system prompt for one agent definition.
 
     Append mode (with a parent prompt available) returns a full system prompt
-    override incorporating `environment` (from `detect_environment`).
-    Otherwise returns a base prompt for `custom_system_prompt`, or None to
-    keep the default coding prompt. Extras follow pi's order: memory block
-    first, then skill sections.
+    override incorporating `environment` (from `detect_environment`) and
+    `role` (from `sub_agent_role`). The parent can be a sub-agent too, whose
+    prompt has a bridge and a role of its own; those are taken out, so the
+    child has one of each, and the role is the one for its own depth.
+    Otherwise returns a base prompt for
+    `custom_system_prompt`, or None to keep the default coding prompt; `role`
+    is not in it, because there may be no base prompt to put it in. The
+    caller passes it as `append_system_prompt`, which Tau adds after either
+    base. Extras follow pi's order: memory block first, then skill sections.
     """
     if definition.prompt_mode == "append" and parent_prompt:
         custom_section = ""
@@ -144,8 +189,11 @@ def build_child_system_prompt(
             f"\n# Preloaded Skill: {name}\n{block}" for name, block in skill_blocks
         )
         extras_suffix = "\n\n" + "\n".join(extras) if extras else ""
+        role_section = f"{role}\n\n" if role else ""
+        prefix = _ROLE_SECTION.sub("", parent_prompt)
+        prefix = prefix.replace(f"\n\n{SUB_AGENT_BRIDGE}", "")
         return (
-            f"{parent_prompt}\n\n{SUB_AGENT_BRIDGE}\n\n"
+            f"{prefix}\n\n{SUB_AGENT_BRIDGE}\n\n{role_section}"
             f'<active_agent name="{definition.name}"/>\n\n'
             f"{environment}{custom_section}{extras_suffix}"
         )

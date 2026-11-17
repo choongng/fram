@@ -126,7 +126,8 @@ rebinds always land exactly one strip.
 
 Three built-in types ship with the extension:
 
-- `general` — full coding toolset, for research and multi-step tasks
+- `general` — full coding toolset, for research and multi-step tasks; does the
+  work itself
 - `explore` — read-only (`read` + `bash`), for searching and summarizing
 - `fork` — a fork of the current conversation (see "Forking the conversation")
 
@@ -560,6 +561,28 @@ mid-task remark rather than an answer. The notification then carries a
 `<note>` saying so, with the transcript path, and the card shows
 `completed (no report)`.
 
+## Long final reports
+
+Tau cuts a tool result that is too large for the parent's context, and a
+report with a piece cut out misleads the agent that asked for it. Two things
+keep a report whole:
+
+- `agent` and `get_subagent_result` declare `output_window="whole"`, so a Tau
+  that has that setting shows their results uncut up to its ceiling (1/8 of
+  the parent's context window). On a Tau without the setting they load as
+  before and Tau cuts as before.
+- A completed agent whose final report is over 12,000 characters gets one
+  more turn, with the message "Condense your report to under 8,000
+  characters; keep every finding, drop narration. Reply with the condensed
+  report itself; do not call tools." Its answer becomes the result, under a
+  line giving both lengths and the path of the original, saved as plain text
+  beside the output file (`<id>.report.md`). The result is the original
+  report if that turn fails, if the agent calls a tool or goes on to another
+  turn, or if its answer is under 300 characters or not under 12,000. The
+  turn is not counted in the agent's turns, and the agent cannot be steered
+  while it lasts. Agents that were stopped, failed or ran out of turns are
+  not asked.
+
 ## Resuming a finished agent
 
 Call the `agent` tool with `resume=<id>` and a new `prompt` to continue a
@@ -612,6 +635,7 @@ user (missing or malformed files are ignored):
 | `stallNoticeSeconds` | int 0–86400 | 900 | seconds a background agent may go without an event before the parent is told it may be stalled (`0` = off) |
 | `jobsRetentionDays` | int 0–3650 | 30 | days a finished background job's directory is kept, swept at session start (`0` = never sweep; a running job is never swept) |
 | `jobsLogMaxBytes` | int 0–1099511627776 | 0 | bytes a job's log may reach before its process group is killed (`0` = no cap) |
+| `maxDepth` | int 1–64 | 3 | levels of sub-agents allowed below the session you started; a sub-agent at this depth cannot spawn another |
 
 Out-of-range or wrong-typed values are silently dropped and the field keeps its
 default.
@@ -619,12 +643,17 @@ default.
 ## Notes and limits
 
 - Children load extensions natively (pi parity), so subagents can spawn
-  subagents recursively — including this extension's own tools. There is no
-  depth limit; pass `isolated: true` on the `agent` tool to spawn a child
-  without extensions (core tools only, no further spawning), pi's `isolated`
-  param. Forks reject `isolated` — their tool pool must match the parent's.
-  Child sessions never fire `session_start`, so a child's extension instance
-  registers tools but starts no scheduler, UI, or retention sweep.
+  subagents — including this extension's own tools. Nesting stops at `maxDepth`
+  levels (default 3): a child at that depth is given no `agent`,
+  `get_subagent_result`, `steer_subagent`, or `stop_subagent` tool. A fork at
+  that depth keeps the tools, since its tool pool must match the parent's, and
+  its `agent` calls are refused with a message telling it to do the task itself.
+  The limit is a backstop against a model that passes its task on instead of
+  doing it; ordinary use does not reach it. Pass `isolated: true` on the `agent`
+  tool to spawn a child without extensions (core tools only, no further
+  spawning), pi's `isolated` param. Forks reject `isolated`. Child sessions
+  never fire `session_start`, so a child's extension instance registers tools
+  but starts no scheduler, UI, or retention sweep.
 - Live activity while a subagent works is the spinner + elapsed timer on its
   tool row and the in-place view (see "Live activity").
 - `/reload` rebuilds extension state; background runs in flight at reload

@@ -7768,10 +7768,11 @@ async def test_terminal_command_output_is_buffered_like_a_tool_result(tmp_path: 
 
     [buffer] = list((tmp_path / "session.outputs").iterdir())
     assert buffer.read_text().splitlines()[-1] == "100000"
-    assert result.output.rstrip().endswith(
-        f"Full output: {buffer}. Page it with read (offset/limit) or grep it.]"
+    assert result.output.startswith(
+        "[Output cut: 100,000 lines, middle omitted, see marker below.]\n1\n2\n"
     )
-    assert "\n99999\n100000\n" in result.output and "\n1\n2\n" not in result.output
+    assert f"full output: {buffer}. Page it with read offset/limit or grep it.]" in result.output
+    assert result.output.endswith("\n99999\n100000\n") and "\n5000\n" not in result.output
     assert len((tmp_path / "session.jsonl").read_text()) < 100_000
 
 
@@ -7851,10 +7852,11 @@ async def test_session_buffers_an_oversized_tool_result_beside_the_session(
     assert buffer.name == "fetch-call-1.txt"
     assert buffer.read_text() == output
     [result] = [m for m in provider.calls[1][2] if m.role == "toolResult"]
-    assert "event 99999" in result.text and "event 0\n" not in result.text
-    assert f"Full output: {buffer}" in result.text
+    assert "event 99999" in result.text and "event 0\n" in result.text
+    assert "event 5000\n" not in result.text
+    assert f"full output: {buffer}" in result.text
     assert len(result.text) < 60_000
-    assert "event 0\n" not in (tmp_path / "session.jsonl").read_text()
+    assert "event 5000\n" not in (tmp_path / "session.jsonl").read_text()
 
 
 @pytest.mark.anyio

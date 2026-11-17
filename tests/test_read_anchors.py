@@ -147,11 +147,13 @@ def test_an_oversized_read_is_windowed_by_size_not_line_count(tmp_path: Path) ->
     short = "\n".join(f"{n}#abc| x" for n in range(1, 2_001))
     result = buffer_tool_result(
         AgentToolResult(content=[TextContent(text=short)]),
-        tool_name="read",
+        output_window="head",
         buffer_dir=tmp_path,
         limits=limits,
     )
-    shown, marker = _text(result).split("\n[Read cut: ")
+    top, shown = _text(result).split("\n", 1)
+    assert top == "[Output cut: 2,000 lines, end omitted, see marker below.]"
+    shown, marker = shown.split("\n[Read cut: ")
     # Short rows: far more than WINDOW_LINES of them fit the window's chars.
     assert shown.count("\n") + 1 > WINDOW_LINES
     assert len(shown) <= limits.window_chars
@@ -165,11 +167,11 @@ def test_an_oversized_read_is_windowed_by_size_not_line_count(tmp_path: Path) ->
     )
     result = buffer_tool_result(
         AgentToolResult(content=[TextContent(text=wrapped)]),
-        tool_name="read",
+        output_window="head",
         buffer_dir=tmp_path,
         limits=limits,
     )
-    shown, marker = _text(result).split("\n[Read cut: ")
+    shown, marker = _text(result).split("\n", 1)[1].split("\n[Read cut: ")
     assert shown.split("\n")[-1].startswith(tuple(f"{n}.3| " for n in range(1, 50)))
     last = int(shown.split("\n")[-1].split(".")[0])
     assert marker.startswith(f"lines 1-{last} of the file are shown")
@@ -180,7 +182,7 @@ def test_a_cut_read_sends_the_model_back_to_the_source_file(tmp_path: Path) -> N
 
     shown = buffer_tool_result(
         AgentToolResult(content=[TextContent(text=text)]),
-        tool_name="read",
+        output_window="head",
         buffer_dir=tmp_path,
         limits=BufferLimits(inline_chars=100, window_chars=500, window_lines=60),
         source_path="/work/big.py",
@@ -200,7 +202,7 @@ async def test_a_line_too_long_for_the_window_is_read_past(tmp_path: Path) -> No
     shown = _text(
         buffer_tool_result(
             read,
-            tool_name="read",
+            output_window="head",
             buffer_dir=tmp_path,
             limits=BufferLimits(inline_chars=16_000, window_chars=8_000),
             source_path=str(tmp_path / "a.jsonl"),
@@ -224,7 +226,7 @@ def test_row_prefixes_come_off_text_ending_in_a_newline() -> None:
 def test_a_read_is_not_saved(tmp_path: Path) -> None:
     buffer_tool_result(
         AgentToolResult(content=[TextContent(text="1#abc| small")]),
-        tool_name="read",
+        output_window="head",
         buffer_dir=tmp_path,
         limits=BufferLimits(inline_chars=100, window_chars=500, window_lines=60),
         source_path="/work/small.py",
