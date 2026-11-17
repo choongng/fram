@@ -30,9 +30,7 @@ def _text(result: AgentToolResult) -> str:
 
 def test_a_result_that_fits_is_returned_unchanged(tmp_path: Path) -> None:
     result = AgentToolResult(content=[TextContent(text="short")])
-    assert (
-        buffer_tool_result(result, tool_name="bash", buffer_dir=tmp_path, limits=LIMITS) is result
-    )
+    assert buffer_tool_result(result, buffer_dir=tmp_path, limits=LIMITS) is result
     assert list(tmp_path.iterdir()) == []
 
 
@@ -40,21 +38,21 @@ def test_an_oversized_result_keeps_its_tail_and_names_the_full_file(tmp_path: Pa
     text = "\n".join(f"line {i}" for i in range(500))
     result = AgentToolResult(content=[TextContent(text=text)])
 
-    buffered = buffer_tool_result(result, tool_name="bash", buffer_dir=tmp_path, limits=LIMITS)
+    buffered = buffer_tool_result(result, buffer_dir=tmp_path, limits=LIMITS)
 
     shown = _text(buffered)
     assert "line 499" in shown and "line 0\n" not in shown
     assert "the last 10 of 500 lines" in shown
     [path] = list(tmp_path.iterdir())
     assert str(path) in shown and path.read_text() == text
-    again = buffer_tool_result(result, tool_name="bash", buffer_dir=tmp_path, limits=LIMITS)
+    again = buffer_tool_result(result, buffer_dir=tmp_path, limits=LIMITS)
     assert _text(again) == shown and len(list(tmp_path.iterdir())) == 1
 
 
 def test_read_keeps_the_head_and_long_lines_are_capped(tmp_path: Path) -> None:
     head = buffer_tool_result(
         AgentToolResult(content=[TextContent(text="\n".join(f"row {i}" for i in range(500)))]),
-        tool_name="read",
+        output_window="head",
         buffer_dir=tmp_path,
         limits=LIMITS,
     )
@@ -65,7 +63,6 @@ def test_read_keeps_the_head_and_long_lines_are_capped(tmp_path: Path) -> None:
 
     one_line = buffer_tool_result(
         AgentToolResult(content=[TextContent(text="x" * 100_000)]),
-        tool_name="bash",
         buffer_dir=tmp_path,
         limits=LIMITS,
     )
@@ -78,9 +75,7 @@ def test_an_unwritable_buffer_still_truncates_and_says_why(tmp_path: Path) -> No
     image = ImageContent(data="aGk=", mime_type="image/png")
     result = AgentToolResult(content=[TextContent(text="y\n" * 5_000), image])
 
-    buffered = buffer_tool_result(
-        result, tool_name="bash", buffer_dir=blocker / "sub", limits=LIMITS
-    )
+    buffered = buffer_tool_result(result, buffer_dir=blocker / "sub", limits=LIMITS)
 
     assert "could not be saved" in _text(buffered)
     assert buffered.content[-1] == image
@@ -128,7 +123,7 @@ async def test_cut_read_of_python_lists_definitions_with_line_numbers(tmp_path: 
         result = await _read(tmp_path, source, arguments)
         buffered = buffer_tool_result(
             result,
-            tool_name="read",
+            output_window="head",
             buffer_dir=buffers,
             limits=limits,
             first_line=read_first_line(arguments),
@@ -157,7 +152,9 @@ def test_cut_read_outline_is_bounded(tmp_path: Path) -> None:
     result = AgentToolResult(content=[TextContent(text=source)])
     limits = BufferLimits(inline_chars=2_000, window_chars=4_000, window_lines=60)
 
-    shown = _text(buffer_tool_result(result, tool_name="read", buffer_dir=tmp_path, limits=limits))
+    shown = _text(
+        buffer_tool_result(result, output_window="head", buffer_dir=tmp_path, limits=limits)
+    )
 
     outline = shown.split("Definitions (", 1)[1]
     assert len(outline) <= limits.window_chars // 4 + 100
@@ -165,11 +162,11 @@ def test_cut_read_outline_is_bounded(tmp_path: Path) -> None:
     assert 0 < listed <= 80
     assert f"{len(where) - listed:,} more definitions not listed" in outline
 
-    bash = _text(buffer_tool_result(result, tool_name="bash", buffer_dir=tmp_path, limits=limits))
+    bash = _text(buffer_tool_result(result, buffer_dir=tmp_path, limits=limits))
     assert "Definitions (" not in bash
     plain = AgentToolResult(content=[TextContent(text="no code here\n" * 500)])
     assert "Definitions (" not in _text(
-        buffer_tool_result(plain, tool_name="read", buffer_dir=tmp_path, limits=limits)
+        buffer_tool_result(plain, output_window="head", buffer_dir=tmp_path, limits=limits)
     )
 
 
@@ -183,7 +180,7 @@ async def test_cut_read_marker_names_file_lines_and_next_offset(tmp_path: Path) 
     shown = _text(
         buffer_tool_result(
             result,
-            tool_name="read",
+            output_window="head",
             buffer_dir=tmp_path / "buffers",
             limits=BufferLimits(inline_chars=2_000, window_chars=8_000, window_lines=60),
             first_line=first_line,
@@ -207,7 +204,7 @@ def test_char_cut_read_marker_names_the_last_whole_line(tmp_path: Path) -> None:
     shown = _text(
         buffer_tool_result(
             AgentToolResult(content=[TextContent(text=text)]),
-            tool_name="read",
+            output_window="head",
             buffer_dir=tmp_path,
             limits=limits,
             first_line=11,
@@ -230,7 +227,7 @@ async def test_read_with_explicit_limit_fills_the_char_window(tmp_path: Path) ->
     shown = _text(
         buffer_tool_result(
             result,
-            tool_name="read",
+            output_window="head",
             buffer_dir=tmp_path / "buffers",
             limits=BufferLimits(inline_chars=1_000, window_chars=8_000, window_lines=60),
             first_line=first_line,
@@ -249,7 +246,7 @@ def test_outline_reads_line_numbers_from_a_prefixed_read(tmp_path: Path) -> None
     shown = _text(
         buffer_tool_result(
             AgentToolResult(content=[TextContent(text=text)]),
-            tool_name="read",
+            output_window="head",
             buffer_dir=tmp_path,
             limits=LIMITS,
         )
@@ -323,7 +320,6 @@ def test_default_inline_limit_buffers_a_26k_char_result(
     shown = _text(
         buffer_tool_result(
             AgentToolResult(content=[TextContent(text=diff)]),
-            tool_name="bash",
             buffer_dir=tmp_path,
             limits=limits,
             output_name="bash-c1.txt",
@@ -334,9 +330,7 @@ def test_default_inline_limit_buffers_a_26k_char_result(
     assert f"Full output: {tmp_path / 'bash-c1.txt'}" in shown
     assert len(shown) < 10_000
     under = AgentToolResult(content=[TextContent(text=_diff_like(limits.inline_chars))])
-    kept = buffer_tool_result(
-        under, tool_name="bash", buffer_dir=tmp_path, limits=limits, output_name="bash-c2.txt"
-    )
+    kept = buffer_tool_result(under, buffer_dir=tmp_path, limits=limits, output_name="bash-c2.txt")
     assert kept is under
     assert (tmp_path / "bash-c2.txt").read_text() == _text(under)
 
@@ -364,9 +358,9 @@ async def test_inline_limit_is_configurable(
         )
     )
     diff = AgentToolResult(content=[TextContent(text=_diff_like(26_000))])
-    assert session._buffer_result(diff, tool_name="bash") is diff
+    assert session._buffer_result(diff) is diff
 
     monkeypatch.setenv(INLINE_TOKENS_ENV, "500")
-    shown = _text(session._buffer_result(diff, tool_name="bash"))
+    shown = _text(session._buffer_result(diff))
     assert "Full output: " in shown and len(shown) < 2_000
     assert BufferLimits.for_context_window(200_000).inline_chars == 2_000

@@ -64,6 +64,7 @@ from tau_agent.tools import (
     ToolCancellationToken,
     ToolExecutionMode,
     ToolExecutor,
+    ToolOutputWindow,
     ToolUpdateCallback,
 )
 from tau_agent.turns import AgentTurnContext, AgentTurnDecision, FinishTurn

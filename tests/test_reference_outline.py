@@ -53,7 +53,7 @@ def _cut_read(tmp_path: Path, name: str, source: str, arguments: dict[str, objec
     first_line = read_first_line(arguments)
     buffered = buffer_tool_result(
         result,
-        tool_name="read",
+        output_window="head",
         buffer_dir=tmp_path / "buffers",
         limits=LIMITS,
         first_line=first_line,

@@ -53,7 +53,7 @@ from tau_agent.session.entries import MessageDelivery, MessageSource, SessionEnt
 from tau_agent.session.jsonl import entry_to_json_line
 from tau_agent.session.tree import SessionTreeError, path_to_entry
 from tau_agent.tool_history import ToolHistoryRepair, repair_tool_history
-from tau_agent.tools import AgentTool, AgentToolResult
+from tau_agent.tools import AgentTool, AgentToolResult, ToolOutputWindow
 from tau_agent.types import JSONValue
 from tau_ai.loop_cuts import cutting_looping_tool_arguments
 from tau_ai.model_catalog import ModelCatalogProvider, RuntimeModel, RuntimeModelCatalog
@@ -1554,11 +1554,18 @@ class CodingSession:
         self, call: ToolCall, result: AgentToolResult, is_error: bool
     ) -> tuple[AgentToolResult, bool]:
         """Save a tool call's output and keep an oversized one out of the transcript."""
+        output_window = self._output_window(call.name)
         shown = self._buffer_result(
             result,
-            tool_name=call.name,
+            output_window=output_window,
             first_line=read_first_line(call.arguments),
-            source_path=read_source_path(result.details) if call.name == "read" else None,
+            # Only the built-in read's own cut note can send the model back to
+            # the file; a `read` cut any other way is saved like other output.
+            source_path=(
+                read_source_path(result.details)
+                if call.name == "read" and output_window == "head"
+                else None
+            ),
             output_name=output_file_name(call.name, call.id),
         )
         cut_note = self._tool_guards.take_cut_note(call)
@@ -1579,7 +1586,7 @@ class CodingSession:
         self,
         result: AgentToolResult,
         *,
-        tool_name: str,
+        output_window: ToolOutputWindow = "ends",
         first_line: int = 1,
         source_path: str | None = None,
         output_name: str | None = None,
@@ -1588,18 +1595,30 @@ class CodingSession:
 
         With `output_name` the output is saved whatever its size (see
         `buffer_tool_result`). A session with no file of its own saves only
-        oversized outputs, to the per-user temp buffer directory.
+        oversized outputs, to the per-user temp buffer directory. `output_window`
+        is the part of an oversized result to keep (`AgentTool.output_window`).
         """
         buffer_dir = self.outputs_dir
         return buffer_tool_result(
             result,
-            tool_name=tool_name,
+            output_window=output_window,
             buffer_dir=buffer_dir if buffer_dir is not None else default_buffer_dir(),
             limits=self._buffer_limits(),
             first_line=first_line,
             source_path=source_path,
             output_name=output_name if buffer_dir is not None else None,
         )
+
+    def _output_window(self, tool_name: str) -> ToolOutputWindow:
+        """The part of an oversized result the named tool asked to keep.
+
+        A call to a tool the session does not have (the loop answers it with
+        an error) gets the default.
+        """
+        for tool in self._harness.config.tools:
+            if tool.name == tool_name:
+                return tool.output_window
+        return "ends"
 
     def _buffer_limits(self) -> BufferLimits:
         """How much of a tool result is shown inline, for the current model."""
@@ -3822,7 +3841,7 @@ class CodingSession:
         )
         result = self._buffer_result(
             await bash_tool.execute("terminal-command", {"command": normalized_command}),
-            tool_name="bash",
+            output_window=bash_tool.output_window,
         )
         exit_code = None
         if isinstance(result.details, dict):

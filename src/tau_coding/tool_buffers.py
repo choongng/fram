@@ -3,9 +3,11 @@
 Every tool result passes through `buffer_tool_result` before it becomes a
 transcript message. A result under the inline limit is returned unchanged. A
 larger one is written whole to a buffer file, and the transcript gets a window
-of it (the tail by default, the head for `read`) plus a marker that names the
-file. The model pages the rest in with tools it already knows: `read` with
-`offset`/`limit`, or `grep` through `bash`.
+of it plus a marker that names the file. Which part the window keeps is the
+tool's own declaration, `AgentTool.output_window`: the head for `read`, and
+all of it, up to a ceiling, for a tool that says its result is useless with a
+piece missing. The model pages the rest in with tools it already knows: `read`
+with `offset`/`limit`, or `grep` through `bash`.
 
 A session saves every tool result but a successful read's, small ones too, as
 `<session>.outputs/<tool>-<call-id>.txt` (`output_file_name`), so old outputs
@@ -28,7 +30,7 @@ from itertools import count
 from pathlib import Path
 
 from tau_agent.messages import ImageContent, TextContent
-from tau_agent.tools import AgentToolResult
+from tau_agent.tools import AgentToolResult, ToolOutputWindow
 from tau_coding.context_window import CHARS_PER_TOKEN
 from tau_coding.line_anchors import row_line_number, strip_row_prefixes
 
@@ -42,15 +44,16 @@ MIN_INLINE_TOKENS = 1_000
 MAX_INLINE_TOKENS = 4_000
 #: Set to a token count, this replaces the computed inline limit for the run.
 INLINE_TOKENS_ENV = "TAU_TOOL_RESULT_INLINE_TOKENS"
-#: Lines of an oversized result kept in the transcript, for every tool but
-#: `read`: a read is windowed by size alone (`window_chars`), since a file's
-#: lines may be a few characters (code) or a few thousand (a paper converted to
-#: text), so a line count says nothing about how much a window holds.
+#: A tool that declares `output_window="whole"` is shown whole up to this
+#: fraction of the context window, whatever the inline limit is. Past it the
+#: result is cut like any other, so one result cannot take the window over.
+WHOLE_WINDOW_DIVISOR = 8
+#: Lines of an oversized result kept in the transcript, for every window but
+#: the head: a head window is cut by size alone (`window_chars`), since a
+#: file's lines may be a few characters (code) or a few thousand (a paper
+#: converted to text), so a line count says nothing about how much a window
+#: holds.
 WINDOW_LINES = 60
-#: Tools whose oversized output is windowed from the head, not the tail. Test
-#: output, tracebacks and build logs end with the part that matters; a file
-#: read starts with it.
-HEAD_WINDOW_TOOLS = frozenset({"read"})
 #: A head-windowed result is followed by an outline of its def/class lines and
 #: document headings, so the model can jump to one with read offset/limit
 #: instead of paging. The outline is capped at this many entries and a quarter
@@ -87,6 +90,14 @@ class BufferLimits:
     inline_chars: int
     window_chars: int
     window_lines: int = WINDOW_LINES
+    #: The most a "whole" result may hold and still be shown whole; never less
+    #: than `inline_chars` in effect (see `whole_limit`).
+    whole_chars: int = 0
+
+    @property
+    def whole_limit(self) -> int:
+        """The size up to which a tool that asks for its result whole gets it."""
+        return max(self.whole_chars, self.inline_chars)
 
     @classmethod
     def for_context_window(
@@ -106,7 +117,11 @@ class BufferLimits:
         # A fixed 4 characters a token: the served model's measured ratio
         # describes its own output, not the tool output it reads.
         inline_chars = tokens * CHARS_PER_TOKEN
-        return cls(inline_chars=inline_chars, window_chars=inline_chars // 2)
+        return cls(
+            inline_chars=inline_chars,
+            window_chars=inline_chars // 2,
+            whole_chars=context_window_tokens * CHARS_PER_TOKEN // WHOLE_WINDOW_DIVISOR,
+        )
 
 
 def _env_inline_tokens() -> int | None:
@@ -148,7 +163,7 @@ def _user_tag() -> str:
 def buffer_tool_result(
     result: AgentToolResult,
     *,
-    tool_name: str,
+    output_window: ToolOutputWindow = "ends",
     buffer_dir: Path,
     limits: BufferLimits,
     first_line: int = 1,
@@ -156,6 +171,10 @@ def buffer_tool_result(
     output_name: str | None = None,
 ) -> AgentToolResult:
     """Return `result` unchanged if it fits inline, else a window plus a buffer path.
+
+    `output_window` is the part of an oversized result its tool asked to keep
+    (`AgentTool.output_window`). "whole" keeps all of a result up to
+    `limits.whole_limit`; a larger one is cut as "ends" is.
 
     `first_line` is the file line the text starts at (a read's offset), so the
     marker and outline of a head-windowed read name the file's own line numbers.
@@ -180,12 +199,16 @@ def buffer_tool_result(
             failure = f"{type(exc).__name__}: {exc}"
     if len(text) <= limits.inline_chars:
         return result
+    if output_window == "whole":
+        if len(text) <= limits.whole_limit:
+            return result
+        output_window = "ends"
     if output_name is None and source_path is None:
         try:
             location = str(_write_buffer(buffer_dir, text))
         except OSError as exc:
             failure = f"{type(exc).__name__}: {exc}"
-    head = tool_name in HEAD_WINDOW_TOOLS
+    head = output_window == "head"
     if head:
         shown = _read_window(text, limits.window_chars)
         shown_lines = shown.count("\n") + 1

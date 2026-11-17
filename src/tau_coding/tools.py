@@ -27,6 +27,7 @@ from tau_agent.tools import (
     AgentToolResult,
     ToolArgumentPreparer,
     ToolCancellationToken,
+    ToolOutputWindow,
     ToolUpdateCallback,
 )
 from tau_agent.types import JSONValue
@@ -256,6 +257,7 @@ class ToolDefinition:
     ]
     changes_workspace: bool = False
     prepare_arguments: ToolArgumentPreparer | None = None
+    output_window: ToolOutputWindow = "ends"
 
     def to_agent_tool(self) -> AgentTool:
         """Convert the coding definition to the Pi-compatible core tool."""
@@ -290,6 +292,7 @@ class ToolDefinition:
             prompt_guidelines=self.prompt_guidelines,
             changes_workspace=self.changes_workspace,
             prepare_arguments=self.prepare_arguments,
+            output_window=self.output_window,
         )
 
 
@@ -573,6 +576,9 @@ def create_read_tool_definition(
             "required": ["path"],
         },
         executor=execute,
+        # A file starts with what a reader needs first, and the cut note sends
+        # the model on from there by offset.
+        output_window="head",
     )
 
 
