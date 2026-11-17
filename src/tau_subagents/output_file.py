@@ -75,6 +75,11 @@ def output_file_path(
     )
 
 
+def full_report_path(transcript: Path) -> Path:
+    """Where a run keeps, as plain text, a final report it was asked to condense."""
+    return transcript.with_suffix(".report.md")
+
+
 def sweep_transcripts(
     retention_days: int,
     home: Path | None = None,
@@ -100,6 +105,7 @@ def sweep_transcripts(
         try:
             if transcript.stat().st_mtime < cutoff:
                 transcript.unlink()
+                full_report_path(transcript).unlink(missing_ok=True)
                 removed += 1
         except OSError:
             continue

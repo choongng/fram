@@ -59,6 +59,7 @@ from .jobs import Job, JobStore
 from .jobs_tool import JobActions, build_jobs_tool, jobs_command_text
 from .jobs_watch import JobWatcher
 from .memory import prepare_memory
+from .nesting import SPAWN_TOOLS, Nesting, current_nesting, nested
 from .notification_render import (
     SUCCESS_STATUSES,
     render_agent_result,
@@ -66,7 +67,12 @@ from .notification_render import (
     render_stall_notice,
     stat_parts,
 )
-from .output_file import OutputFileWriter, output_file_path, sweep_transcripts
+from .output_file import (
+    OutputFileWriter,
+    full_report_path,
+    output_file_path,
+    sweep_transcripts,
+)
 from .phase import (
     PHASE_AWAITING_MODEL,
     PHASE_IN_TOOL,
@@ -83,6 +89,7 @@ from .prompts import (
     detect_environment,
     inherited_resource_paths,
     resolve_skill_blocks,
+    sub_agent_role,
 )
 from .schedule import SubagentScheduler
 from .schedule_store import ScheduleStore, resolve_store_path
@@ -147,6 +154,35 @@ REPORT_REQUEST_MESSAGE = (
     " Reply now with your final report: what you found or did, what is not"
     " done, and where the work is. Do not start new work."
 )
+#: A final report longer than this is sent back to its author to condense. Tau
+#: cuts an oversized tool result, and a report with its middle cut out misleads
+#: the agent that asked for it.
+#: Under the size a parent on a 32K-token model is shown whole (16,000
+#: characters), with room for the header the result carries.
+CONDENSE_OVER_CHARS = 12_000
+CONDENSE_TARGET_CHARS = 8_000
+#: A shorter answer to the request is a remark ("Done."), not a report.
+CONDENSE_MIN_CHARS = 300
+#: Sent once to a child whose final report is over `CONDENSE_OVER_CHARS`.
+CONDENSE_REQUEST_MESSAGE = (
+    f"Condense your report to under {CONDENSE_TARGET_CHARS:,} characters; keep"
+    " every finding, drop narration. Reply with the condensed report itself;"
+    " do not call tools."
+)
+
+
+def report_tool_options(tool_class: type = AgentTool) -> dict[str, str]:
+    """`AgentTool` arguments for a tool whose result is a child's report.
+
+    They ask Tau to show the result whole rather than cut it to a window.
+    Empty on a Tau whose `AgentTool` has no `output_window`; that Tau cuts
+    the result as it always did.
+    """
+    if "output_window" in getattr(tool_class, "__dataclass_fields__", {}):
+        return {"output_window": "whole"}
+    return {}
+
+
 # Event types that change what a viewer would show (session.messages / status).
 # Streaming (message_update) is skipped: it never touches session.messages, so
 # pushing on it would redraw identical content on every token. Errors need no
@@ -172,6 +208,56 @@ def format_job_notice(job: Job) -> str:
         return f"Job {job.id} ({job.label}) lost after {elapsed}s."
     rc = "rc=?" if job.rc is None else f"rc={job.rc}"
     return f"Job {job.id} ({job.label}) {job.status()} after {elapsed}s ({rc})."
+
+
+AGENT_SNIPPET = "Spawn an autonomous subagent for delegated tasks."
+AGENT_SNIPPET_DELEGATE = (
+    "Spawn a subagent for a separate piece of work, never to pass on your own task."
+)
+
+
+def agent_tool_description(type_list: str, *, delegate: bool) -> str:
+    """The `agent` tool's description for one session.
+
+    Says when not to spawn as well as how: a model reads this far more often
+    than it reads any prompt about delegation. `delegate` adds the line for
+    a session that is itself a sub-agent. A fork passes its parent's value,
+    so that its tool descriptions match the parent's (see `Nesting`).
+    """
+    delegate_line = (
+        " You are a sub-agent yourself: spawn only for a separate subtask,"
+        " never to pass on the task you were given."
+        if delegate
+        else ""
+    )
+    return (
+        "Spawn an autonomous subagent to handle a task. The subagent works"
+        " in its own context with its own tools and returns its final"
+        " report.\n\nWhen not to use: do the task yourself when a few tool"
+        " calls would do it. Use agents for independent pieces of work that"
+        " can run in parallel, or to keep heavy reading out of your context."
+        " Never forward your whole task to a single agent."
+        f"{delegate_line}\n\nSet run_in_background=true for long tasks; a"
+        " completion notification will arrive when it finishes. Use"
+        " steer_subagent to redirect a running agent, and resume=<id> with a"
+        " new prompt to continue a finished agent's session. Two ways to"
+        " share this conversation: inherit_context=true prepends a text"
+        " digest of the user and assistant messages only (no tool calls or"
+        " results) to a fresh agent of any type/model; subagent_type fork"
+        " runs on this conversation's actual messages, including every tool"
+        " call and result, with the same system prompt, tools, and model, so"
+        " the prompt cache is shared.\n\nAvailable agent types:"
+        f"\n{type_list}"
+    )
+
+
+def depth_limit_message(depth: int) -> str:
+    """What a sub-agent at the nesting limit is told when it tries to spawn."""
+    return (
+        f"No agent was started: this session is a sub-agent {depth} levels"
+        " deep, which is the limit (the maxDepth setting). Do the task"
+        " yourself with your own tools, then report the result."
+    )
 
 
 def soft_limit_message(max_turns: int, grace_turns: int) -> str:
@@ -288,6 +374,8 @@ class AgentRun:
     # asked once (report_requested) to give its report before the run ends.
     report_missing: bool = False
     report_requested: bool = False
+    #: Finished, and answering the request to condense its report.
+    condensing: bool = False
     # The latest non-empty assistant text, kept for a partial result when the
     # run is stopped or cancelled before it reports.
     last_text: str = ""
@@ -342,6 +430,10 @@ class SubagentManager:
 
     def __init__(self, api: ExtensionAPI) -> None:
         self._api = api
+        # Read here, not at spawn time: a manager is built in `setup()`,
+        # which runs inside the scope its session's parent set, whereas a
+        # queued or scheduled spawn can start from some other task's context.
+        self.nesting = current_nesting()
         self._runs: dict[str, AgentRun] = {}
         self._counter = 0
         self._settings: SubagentSettings | None = None
@@ -400,6 +492,24 @@ class SubagentManager:
 
     def definitions(self) -> dict[str, AgentDefinition]:
         return load_agent_definitions(self._api.context.cwd)
+
+    @property
+    def max_depth(self) -> int:
+        """The nesting limit: the top session's, for every session below it."""
+        inherited = self.nesting.max_depth
+        return self._get_settings().max_depth if inherited is None else inherited
+
+    def _child_nesting(self, definition: AgentDefinition) -> Nesting:
+        """The nesting a child of this session runs at.
+
+        A fork is its parent continued, so it is a delegate only if its
+        parent is one: its tool descriptions must match the parent's.
+        """
+        return Nesting(
+            depth=self.nesting.depth + 1,
+            delegate=self.nesting.delegate if definition.fork else True,
+            max_depth=self.max_depth,
+        )
 
     def _get_settings(self) -> SubagentSettings:
         if self._settings is None:
@@ -680,6 +790,7 @@ class SubagentManager:
                 self._request_report_if_empty(run, event)
                 await self._flush_output(run, session, event)
             run.result_text = final_text[-1] if final_text else ""
+            await self._condense_report(run, session)
             run.context_tokens = session.context_token_estimate
             self._finalize_status(run)
         except asyncio.CancelledError:
@@ -768,7 +879,11 @@ class SubagentManager:
 
     async def _run_agent(self, run: AgentRun, definition: AgentDefinition) -> None:
         try:
-            await self._execute(run, definition)
+            # Around the child's load, where the child's own manager reads
+            # the scope. A later resume=<id> runs outside it, which is why
+            # the manager keeps what it read.
+            with nested(self._child_nesting(definition)):
+                await self._execute(run, definition)
         except asyncio.CancelledError:
             run.status = "cancelled"
             raise
@@ -914,11 +1029,13 @@ class SubagentManager:
         extra_config: dict[str, object] = self._inherited_trust_config()
         memory_block: str | None = None
         memory_rw = False
+        role: str | None = None
         if definition.fork:
             # Fork: seed the child storage with the parent transcript and keep
             # the parent system prompt byte-identical (shared prompt cache).
             # No memory, skill preloads, or tool gating — the fork is the
-            # parent session continued, minus recursive subagent tools.
+            # parent session continued. Its instruction to do the task itself
+            # is in the task message (wrap_fork_task).
             assert capture is not None
             storage.entries = build_fork_entries(capture, child_cwd)
             prompt_text: str | None = capture.system_prompt
@@ -946,12 +1063,29 @@ class SubagentManager:
             environment = ""
             if definition.prompt_mode == "append" and parent_prompt:
                 environment = await detect_environment(child_cwd)
+            can_spawn = (
+                not run.requested_isolated
+                and (definition.tools is None or "agent" in definition.tools)
+                and self.nesting.depth + 1 < self.max_depth
+            )
+            # A child that loads this extension has `agent` in its prompt's
+            # tool list. Where the tool is then taken away, later Tau
+            # rebuilds the prompt (below), except an append-mode one, which
+            # is the parent's.
+            prompt_rebuilt = hasattr(
+                CodingSession, "refresh_system_prompt"
+            ) and not (definition.prompt_mode == "append" and parent_prompt)
+            role = sub_agent_role(
+                can_spawn=can_spawn,
+                agent_listed=not run.requested_isolated and not prompt_rebuilt,
+            )
             prompt_text = build_child_system_prompt(
                 definition,
                 parent_prompt=parent_prompt,
                 environment=environment,
                 skill_blocks=skill_blocks,
                 memory_block=memory_block,
+                role=role,
             )
             append_active = definition.prompt_mode == "append" and bool(parent_prompt)
             # skills: none/false disables skill discovery; a named CSV also
@@ -967,6 +1101,10 @@ class SubagentManager:
                 storage=storage,
                 system=prompt_text if append_active else None,
                 custom_system_prompt=None if append_active else prompt_text,
+                # Tau adds this after the agent's own prompt, or after its
+                # default coding prompt when the agent type has none. An
+                # append-mode prompt is a full override with the role in it.
+                append_system_prompt=None if append_active else role,
                 # Children always discover skills natively (Tau defaults
                 # resource paths from the session cwd). skills: true pins
                 # discovery to the PARENT cwd, which matters under worktree
@@ -990,7 +1128,7 @@ class SubagentManager:
         )
         # The child needs its provider config to build the thinking-off twin
         # tau sends an output-limit nudge with; without it every nudge went
-        # out with thinking on (R38). Set after load, not passed as
+        # out with thinking on. Set after load, not passed as
         # CodingSessionConfig.runtime_provider_config: tau rebuilds a provider
         # it does not own from that config at load, at the session's thinking
         # level, which would replace the one created above at the agent's.
@@ -1010,6 +1148,20 @@ class SubagentManager:
             session._harness.config.tools = [  # noqa: SLF001 - scoped tool gating
                 tool for tool in session._harness.config.tools if tool.name in allowed
             ]
+        if not definition.fork and self.nesting.depth + 1 >= self.max_depth:
+            # The backstop: a child at the nesting limit cannot spawn. A fork
+            # keeps its tools, which must match the parent's, and has the
+            # call refused instead (see run_agent_tool).
+            session._harness.config.tools = [  # noqa: SLF001 - scoped tool gating
+                tool
+                for tool in session._harness.config.tools
+                if tool.name not in SPAWN_TOOLS
+            ]
+        # Tau listed the tools in the system prompt during the load, before
+        # any were removed above. Later Tau can rebuild the prompt.
+        refresh = getattr(session, "refresh_system_prompt", None)
+        if refresh is not None and not definition.fork:
+            refresh()
         final_text: list[str] = []
         async for event in session.prompt(run.prompt):
             self._observe(run, event, final_text)
@@ -1019,8 +1171,85 @@ class SubagentManager:
                 run.context_tokens = session.context_token_estimate
             await self._flush_output(run, session, event)
         run.result_text = final_text[-1] if final_text else ""
+        await self._condense_report(run, session)
         run.context_tokens = session.context_token_estimate
         self._finalize_status(run)
+
+    async def _condense_report(self, run: AgentRun, session: CodingSession) -> None:
+        """Give a child whose final report is very long one turn to shorten it.
+
+        Called when the run's event stream has ended and before its status is
+        decided. Only a run that would be plain "completed" is asked: a
+        stopped, failed or out-of-turns run has no finished report to
+        condense. The turn is for one answer and nothing else: it is
+        cancelled if the child calls a tool or goes on to a second turn, it
+        is not counted in the run's turns, and the run takes no steering
+        while it lasts. An answer of at least `CONDENSE_MIN_CHARS` and under
+        `CONDENSE_OVER_CHARS` becomes the result, the original is saved as
+        text beside the output file, and the result names that copy.
+        Otherwise the run keeps the original, as if it had not been asked.
+        """
+        original = run.result_text
+        if (
+            len(original) <= CONDENSE_OVER_CHARS
+            or run.aborted
+            or run.pending_error is not None
+            or run.report_missing
+            or run.soft_limit_reached
+        ):
+            return
+        turns = run.turns
+        answers: list[str] = []
+        strayed = False
+        run.condensing = True
+        try:
+            async for event in session.prompt(CONDENSE_REQUEST_MESSAGE):
+                self._observe(run, event, answers)
+                await self._flush_output(run, session, event)
+                if not strayed and (
+                    event.type == "tool_execution_start" or run.turns > turns + 1
+                ):
+                    # Not an answer but more work: "Saved to report.md" would
+                    # otherwise be taken for the report.
+                    strayed = True
+                    session.cancel()
+        except Exception:  # noqa: BLE001 - the original report still stands
+            strayed = True
+        finally:
+            run.condensing = False
+            run.turns = turns
+        condensed = answers[-1] if answers else ""
+        usable = (
+            not strayed
+            and CONDENSE_MIN_CHARS <= len(condensed) < CONDENSE_OVER_CHARS
+            and not run.aborted
+            and run.pending_error is None
+            and not run.report_missing
+        )
+        # Whatever the extra turn did, the run finished when its report did.
+        run.aborted = False
+        run.pending_error = None
+        run.report_missing = False
+        run.tools_in_flight.clear()
+        run.current_tool = None
+        run.current_tool_started_at = None
+        if not usable:
+            run.last_text = original
+            return
+        where = ""
+        if run.output_file:
+            # Plain text, which `read` can page; in the transcript the report
+            # is one long JSON-escaped line.
+            copy = full_report_path(Path(run.output_file))
+            try:
+                await asyncio.to_thread(copy.write_text, original, encoding="utf-8")
+                where = f" The full report is in {copy}."
+            except OSError:
+                where = f" The full report is in the transcript, {run.output_file}."
+        run.result_text = (
+            f"[The agent condensed this report from {len(original):,} to"
+            f" {len(condensed):,} characters.{where}]\n\n{condensed}"
+        )
 
     async def _flush_output(
         self, run: AgentRun, session: CodingSession, event: AgentEvent
@@ -1839,6 +2068,8 @@ def setup(tau: ExtensionAPI) -> None:
 
     async def run_agent_tool(tool_call_id, arguments, signal=None, on_update=None):  # noqa: ANN001, ANN202
         del tool_call_id
+        if manager.nesting.depth >= manager.max_depth:
+            return _tool_result(content=depth_limit_message(manager.nesting.depth))
         await manager.evict_stale()
         if arguments.get("schedule"):
             return await run_schedule(arguments)
@@ -2195,6 +2426,13 @@ def setup(tau: ExtensionAPI) -> None:
                 content=f'Agent "{agent_id}" is not running (status: {run.status}).'
                 " Cannot steer a non-running agent.",
             )
+        if run.condensing:
+            # Its work is done; a steer now would be answered in place of
+            # the condensed report.
+            return _tool_result(
+                content=f'Agent "{agent_id}" has finished and is condensing its'
+                " report. Cannot steer it; resume it once it has reported.",
+            )
         if run.session is None:
             run.pending_steers.append(message)
             return _tool_result(
@@ -2346,20 +2584,8 @@ def setup(tau: ExtensionAPI) -> None:
         AgentTool(
             name="agent",
             label="Agent",
-            description=(
-                "Spawn an autonomous subagent to handle a task. The subagent works"
-                " in its own context with its own tools and returns its final"
-                " report. Set run_in_background=true for long tasks; a completion"
-                " notification will arrive when it finishes. Use steer_subagent to"
-                " redirect a running agent, and resume=<id> with a new prompt to"
-                " continue a finished agent's session. Two ways to share this"
-                " conversation: inherit_context=true prepends a text digest of"
-                " the user and assistant messages only (no tool calls or"
-                " results) to a fresh agent of any type/model; subagent_type"
-                " fork runs on this conversation's actual messages, including"
-                " every tool call and result, with the same system prompt,"
-                " tools, and model, so the prompt cache is shared.\n\nAvailable"
-                f" agent types:\n{type_list}"
+            description=agent_tool_description(
+                type_list, delegate=manager.nesting.delegate
             ),
             parameters={
                 "type": "object",
@@ -2449,9 +2675,12 @@ def setup(tau: ExtensionAPI) -> None:
                 "required": ["prompt", "description"],
             },
             execute_fn=run_agent_tool,
-            prompt_snippet="Spawn an autonomous subagent for delegated tasks.",
+            prompt_snippet=(
+                AGENT_SNIPPET_DELEGATE if manager.nesting.delegate else AGENT_SNIPPET
+            ),
             render_call=render_agent_call,
             render_result=render_agent_result,
+            **report_tool_options(),  # type: ignore[arg-type]
         )
     )
     tau.register_tool(
@@ -2486,6 +2715,7 @@ def setup(tau: ExtensionAPI) -> None:
             },
             execute_fn=run_get_result_tool,
             render_call=render_get_result_call,
+            **report_tool_options(),  # type: ignore[arg-type]
         )
     )
     tau.register_tool(

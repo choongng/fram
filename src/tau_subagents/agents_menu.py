@@ -175,7 +175,13 @@ async def show_run_actions(ui: DialogUi, run: AgentRun) -> None:
         )
     elif choice == "Steer…":
         message = await ui.input("Steer agent", "New instruction for the agent")
-        if message:
+        if message and run.condensing:
+            ui.notify(
+                f"{run.agent_id} has finished and is condensing its report;"
+                " it cannot be steered.",
+                "info",
+            )
+        elif message:
             steer_run(run, message)
             ui.notify(f"Steering message sent to {run.agent_id}.", "info")
     elif choice == "Stop":
