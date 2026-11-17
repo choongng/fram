@@ -21,6 +21,8 @@ import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
+from .paths import project_tau_dir
+
 STORE_VERSION = 1
 _LOCK_RETRY_SECONDS = 0.05
 _LOCK_MAX_RETRIES = 100
@@ -81,7 +83,7 @@ class ScheduledSubagent:
 
 def resolve_store_path(cwd: Path, session_id: str) -> Path:
     """Storage path for a session-scoped schedule store."""
-    return cwd / ".tau" / "subagent-schedules" / f"{session_id}.json"
+    return project_tau_dir(cwd) / "subagent-schedules" / f"{session_id}.json"
 
 
 def _process_alive(pid: int) -> bool:

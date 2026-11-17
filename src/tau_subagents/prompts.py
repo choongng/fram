@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING
 from tau_coding import TauResourcePaths
 from tau_coding.skills import Skill, format_skill_invocation, load_skills
 
+from .paths import tau_home
+
 if TYPE_CHECKING:
     from .agents import AgentDefinition
 
@@ -88,8 +90,7 @@ def load_available_skills(cwd: Path, home: Path | None = None) -> list[Skill]:
 
 def inherited_resource_paths(cwd: Path, home: Path | None = None) -> TauResourcePaths:
     """Resource paths for a child that inherits skills natively (skills: true)."""
-    home_dir = home if home is not None else Path.home()
-    return TauResourcePaths(root=home_dir / ".tau", cwd=cwd)
+    return TauResourcePaths(root=tau_home(home), cwd=cwd)
 
 
 def resolve_skill_blocks(
