@@ -34,19 +34,231 @@ def test_a_result_that_fits_is_returned_unchanged(tmp_path: Path) -> None:
     assert list(tmp_path.iterdir()) == []
 
 
-def test_an_oversized_result_keeps_its_tail_and_names_the_full_file(tmp_path: Path) -> None:
+def test_an_oversized_result_keeps_both_ends_around_a_marker(tmp_path: Path) -> None:
     text = "\n".join(f"line {i}" for i in range(500))
     result = AgentToolResult(content=[TextContent(text=text)])
 
     buffered = buffer_tool_result(result, buffer_dir=tmp_path, limits=LIMITS)
 
-    shown = _text(buffered)
-    assert "line 499" in shown and "line 0\n" not in shown
-    assert "the last 10 of 500 lines" in shown
     [path] = list(tmp_path.iterdir())
-    assert str(path) in shown and path.read_text() == text
+    assert path.read_text() == text
+    # 40% of the 10-line window from the start, the rest from the end, the
+    # marker where the middle was, and a first line that says there is one.
+    omitted = len("\n".join(f"line {i}" for i in range(4, 494)))
+    assert _text(buffered).split("\n") == [
+        "[Output cut: 500 lines, middle omitted, see marker below.]",
+        *[f"line {i}" for i in range(4)],
+        f"[\u2026 lines 5\u2013494 omitted ({omitted:,} chars); full output: {path}. "
+        "Page it with read offset/limit or grep it.]",
+        *[f"line {i}" for i in range(494, 500)],
+    ]
     again = buffer_tool_result(result, buffer_dir=tmp_path, limits=LIMITS)
-    assert _text(again) == shown and len(list(tmp_path.iterdir())) == 1
+    assert _text(again) == _text(buffered) and len(list(tmp_path.iterdir())) == 1
+
+
+def test_both_ends_are_cut_between_lines_within_their_share_of_the_window(
+    tmp_path: Path,
+) -> None:
+    # 100-char lines: a 500-char window holds one whole line in its 200-char
+    # start (two need 201) and two in its 300-char end.
+    lines = [f"{i:03d}" + "x" * 97 for i in range(1, 41)]
+    limits = BufferLimits(inline_chars=1_000, window_chars=500, window_lines=60)
+
+    shown = _text(
+        buffer_tool_result(
+            AgentToolResult(content=[TextContent(text="\n".join(lines))]),
+            buffer_dir=tmp_path,
+            limits=limits,
+        )
+    ).split("\n")
+
+    assert shown[1:2] == lines[:1] and shown[3:] == lines[-2:]
+    assert shown[2].startswith("[\u2026 lines 2\u201338 omitted (3,736 chars); full output: ")
+
+
+def test_a_line_too_long_for_its_end_is_shown_in_part(tmp_path: Path) -> None:
+    one_line = _text(
+        buffer_tool_result(
+            AgentToolResult(content=[TextContent(text="a" * 60_000 + "z" * 40_000)]),
+            buffer_dir=tmp_path,
+            limits=LIMITS,
+        )
+    ).split("\n")
+
+    assert one_line[0] == "[Output cut: 1 line, middle omitted, see marker below.]"
+    assert one_line[1] == "a" * 200 and one_line[3] == "z" * 300
+    assert one_line[2].startswith("[\u2026 line 1 omitted in part (99,500 chars); full output: ")
+
+    # A long last line after short ones: the start is whole lines, the end a part.
+    text = "\n".join(["first", "second", "j" * 5_000])
+    shown = _text(
+        buffer_tool_result(
+            AgentToolResult(content=[TextContent(text=text)]), buffer_dir=tmp_path, limits=LIMITS
+        )
+    ).split("\n")
+    assert shown[1:3] == ["first", "second"] and shown[4] == "j" * 300
+    assert shown[3].startswith("[\u2026 line 3 omitted in part (4,700 chars); ")
+
+
+def test_the_marker_names_the_sections_the_cut_took_out(tmp_path: Path) -> None:
+    sections = ["Summary", "Crux Check", "Highlights", "Priorities", "Risks", "Next Steps"]
+    lines: list[str] = []
+    for title in sections:
+        lines += [f"## {title}", "", *[f"- {title} finding {n}" for n in range(30)], ""]
+    limits = BufferLimits(inline_chars=2_000, window_chars=1_000, window_lines=60)
+
+    shown = _text(
+        buffer_tool_result(
+            AgentToolResult(content=[TextContent(text="\n".join(lines))]),
+            buffer_dir=tmp_path,
+            limits=limits,
+            output_name="report.txt",
+        )
+    )
+
+    marker = next(line for line in shown.split("\n") if line.startswith("[\u2026"))
+    # Each name carries its line in the saved output, for a read offset.
+    saved = (tmp_path / "report.txt").read_text().split("\n")
+    assert marker.endswith(
+        "Omitted sections: Crux Check (L34), Highlights (L67), Priorities (L100), "
+        "Risks (L133), Next Steps (L166).]"
+    )
+    assert saved[33] == "## Crux Check" and saved[165] == "## Next Steps"
+    # A section whose heading is still in view is not listed.
+    assert "## Summary" in shown and "Summary (L" not in marker
+    assert "Next Steps finding 29" in shown
+
+
+def _marker(text: str, tmp_path: Path, limits: BufferLimits = LIMITS) -> str:
+    shown = _text(
+        buffer_tool_result(
+            AgentToolResult(content=[TextContent(text=text)]), buffer_dir=tmp_path, limits=limits
+        )
+    )
+    return next(line for line in shown.split("\n") if line.startswith("[\u2026"))
+
+
+def test_a_line_of_code_in_a_report_does_not_hide_its_sections(tmp_path: Path) -> None:
+    lines = ["# Report", *["intro"] * 5, "## Findings", *["- a finding"] * 200]
+    lines += ["def helper(): pass", "## Risks", *["- a risk"] * 200, "## Done"]
+
+    marker = _marker("\n".join(lines), tmp_path)
+
+    assert marker.endswith("Omitted sections: Findings (L7), Risks (L209).]")
+    # Source code with comments is still outlined by its definitions.
+    code = ["import os", *["x = 1"] * 10, "# a comment", "def helper():", *["    y = 2"] * 400]
+    assert _marker("\n".join(code), tmp_path).endswith("Omitted definitions: def helper (L13).]")
+
+
+def test_a_fence_opened_before_the_cut_still_covers_the_middle(tmp_path: Path) -> None:
+    lines = ["Run this:", "```sh", *["echo step"] * 100, "# not a heading", "```"]
+    lines += ["## After the script", *["text"] * 200]
+
+    marker = _marker("\n".join(lines), tmp_path)
+
+    assert marker.endswith("Omitted sections: After the script (L105).]")
+
+
+def test_headings_with_windows_line_endings_are_named_without_them(tmp_path: Path) -> None:
+    lines = ["intro"] * 10 + ["## Findings", *["text"] * 200, "## Risks", *["text"] * 200]
+
+    marker = _marker("\r\n".join(lines), tmp_path)
+
+    assert marker.endswith("Omitted sections: Findings (L11), Risks (L212).]")
+
+
+def test_the_rest_of_a_line_cut_in_two_is_not_read_as_a_heading(tmp_path: Path) -> None:
+    # The start share ends just before "## Not a heading", inside line 1.
+    first = "x" * 200 + "## Not a heading"
+    lines = [first, *["text"] * 100, "## Real", *["text"] * 200]
+
+    marker = _marker("\n".join(lines), tmp_path)
+
+    assert "omitted in part" in marker
+    assert marker.endswith("Omitted sections: Real (L102).]")
+
+
+def test_a_newline_at_the_end_is_not_the_end_that_is_kept(tmp_path: Path) -> None:
+    shown = _text(
+        buffer_tool_result(
+            AgentToolResult(content=[TextContent(text="x" * 49_999 + "z\n")]),
+            buffer_dir=tmp_path,
+            limits=LIMITS,
+        )
+    )
+
+    top, head, marker, tail, closing = shown.split("\n")
+    assert top == "[Output cut: 1 line, middle omitted, see marker below.]"
+    assert head == "x" * 200 and tail == "x" * 299 + "z" and closing == ""
+    assert marker.startswith("[\u2026 line 1 omitted in part (49,500 chars); ")
+    # The count is of lines, in a tail window's marker too.
+    lines = _text(
+        buffer_tool_result(
+            AgentToolResult(content=[TextContent(text="line\n" * 500)]),
+            output_window="tail",
+            buffer_dir=tmp_path,
+            limits=LIMITS,
+        )
+    )
+    assert lines.startswith("[Output cut: 500 lines, start omitted")
+    assert " of 500 lines " in lines
+
+
+def test_the_list_of_omitted_sections_is_bounded(tmp_path: Path) -> None:
+    lines: list[str] = []
+    for n in range(400):
+        lines += [f"## Section number {n}", "text"]
+    limits = BufferLimits(inline_chars=2_000, window_chars=1_000, window_lines=60)
+
+    shown = _text(
+        buffer_tool_result(
+            AgentToolResult(content=[TextContent(text="\n".join(lines))]),
+            buffer_dir=tmp_path,
+            limits=limits,
+        )
+    )
+
+    marker = next(line for line in shown.split("\n") if line.startswith("[\u2026"))
+    listed = marker.split("Omitted sections: ", 1)[1]
+    assert len(listed) <= limits.window_chars // 4
+    named = listed.count("Section number")
+    assert 0 < named < 80
+    assert listed.endswith(f", and {400 - 30 - named:,} more.]")
+    # Code in the cut is named by its definitions, numbered by its place in
+    # the output, not by a number the line happens to start with.
+    code = "\n".join(["x = 1"] * 40 + ["7\tdef hidden():", "    pass"] + ["y = 2"] * 400)
+    shown = _text(
+        buffer_tool_result(
+            AgentToolResult(content=[TextContent(text=code)]), buffer_dir=tmp_path, limits=limits
+        )
+    )
+    assert "Omitted definitions: def hidden (L41).]" in shown
+
+
+def test_a_tail_window_keeps_the_end_and_says_so_first(tmp_path: Path) -> None:
+    text = "\n".join(f"line {i}" for i in range(500))
+    result = AgentToolResult(content=[TextContent(text=text)])
+
+    shown = _text(
+        buffer_tool_result(result, output_window="tail", buffer_dir=tmp_path, limits=LIMITS)
+    )
+
+    [path] = list(tmp_path.iterdir())
+    assert shown.split("\n") == [
+        "[Output cut: 500 lines, start omitted, see marker below.]",
+        *[f"line {i}" for i in range(490, 500)],
+        f"[Output truncated: the last 10 of 500 lines (89 of {len(text):,} chars) are shown. "
+        f"Full output: {path}. Page it with read offset/limit or grep it.]",
+    ]
+
+
+def test_a_result_the_window_holds_whole_is_left_alone(tmp_path: Path) -> None:
+    # Only a window set larger than the inline limit can hold all of a result
+    # that is over it; there is then nothing to leave out.
+    limits = BufferLimits(inline_chars=100, window_chars=10_000, window_lines=60)
+    result = AgentToolResult(content=[TextContent(text="\n".join(["short line"] * 30))])
+
+    assert buffer_tool_result(result, buffer_dir=tmp_path, limits=limits) is result
 
 
 def test_read_keeps_the_head_and_long_lines_are_capped(tmp_path: Path) -> None:
@@ -57,7 +269,8 @@ def test_read_keeps_the_head_and_long_lines_are_capped(tmp_path: Path) -> None:
         limits=LIMITS,
     )
     # A read is windowed by its window's chars, not `window_lines`.
-    kept = _text(head).split("\n[Read cut")[0].split("\n")
+    top, *kept = _text(head).split("\n[Read cut")[0].split("\n")
+    assert top == "[Output cut: 500 lines, end omitted, see marker below.]"
     assert kept[0] == "row 0" and len(kept) > LIMITS.window_lines
     assert f"lines 1-{len(kept)} of the file are shown" in _text(head)
 
@@ -77,8 +290,20 @@ def test_an_unwritable_buffer_still_truncates_and_says_why(tmp_path: Path) -> No
 
     buffered = buffer_tool_result(result, buffer_dir=blocker / "sub", limits=LIMITS)
 
-    assert "could not be saved" in _text(buffered)
+    shown = _text(buffered).split("\n")
+    assert shown[0] == "[Output cut: 5,000 lines, middle omitted, see marker below.]"
+    assert shown[1:5] == ["y"] * 4 and shown[6:] == ["y"] * 6 + [""]
+    assert shown[5].startswith(
+        "[\u2026 lines 5\u20134,994 omitted (9,979 chars); "
+        "the full output could not be saved (NotADirectoryError: "
+    )
+    assert shown[5].endswith(").]")
     assert buffered.content[-1] == image
+
+    tail = buffer_tool_result(
+        result, output_window="tail", buffer_dir=blocker / "sub", limits=LIMITS
+    )
+    assert "are shown. The full output could not be saved (NotADirectoryError: " in _text(tail)
 
 
 def _python_source(classes: int) -> tuple[str, dict[str, int]]:
@@ -187,7 +412,8 @@ async def test_cut_read_marker_names_file_lines_and_next_offset(tmp_path: Path) 
         )
     )
 
-    kept = shown.split("\n[Read cut")[0]
+    top, kept = shown.split("\n[Read cut")[0].split("\n", 1)
+    assert top == "[Output cut: 1,901 lines, end omitted, see marker below.]"
     assert kept.startswith(f"100#{anchor_hash('row 100')}| row 100\n")
     assert len(kept) <= 8_000 and kept.count("\n") + 1 > 60
     last = int(kept.split("\n")[-1].split("#")[0])
@@ -294,7 +520,7 @@ async def test_cut_read_through_session_outline_carries_file_line_numbers(
     [result] = [m for m in provider.calls[1][2] if m.role == "toolResult"]
     shown = result.text
     line_101 = source.split("\n")[100]
-    assert shown.startswith(f"101#{anchor_hash(line_101)}| {line_101}\n")
+    assert shown.split("\n", 1)[1].startswith(f"101#{anchor_hash(line_101)}| {line_101}\n")
     last = int(shown.split("\n[Read cut")[0].split("\n")[-1].split("#")[0])
     assert last > 160
     assert f"lines 101-{last} of the file are shown" in shown
@@ -327,7 +553,7 @@ def test_default_inline_limit_buffers_a_26k_char_result(
     )
 
     assert (tmp_path / "bash-c1.txt").read_text() == diff
-    assert f"Full output: {tmp_path / 'bash-c1.txt'}" in shown
+    assert f"full output: {tmp_path / 'bash-c1.txt'}" in shown
     assert len(shown) < 10_000
     under = AgentToolResult(content=[TextContent(text=_diff_like(limits.inline_chars))])
     kept = buffer_tool_result(under, buffer_dir=tmp_path, limits=limits, output_name="bash-c2.txt")
@@ -362,5 +588,5 @@ async def test_inline_limit_is_configurable(
 
     monkeypatch.setenv(INLINE_TOKENS_ENV, "500")
     shown = _text(session._buffer_result(diff))
-    assert "Full output: " in shown and len(shown) < 2_000
+    assert "full output: " in shown and len(shown) < 2_000
     assert BufferLimits.for_context_window(200_000).inline_chars == 2_000

@@ -151,7 +151,9 @@ def test_an_oversized_read_is_windowed_by_size_not_line_count(tmp_path: Path) ->
         buffer_dir=tmp_path,
         limits=limits,
     )
-    shown, marker = _text(result).split("\n[Read cut: ")
+    top, shown = _text(result).split("\n", 1)
+    assert top == "[Output cut: 2,000 lines, end omitted, see marker below.]"
+    shown, marker = shown.split("\n[Read cut: ")
     # Short rows: far more than WINDOW_LINES of them fit the window's chars.
     assert shown.count("\n") + 1 > WINDOW_LINES
     assert len(shown) <= limits.window_chars
@@ -169,7 +171,7 @@ def test_an_oversized_read_is_windowed_by_size_not_line_count(tmp_path: Path) ->
         buffer_dir=tmp_path,
         limits=limits,
     )
-    shown, marker = _text(result).split("\n[Read cut: ")
+    shown, marker = _text(result).split("\n", 1)[1].split("\n[Read cut: ")
     assert shown.split("\n")[-1].startswith(tuple(f"{n}.3| " for n in range(1, 50)))
     last = int(shown.split("\n")[-1].split(".")[0])
     assert marker.startswith(f"lines 1-{last} of the file are shown")
