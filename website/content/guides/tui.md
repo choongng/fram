@@ -67,6 +67,12 @@ or `/new` before then drops it; **Up** on an empty prompt recalls it. Tau
 refuses `/resume` while a run is working or a prompt is waiting, so a prompt
 never runs in a session it was not written for.
 
+A cancelled run takes a moment to stop: Tau saves what the run produced and
+extensions get to react to its end. A prompt you send right after **Esc** waits
+in the same **waiting** row and starts as soon as that is done. Press **Esc**
+again to drop it and to stop waiting for extensions; what the run produced is
+still saved.
+
 ## The command palette and slash commands
 
 In-session commands start with `/`. Open the **command palette** with **Ctrl+K**

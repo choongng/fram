@@ -97,6 +97,15 @@ else:
 `queue_prompt` takes `prepared=True` as well, for offering the message to a
 later agent run. Keep showing `user_text` while the message waits.
 
+A cancelled run is not over when you stop reading its events. Close the event
+stream (`await events.aclose()`) and wait for that before you start the next
+run: the session stops the agent, saves the run's messages and awaits the
+`agent_settled` hooks there. A prompt submitted meanwhile should be held like a
+refused one. Starting it at once runs two turns on one session. If the user
+interrupts again while you wait, call `session.abandon_settle_hooks()` and do
+not cancel the task that is closing the stream: the hooks are stopped or
+skipped, and the save is left to finish.
+
 ## Slash commands
 
 Slash commands belong to `tau_coding`. Before treating input as a prompt:

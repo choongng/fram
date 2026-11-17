@@ -619,6 +619,8 @@ class CodingSession:
         self._persistence_unsubscribe: Callable[[], None] | None = None
         self._persisted_message_ids: set[int] = set()
         self._ended_message_ids: set[int] = set()
+        self._settle_task: asyncio.Task[AgentSettledEvent] | None = None
+        self._settle_hooks_abandoned = False
         self._pending_message_writes: dict[int, _PendingMessageWrite] = {}
         self._prompt_cache_misses = PromptCacheMissDetector()
         self._recall_source = LateRecallSource()
@@ -3888,6 +3890,7 @@ class CodingSession:
                 "CodingSession is already running; pass streaming_behavior to queue a message."
             )
 
+        self._settle_hooks_abandoned = False
         await self._flush_pending_message_writes(context=context)
         await self._commit_preview()
         await self._refresh_runtime_model_limits()
@@ -4045,7 +4048,7 @@ class CodingSession:
                 await self._reconcile_run_persistence(events, context=context)
             finally:
                 if events is not None:
-                    settled_event = await self._dispatch_agent_settled()
+                    settled_event = await self._settle_run()
         if settled_event is not None:
             yield settled_event
 
@@ -4144,6 +4147,7 @@ class CodingSession:
     async def continue_(self) -> AsyncIterator[CodingSessionEvent]:
         """Continue the agent from restored state and persist new messages."""
         context = self._diagnostic_context()
+        self._settle_hooks_abandoned = False
         await self._flush_pending_message_writes(context=context)
         await self._refresh_runtime_model_limits()
         await self._try_auto_compact(context=context, phase="auto_compact_before_continue")
@@ -4197,9 +4201,52 @@ class CodingSession:
                 await self._reconcile_run_persistence(events, context=context)
             finally:
                 if events is not None:
-                    settled_event = await self._dispatch_agent_settled()
+                    settled_event = await self._settle_run()
         if settled_event is not None:
             yield settled_event
+
+    async def _settle_run(self) -> AgentSettledEvent | None:
+        """Run the `agent_settled` hooks of a started run, unless abandoned."""
+        if self._settle_hooks_abandoned:
+            return None
+        # A task of their own, so that the hooks can be stopped without
+        # cancelling the caller, which may be saving the run's messages.
+        # Cancelling the caller still stops them, as it does any awaited task.
+        task = asyncio.create_task(self._dispatch_agent_settled(), name="tau-agent-settled")
+        self._settle_task = task
+        try:
+            try:
+                await asyncio.wait({task})
+            except asyncio.CancelledError:
+                # The caller was cancelled, not the hooks. That must stay
+                # distinct from abandoning them, or a caller cancelled after
+                # an abandon would carry on as if it had not been.
+                task.cancel()
+                await asyncio.wait({task})
+                if not task.cancelled():
+                    task.exception()
+                raise
+        finally:
+            self._settle_task = None
+        if task.cancelled():
+            if self._settle_hooks_abandoned:
+                return None
+            raise asyncio.CancelledError
+        return task.result()
+
+    def abandon_settle_hooks(self) -> None:
+        """Stop waiting for the `agent_settled` hooks of the run that is ending.
+
+        For a frontend whose user interrupts again while an interrupted run
+        finishes. Hooks that are running are cancelled and ones that have not
+        started are skipped, so a hook that never returns cannot keep the
+        session. Stopping the agent and saving the run's messages go on to the
+        end: cancelling the task that reads ``prompt`` would cut those short
+        instead, wherever they happened to be.
+        """
+        self._settle_hooks_abandoned = True
+        if self._settle_task is not None:
+            self._settle_task.cancel()
 
     async def _dispatch_agent_settled(self) -> AgentSettledEvent:
         """Dispatch and return the final session event for one started run."""

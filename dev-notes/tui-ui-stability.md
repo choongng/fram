@@ -105,7 +105,8 @@ replaced. Three fields on the app carry it:
 
 - `_active_prompt_run_id` is the run that owns the session, set in
   `_submit_prompt` before its first await and cleared by `_release_prompt_run`
-  when the run's worker finishes, or by an interrupt.
+  when the run's worker finishes. An interrupt clears it at once only if the
+  worker has not reached the session yet; see "After an interrupt" below.
 - `_held_prompts` is a queue of messages waiting for the session to take them.
 - `_queueing_prompt` is the held message being offered to the session right now.
   It is out of the queue, so nothing else can take it, and still counts as held,
@@ -201,7 +202,8 @@ What drops held prompts, and what does not:
 - Escape keeps its meaning: it interrupts the live run, whatever that run is
   doing. During a settle that cancels the rest of the settle, as it did before.
   The held prompts are dropped with the run they waited on, so none of them
-  reaches the session afterwards; they are still in prompt history.
+  reaches the session afterwards; they are still in prompt history. A prompt
+  sent after the Escape is a different matter, described below.
 - `/new` interrupts the same way and drops them too. A run cancelled when the
   app exits also takes them with it.
 - `/resume` and the session picker are refused while a run owns the session or
@@ -215,15 +217,78 @@ What drops held prompts, and what does not:
 - A prompt the session fails to queue, for example because its template does not
   expand, is dropped alone, and the error names it. The others carry on.
 
-Two things were tried or considered and left out:
+One thing was tried and left out: a second worker that waits on the first
+worker. Cancelling the waiter did not stop its prompt, because Textual's
+`Worker.wait()` reports the waiter's own cancellation as a worker error, and
+replacing the first run meant its settle and errors were never applied.
 
-- A second worker that waits on the first worker. Cancelling the waiter did not
-  stop its prompt, because Textual's `Worker.wait()` reports the waiter's own
-  cancellation as a worker error, and replacing the first run meant its settle
-  and errors were never applied.
-- A prompt submitted right after Escape. The interrupt releases the session at
-  once, but the cancelled run's worker takes a moment to unwind, so the new run
-  can overlap its teardown. This is older than held prompts and is unchanged.
+### After an interrupt
+
+Escape cancels the run's worker. Textual reports that worker as cancelled at
+once (`is_cancelled`), although it is not finished until the cancellation has
+unwound it, and the app stops tracking it. The run is not finished either.
+`CodingSession.prompt` still has its `finally` to run in that worker: it stops
+the agent, saves the messages the run produced and calls the `agent_settled`
+hooks, each of them awaited. The interrupt used to release the session
+immediately, so a prompt sent in that window started a second run beside the
+first one's cleanup: its provider request went out, and its own settle began,
+while the first run's settle hooks were still running.
+
+The interrupted run now keeps the session until its worker is done. Two more
+fields carry that:
+
+- `_session_prompt_run_id` is the run whose worker is inside `session.prompt`.
+  `_run_prompt` sets it on entry and clears it on exit. A worker cancelled
+  before that point has nothing to undo, and might never run at all, so an
+  interrupt releases such a run at once, as before.
+- `_interrupted_run_id` is the run an interrupt cancelled inside the session,
+  kept until `_run_prompt` exits.
+
+What the user sees:
+
+- Prompts held before Escape are dropped by it, as before.
+- A prompt sent after Escape, while the interrupted run finishes, is held and
+  shows as a "waiting" row. When the worker is done it starts as the next run.
+  It was written after the interrupt, so the interrupt does not apply to it.
+  Dropping it would also make Escape followed by a correction, the usual reason
+  to press Escape, lose the correction whenever the cleanup is slow.
+- A second Escape during the cleanup drops the prompts held since the first one
+  and calls `CodingSession.abandon_settle_hooks()`. Settle hooks that are
+  running are cancelled and ones that have not started are skipped, which is the
+  way out of a settle hook that never returns. Stopping the agent and saving the
+  run's messages are not interrupted. Nothing in the key handler waits for the
+  worker, so neither Escape nor quitting can hang on it.
+- Quitting cancels the worker like any other, and the prompts held behind it go
+  with the app.
+- `/compact`, `/resume` and the session picker are refused during the cleanup,
+  as they are during the rest of a run.
+
+The second Escape does not cancel the worker again. A cancellation lands on
+whatever the worker is awaiting, and after the first Escape that can be the
+write of the "Tool call interrupted by user" result to the session file. An
+earlier version of this change cancelled it there. The harness then skipped the
+lines that mark the run as over, and the session reported a running agent for
+good: every later prompt failed, and only a restart recovered. `AgentHarness`
+now resets that state however its cleanup ends, so a second cancellation from
+anywhere else, such as quitting, cannot do the same. The settle hooks run in a
+task of their own inside the session, so that they can be stopped without
+cancelling the worker.
+
+Held messages are not offered to the session during the cleanup, even though its
+agent still reports running until the session has closed it: an interrupted
+agent reads its queues no more, and `can_queue_messages` says so.
+
+`_run_prompt` also closes the session's event stream itself when it stops
+reading early. Without that, a worker cancelled while the app was applying an
+event, and not inside the session, left the session's run suspended until the
+stream was garbage collected, at which point the cleanup ran in another task
+with nothing owning the session.
+
+`/new` during the cleanup counts as a second interrupt: it gives up the settle
+hooks, as a second Escape does. It then replaces the session at once, without
+waiting for the old run's worker to finish saving. Not waiting is older than
+this change and is left alone; prompts sent afterwards are held until the old
+run's worker is done.
 
 ### The end of a run
 

@@ -4798,6 +4798,16 @@ class TauTuiApp(App[None]):
         # at once would abandon or overlap the live run, and waiting for it in
         # the key handler would stop input.
         self._active_prompt_run_id: int | None = None
+        # The run whose worker is inside `session.prompt`. Cancelling a worker
+        # there does not end the run at once: the session still stops its
+        # agent, saves what the run produced and runs settle hooks, all in
+        # that worker. A worker cancelled anywhere else has nothing to undo.
+        self._session_prompt_run_id: int | None = None
+        # The run an interrupt cancelled inside the session, and its worker,
+        # until that worker is done. The run keeps the session meanwhile, so a
+        # prompt sent after the interrupt is held and cannot start a run on a
+        # session that is still finishing the old one.
+        self._interrupted_run_id: int | None = None
         self._held_prompts: deque[_HeldPrompt] = deque()
         # The held prompt being offered to the session right now. It is out of
         # the deque so nothing else can take it, and still counts as held so
@@ -5583,6 +5593,8 @@ class TauTuiApp(App[None]):
             self.state.running
             or self._is_session_running()
             or is_worker_active
+            # An interrupted run that is still cleaning up has no worker here.
+            or self._active_prompt_run_id is not None
             or self.state.queued_message_count > 0
             or self._has_held_prompts()
         )
@@ -6597,6 +6609,8 @@ class TauTuiApp(App[None]):
         """Run one prompt and stream session events into the TUI state."""
         active_run_id = self._prompt_run_id if run_id is None else run_id
         cancelled = False
+        events: AsyncIterator[CodingSessionEvent] | None = None
+        self._session_prompt_run_id = active_run_id
         try:
             if prepared_text is None:
                 events = self.session.prompt(
@@ -6670,13 +6684,44 @@ class TauTuiApp(App[None]):
             self._sync_text_selection_state()
             self._refresh()
         finally:
-            self._clear_optimistic_user_messages(run_id=active_run_id)
-            if active_run_id == self._prompt_run_id:
-                self._prompt_worker = None
-            # Runs without events (for example an input hook that handled the
-            # prompt) release the session here too. A run cancelled without an
-            # interrupt (the app is exiting) takes the held prompts with it.
-            self._release_prompt_run(active_run_id, start_held=not cancelled)
+            try:
+                await self._close_prompt_events(events)
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            finally:
+                self._clear_optimistic_user_messages(run_id=active_run_id)
+                if active_run_id == self._prompt_run_id:
+                    self._prompt_worker = None
+                if self._session_prompt_run_id == active_run_id:
+                    self._session_prompt_run_id = None
+                interrupted = self._interrupted_run_id == active_run_id
+                if interrupted:
+                    self._interrupted_run_id = None
+                # Runs without events (for example an input hook that handled
+                # the prompt) release the session here too. A run cancelled
+                # without an interrupt (the app is exiting) takes the held
+                # prompts with it. An interrupt dropped the prompts held before
+                # it, so any held now were sent after it and start next.
+                self._release_prompt_run(active_run_id, start_held=interrupted or not cancelled)
+
+    async def _close_prompt_events(self, events: AsyncIterator[CodingSessionEvent] | None) -> None:
+        """Finish the session's side of a run whose events were not read to the end.
+
+        A run that stops reading early, because it was interrupted or because
+        its worker was cancelled while applying an event, leaves the session's
+        run suspended. The session would then finish it only when the event
+        stream is garbage collected: at some later time, in another task,
+        possibly under the next run. Closing the stream here keeps that work
+        inside the run that owns the session.
+        """
+        aclose = getattr(events, "aclose", None)
+        if aclose is None:
+            return
+        # The run is over either way; what the session could not save or tell
+        # its hooks, it has logged itself.
+        with suppress(Exception):
+            await aclose()
 
     async def _apply_streaming_transcript_event(self, event: CodingSessionEvent) -> None:
         """Apply an agent event to mounted transcript widgets without full redraws."""
@@ -6877,13 +6922,34 @@ class TauTuiApp(App[None]):
         self._prompt_run_id += 1
         # Held prompts go with the run they were waiting on, so none of them
         # reaches the session after an interrupt.
-        self._active_prompt_run_id = None
         self._drop_held_prompts()
         cancel = getattr(self.session, "cancel", None)
         if callable(cancel):
             cancel()
-        if worker is not None and not worker.is_cancelled:
-            worker.cancel()
+        run_id = self._active_prompt_run_id
+        if run_id is not None and run_id == self._session_prompt_run_id:
+            # The worker is inside the session, which finishes the run there
+            # after the cancellation: it stops the agent, saves the run's
+            # messages and runs settle hooks. Until the worker is done the run
+            # keeps the session, so that the next prompt is held instead of
+            # starting a run on top of that work.
+            if self._interrupted_run_id != run_id:
+                self._interrupted_run_id = run_id
+                if worker is not None:
+                    worker.cancel()
+            else:
+                # A second interrupt, during that work. Cancelling the worker
+                # again would cut short whichever step it had reached, and
+                # that may be the saving of the run's messages. Only settle
+                # hooks are given up: one that never returns would otherwise
+                # keep the session for good.
+                abandon = getattr(self.session, "abandon_settle_hooks", None)
+                if callable(abandon):
+                    abandon()
+        else:
+            self._active_prompt_run_id = None
+            if worker is not None and not worker.is_cancelled:
+                worker.cancel()
         self._prompt_worker = None
         self.state.running = False
         self.state.assistant_buffer = ""
