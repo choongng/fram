@@ -530,9 +530,11 @@ class ThinkingPlaceholder(Static):
 
     The app draws its hidden-thinking notice over this row. Like the answer or
     tool row that usually follows, it has one blank row above it and one line
-    of its own. `TranscriptView.mount` retires it as that row is inserted, so
-    the transcript keeps its height. The reply takes the notice's place and
-    the history above it does not move.
+    of its own; after a tool row it has no blank row, as the tool row that
+    follows will join that one (see `TranscriptView.pre_layout`). It is never
+    taller than the row that replaces it. `TranscriptView.mount` retires it as
+    that row is inserted, so the reply takes the notice's place and the
+    history above it does not move back down.
     """
 
     ALLOW_SELECT = False
@@ -546,6 +548,21 @@ class ThinkingPlaceholder(Static):
 
     def __init__(self) -> None:
         super().__init__("")
+        self._joined_to_previous = False
+
+    def set_joined_to_previous(self, joined: bool) -> None:
+        """Drop the blank row above this one while it follows a tool row.
+
+        Inline, like `TranscriptMessageWidget.set_joined_to_previous`, so the
+        layout about to run reads it.
+        """
+        if joined == self._joined_to_previous:
+            return
+        self._joined_to_previous = joined
+        if joined:
+            self.styles.margin = (0, 0, 0, 0)
+        else:
+            self.styles.clear_rule("margin")
 
 
 class SystemPromptSectionWidget(Vertical):
@@ -1133,10 +1150,19 @@ class TranscriptView(VerticalScroll):
         every layout rather than at each mount, because rows are mounted,
         removed and reordered along many paths (streaming, windowing, the
         thinking toggle), and adjacency is only certain here.
+
+        The hidden-thinking placeholder follows the same rule, since it holds
+        the place of the row after it: after a tool row it drops its blank row,
+        as the tool row that most likely replaces it will. Were it taller than
+        that row, each call in a burst would push the history up and then let
+        it fall back. It leaves the run unbroken, as it is not a row itself.
         """
         del layout
         previous_is_tool = False
         for child in self.children:
+            if isinstance(child, ThinkingPlaceholder):
+                child.set_joined_to_previous(previous_is_tool)
+                continue
             if not isinstance(child, TranscriptMessageWidget | StreamingTranscriptMessageWidget):
                 continue
             if isinstance(child, TranscriptMessageWidget) and child.item.role == "tool":
