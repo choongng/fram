@@ -5423,6 +5423,13 @@ class TauTuiApp(App[None]):
     def _has_held_prompts(self) -> bool:
         return bool(self._held_prompts) or self._queueing_prompt is not None
 
+    def _waiting_prompt_texts(self) -> tuple[str, ...]:
+        """Return the held prompts the user typed, oldest first."""
+        offered = () if self._queueing_prompt is None else (self._queueing_prompt,)
+        return tuple(
+            held.text for held in (*offered, *self._held_prompts) if held.source == "interactive"
+        )
+
     def _hold_prompt(self, held: _HeldPrompt) -> None:
         """Hold a message behind the ones already held, until it is delivered."""
         self._held_prompts.append(held)
@@ -7044,7 +7051,7 @@ class TauTuiApp(App[None]):
 
     def action_edit_queued_message(self) -> bool:
         """Move the latest queued message back into the prompt for editing."""
-        if not self.state.running:
+        if not self.state.running and not self._has_held_prompts():
             return False
         prompt = self.query_one("#prompt", PromptInput)
         if prompt.text.strip():
@@ -7065,7 +7072,18 @@ class TauTuiApp(App[None]):
         return self.action_edit_queued_message()
 
     def _pop_latest_queued_message(self) -> str | None:
-        """Pop the latest queued follow-up or steering message from the session."""
+        """Pop the latest held prompt, or queued follow-up or steering message."""
+        # Held prompts were submitted after anything the session queued.
+        for index in range(len(self._held_prompts) - 1, -1, -1):
+            held = self._held_prompts[index]
+            if held.source == "interactive":
+                del self._held_prompts[index]
+                return held.text
+        if self._queueing_prompt is not None:
+            # It is being offered to the session, which will queue it or hand
+            # it back. Taking it now as well would deliver it twice.
+            return None
+
         pop_follow_up = getattr(self.session, "pop_latest_follow_up_message", None)
         if callable(pop_follow_up):
             message = pop_follow_up()
@@ -8163,16 +8181,20 @@ class TauTuiApp(App[None]):
         compact_info = self.query_one("#compact-session-info", CompactSessionInfo)
         compact_info.update_from_session(self.session, theme=theme)
         queued_messages = self.query_one("#queued-messages", Static)
+        held_prompts = self._waiting_prompt_texts()
         queue_render_key = (
             self.state.queued_steering,
             self.state.queued_follow_up,
+            held_prompts,
             theme.name,
             theme.muted_text,
         )
         if queue_render_key != self._last_queue_render_key:
             self._last_queue_render_key = queue_render_key
-            queued_messages.display = self.state.queued_message_count > 0
-            queued_messages.update(_render_queued_messages(self.state, theme=theme))
+            queued_messages.display = self.state.queued_message_count > 0 or bool(held_prompts)
+            queued_messages.update(
+                _render_queued_messages(self.state, theme=theme, held=held_prompts)
+            )
         self._sync_activity_indicator()
         self._refresh_footer_bindings()
 
@@ -8992,8 +9014,12 @@ def _quoted_prompt(text: str, *, limit: int = 40) -> str:
     return f'"{first_line}"'
 
 
-def _render_queued_messages(state: TuiState, *, theme: TuiTheme) -> Group:
-    """Render queued prompts stacked above the prompt input."""
+def _render_queued_messages(state: TuiState, *, theme: TuiTheme, held: Sequence[str] = ()) -> Group:
+    """Render queued prompts stacked above the prompt input.
+
+    ``held`` lists prompts the app is holding until the session can take them;
+    they were submitted after everything the session has queued.
+    """
     rows: list[Text] = []
     for message in state.queued_steering:
         row = Text("↪ steering · queued: ", style=theme.muted_text)
@@ -9001,6 +9027,10 @@ def _render_queued_messages(state: TuiState, *, theme: TuiTheme) -> Group:
         rows.append(row)
     for message in state.queued_follow_up:
         row = Text("↳ follow-up · queued: ", style=theme.muted_text)
+        row.append(_queued_message_preview(message), style=theme.prompt_text)
+        rows.append(row)
+    for message in held:
+        row = Text("… waiting · queued: ", style=theme.muted_text)
         row.append(_queued_message_preview(message), style=theme.prompt_text)
         rows.append(row)
     return Group(*rows)

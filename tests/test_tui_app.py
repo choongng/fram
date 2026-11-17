@@ -4784,6 +4784,8 @@ async def test_held_prompt_refused_after_input_hooks_does_not_run_them_again(
     async with app.run_test(size=(120, 30)) as pilot:
         await _hold_prompt_refused_after_input_hooks(app, session, pilot)
         assert session.delivered == [("first", "turn")]
+        assert _waiting_rows(app) == ["… waiting · queued: second"]
+
         session.gap_gate.set()
         await _pause_until(
             pilot,
@@ -4798,6 +4800,30 @@ async def test_held_prompt_refused_after_input_hooks_does_not_run_them_again(
     if delivery == "turn":
         assert _texts(app, "user") == ["first", "second, rewritten"]
         assert _texts(app, "assistant") == ["reply to first", "reply to second, rewritten"]
+
+
+@pytest.mark.anyio
+async def test_held_prompt_refused_after_input_hooks_is_edited_as_typed() -> None:
+    """Up gives back what was typed, not what the hooks made of it."""
+    session = _GappedRunSession(
+        pause_in_agent_run=True,
+        slow_hook_texts=("second",),
+        hook_rewrites={"second": "second, rewritten"},
+    )
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _hold_prompt_refused_after_input_hooks(app, session, pilot)
+
+        await pilot.press("up")
+        assert app.query_one("#prompt", PromptInput).text == "second"
+
+        session.gap_gate.set()
+        await _pause_until(pilot, lambda: _is_idle(app, session))
+        for _ in range(5):
+            await pilot.pause()
+
+    assert session.delivered == [("first", "turn")]
 
 
 @pytest.mark.anyio
@@ -4959,6 +4985,92 @@ async def test_run_cancelled_without_an_interrupt_names_the_prompts_it_drops() -
     assert session.offered == ["first"]
     assert len(notices) == 1
     assert '"second", "third"' in notices[0]
+
+
+def _waiting_rows(app: TauTuiApp) -> list[str]:
+    """Return the rows shown above the prompt for queued and held messages."""
+    queued_messages = app.query_one("#queued-messages", Static)
+    if not queued_messages.display:
+        return []
+    return [str(row) for row in queued_messages.content.renderables]  # type: ignore[union-attr]
+
+
+@pytest.mark.anyio
+async def test_held_prompt_is_listed_and_can_be_pulled_back_for_editing() -> None:
+    session = _GappedRunSession()
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit_from_editor(app, "first")
+        await asyncio.wait_for(session.in_gap.wait(), timeout=5)
+        await _submit_from_editor(app, "second\nwith extra detail")
+        await pilot.pause()
+        assert _waiting_rows(app) == ["… waiting · queued: second"]
+
+        # Up on an empty prompt takes the held prompt back before it runs.
+        await pilot.press("up")
+        assert app.query_one("#prompt", PromptInput).text == "second\nwith extra detail"
+        await pilot.pause()
+        assert _waiting_rows(app) == []
+
+        session.gap_gate.set()
+        await _pause_until(pilot, lambda: _is_idle(app, session))
+        for _ in range(5):
+            await pilot.pause()
+
+    assert session.offered == ["first"]
+
+
+@pytest.mark.anyio
+async def test_held_prompt_being_queued_cannot_also_be_pulled_back() -> None:
+    """Up while a held prompt is offered to the session must not deliver it twice.
+
+    The offer awaits the session's `input` hooks. Until it returns, the prompt
+    belongs to it: still listed, but not available for editing.
+    """
+    session = _GappedRunSession(retries_after_gap=True, slow_hook_texts=("second",))
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit_from_editor(app, "first")
+        await asyncio.wait_for(session.in_gap.wait(), timeout=5)
+        await _submit_from_editor(app, "second")
+        session.gap_gate.set()
+        await asyncio.wait_for(session.in_hook.wait(), timeout=5)
+        await pilot.pause()
+        assert _waiting_rows(app) == ["… waiting · queued: second"]
+
+        assert app.action_edit_queued_message() is False
+        assert app.query_one("#prompt", PromptInput).text == ""
+
+        session.hook_gate.set()
+        await _pause_until(pilot, lambda: len(session.delivered) == 2 and _is_idle(app, session))
+        assert app.query_one("#prompt", PromptInput).text == ""
+
+    assert session.delivered == [("first", "turn"), ("second", "steer")]
+
+
+@pytest.mark.anyio
+async def test_extension_message_held_behind_a_prompt_is_not_listed_or_pulled_back() -> None:
+    session = _GappedRunSession()
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit_from_editor(app, "first")
+        await asyncio.wait_for(session.in_gap.wait(), timeout=5)
+        await _submit_from_editor(app, "second")
+        await app._deliver_extension_message("from extension")
+        await pilot.pause()
+        assert _waiting_rows(app) == ["… waiting · queued: second"]
+
+        assert app.action_edit_queued_message() is True
+        assert app.query_one("#prompt", PromptInput).text == "second"
+        assert app.action_edit_queued_message() is False
+
+        session.gap_gate.set()
+        await _pause_until(pilot, lambda: len(session.delivered) == 2 and _is_idle(app, session))
+
+    assert session.delivered == [("first", "turn"), ("from extension", "turn")]
 
 
 @pytest.mark.anyio
