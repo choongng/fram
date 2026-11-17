@@ -66,24 +66,49 @@ def _slugify_path(path: Path, *, max_length: int = 72) -> str:
     return "-".join(reversed(suffix_parts)) or slug[-max_length:].strip("-")
 
 
+def tau_home(home: Path | None = None) -> Path:
+    """Return the Tau home: `<home>/.tau` for an explicit `home`, else Tau's own.
+
+    Tau's own is `TAU_HOME` when that is set, as it is for Fram (`~/.fram`),
+    and `~/.tau` otherwise. An explicit `home` is the user home directory a
+    test or caller pins, so it ignores the environment, as an explicit
+    `TauPaths` does.
+    """
+    if home is not None:
+        return home / ".tau"
+    configured = os.environ.get("TAU_HOME", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return Path.home() / ".tau"
+
+
+def project_tau_dir(cwd: Path) -> Path:
+    """Return the project's Tau folder: `.tau`, or what `TAU_PROJECT_DIRNAME` names.
+
+    Fram sets `TAU_PROJECT_DIRNAME` to `.fram`. Tau releases that predate the
+    variable never set it, so `.tau` remains their folder.
+    """
+    name = os.environ.get("TAU_PROJECT_DIRNAME", "").strip() or ".tau"
+    return cwd / name
+
+
 def transcripts_root(home: Path | None = None) -> Path:
     """Return the durable transcript root under the Tau home.
 
     `TAU_SUBAGENTS_DIR` overrides the location entirely (pi's
     `PI_SUBAGENTS_TEMP_ROOT` precedent); it is also the test-isolation seam.
-    Otherwise the `.tau` name is assumed, matching `agents.py` and
-    `memory.py`; Tau does not yet expose the configured `TauPaths` to
+    Otherwise it is under the Tau home (`tau_home`), which follows `TAU_HOME`
+    as Tau itself does; Tau does not expose its configured `TauPaths` to
     extensions (see ADR 0003).
     """
     configured = os.environ.get("TAU_SUBAGENTS_DIR", "").strip()
     if configured:
         return Path(configured).expanduser()
-    home_dir = home if home is not None else Path.home()
-    return home_dir / ".tau" / "subagents"
+    return tau_home(home) / "subagents"
 
 
 def jobs_home(home: Path | None = None) -> Path:
-    """Return the job registry root: `~/.tau/jobs`, or `TAU_JOBS_DIR` if set.
+    """Return the job registry root: `<Tau home>/jobs`, or `TAU_JOBS_DIR` if set.
 
     Sibling of the transcript root rather than a directory under it, because
     a job is a command and not a transcript, and only one of the two is Tau
@@ -94,5 +119,4 @@ def jobs_home(home: Path | None = None) -> Path:
     configured = os.environ.get("TAU_JOBS_DIR", "").strip()
     if configured:
         return Path(configured).expanduser()
-    home_dir = home if home is not None else Path.home()
-    return home_dir / ".tau" / "jobs"
+    return tau_home(home) / "jobs"

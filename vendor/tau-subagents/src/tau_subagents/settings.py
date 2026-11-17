@@ -19,6 +19,8 @@ import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from .paths import project_tau_dir, tau_home
+
 JOIN_MODES = ("async", "group", "smart")
 JOBS_RETENTION_DAYS_DEFAULT = 30
 JOBS_LOG_MAX_BYTES_DEFAULT = 0
@@ -53,11 +55,10 @@ class SubagentSettings:
 
 def load_subagent_settings(cwd: Path, home: Path | None = None) -> SubagentSettings:
     """Load and merge user then project settings into a SubagentSettings."""
-    home_dir = home if home is not None else Path.home()
     merged: dict[str, object] = {}
     for path in (
-        home_dir / ".tau" / "subagents.json",
-        cwd / ".tau" / "subagents.json",
+        tau_home(home) / "subagents.json",
+        project_tau_dir(cwd) / "subagents.json",
     ):
         merged.update(_read_file(path))
     return _from_dict(merged)
