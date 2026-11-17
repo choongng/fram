@@ -137,6 +137,7 @@ def test_fram_home_defaults_to_dot_fram_unless_tau_home_is_set(
     monkeypatch.setattr(tau_coding, "__version__", tau_coding.__version__)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("TAU_NO_UPDATE_CHECK", "1")
+    monkeypatch.delenv("TAU_PROJECT_DIRNAME", raising=False)
     if tau_home is None:
         monkeypatch.delenv("TAU_HOME", raising=False)
     else:
@@ -145,6 +146,31 @@ def test_fram_home_defaults_to_dot_fram_unless_tau_home_is_set(
     adopt_fram_identity()
 
     assert os.environ["TAU_HOME"] == str(tmp_path / expected)
+
+
+@pytest.mark.parametrize(
+    ("dirname", "expected"),
+    [(None, ".fram"), ("", ".fram"), ("  ", ".fram"), (".elsewhere", ".elsewhere")],
+)
+def test_fram_project_folders_default_to_dot_fram(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dirname: str | None, expected: str
+) -> None:
+    import tau_coding
+    import tau_coding.version
+    from tau_coding.paths import TauPaths
+
+    monkeypatch.setattr(tau_coding.version, "_DISTRIBUTION_NAME", "tau-ai")
+    monkeypatch.setattr(tau_coding, "__version__", tau_coding.__version__)
+    monkeypatch.setenv("TAU_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("TAU_NO_UPDATE_CHECK", "1")
+    if dirname is None:
+        monkeypatch.delenv("TAU_PROJECT_DIRNAME", raising=False)
+    else:
+        monkeypatch.setenv("TAU_PROJECT_DIRNAME", dirname)
+
+    adopt_fram_identity()
+
+    assert TauPaths().project_tau_dir(tmp_path) == tmp_path / expected
 
 
 def _local_index(root: Path) -> Path:
@@ -191,22 +217,24 @@ def test_wheel_installs_a_working_fram_from_a_local_index(tmp_path: Path) -> Non
 
     python = tmp_path / "tools" / "fram-agent" / "bin" / "python"
     probe = (
-        "import importlib.metadata as m, fram.cli, tau_coding.version as v;"
+        "import importlib.metadata as m, pathlib, fram.cli, tau_coding.version as v;"
         "fram.cli.adopt_fram_identity();"
         "print(v.current_version());"
         "print([d.metadata['Name'] for d in m.distributions() if d.metadata['Name'] == 'tau-ai']);"
         "from tau_coding.tui.app import TauTuiApp; print(TauTuiApp.TITLE);"
-        "from tau_coding.paths import TauPaths; print(TauPaths().home)"
+        "from tau_coding.paths import TauPaths; print(TauPaths().home);"
+        "print(TauPaths().project_tau_dir(pathlib.Path('/p')))"
     )
     # Without TAU_HOME, fram's home is ~/.fram.
     probe_env = {name: value for name, value in env.items() if name != "TAU_HOME"}
     probe_env["HOME"] = str(tmp_path / "home")
     identity = subprocess.run([python, "-c", probe], capture_output=True, text=True, env=probe_env)
-    assert identity.stdout.split("\n")[:4] == [
+    assert identity.stdout.split("\n")[:5] == [
         __version__,
         "[]",
         "Fram",
         str(tmp_path / "home" / ".fram"),
+        "/p/.fram",
     ], identity.stderr
 
     # The installed fram finds the bundled tau-subagents and loads it, with its

@@ -9,7 +9,10 @@ installed as ``tau-ai`` are adjusted here, before Tau's CLI is imported:
 - The startup update check is off by default, since it compares against
   ``tau-ai`` on PyPI.
 - Fram keeps its own configuration and sessions in ``~/.fram``: ``TAU_HOME``
-  defaults there instead of ``~/.tau``. An explicit ``TAU_HOME`` still wins.
+  defaults there instead of ``~/.tau``, and project resources live in
+  ``.fram`` folders: ``TAU_PROJECT_DIRNAME`` defaults to ``.fram``. Explicit
+  values still win. Both are environment variables so that extensions and the
+  processes Fram starts, such as subagents and jobs, see them too.
 - Tau's version lookup reads the ``fram-agent`` distribution, so the TUI and the
   release-notes state see Fram's version instead of ``0+unknown``.
 - ``FRAM_NO_SUBAGENTS`` turns off the bundled tau-subagents extension, by adding
@@ -70,9 +73,11 @@ def list_only_supported_update(app: Typer) -> None:
 
 
 def adopt_fram_identity() -> None:
-    """Point Tau's home, update check and version lookup at Fram instead of tau-ai."""
+    """Point Tau's home, project folders, update check and version lookup at Fram."""
     if not os.environ.get("TAU_HOME"):
         os.environ["TAU_HOME"] = str(Path.home() / ".fram")
+    if not os.environ.get("TAU_PROJECT_DIRNAME", "").strip():
+        os.environ["TAU_PROJECT_DIRNAME"] = ".fram"
     os.environ.setdefault("TAU_NO_UPDATE_CHECK", "1")
     import tau_coding
     import tau_coding.version

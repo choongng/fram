@@ -45,7 +45,11 @@ which is not installed under `fram`. The entry point makes these adjustments:
 5. `TAU_HOME` defaults to `~/.fram`, so Fram's providers, credentials, sessions
    and settings are its own. An explicit `TAU_HOME`, even `~/.tau`, still wins.
    Commands Fram's shell tool runs inherit it, so a `tau` started from inside
-   Fram uses `~/.fram` too.
+   Fram uses `~/.fram` too. `TAU_PROJECT_DIRNAME` likewise defaults to `.fram`,
+   so project resources live in `.fram/` folders, not `.tau/`. Both are
+   environment variables rather than branding, so the bundled tau-subagents
+   extension and the processes it starts (child sessions, `tau-job`) follow them
+   as well: a Fram install never touches `~/.tau` or a project `.tau/`.
 
 Item 4 sets a private module variable, which keeps every upstream file
 unchanged. If an upstream merge renames it, the end-to-end test fails.
@@ -99,10 +103,9 @@ such entry point, is unchanged. `fram.branding` must not import Tau, because Tau
 loads it while `tau_coding` is still importing.
 
 Branding is display only. Names other tools rely on stay Tau's: the `TAU_HOME`
-variable and the other `TAU_*` variables, `.tau` project folders, `[tool.tau]`,
-OAuth originators and the extension API's `tau` object. So `fram` and `tau`
-still share project `.tau/` folders; only the global home differs (`~/.fram`,
-item 5).
+variable and the other `TAU_*` variables, `[tool.tau]`, OAuth originators and
+the extension API's `tau` object. Where Fram keeps its files is set by
+environment variables instead (item 5): `~/.fram` and `.fram/` project folders.
 
 The seam itself is a change to upstream files (unlike the rest of this note);
 `dev-notes/branding.md` describes it.
