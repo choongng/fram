@@ -13,24 +13,31 @@ from typing import Any, Literal
 
 import pytest
 
-from pi_event_helpers import assistant_done, assistant_start
+from pi_event_helpers import assistant_done, assistant_error, assistant_start
 from tau_agent import (
     AgentMessage,
     AgentTool,
     AgentToolResult,
     AssistantMessage,
+    TextContent,
     ToolCall,
     ToolResultMessage,
     UserMessage,
 )
-from tau_agent.messages import assistant_content
+from tau_agent.messages import AssistantMessageDiagnostic, assistant_content
+from tau_agent.provider_events import AssistantErrorEvent
 from tau_agent.session import JsonlSessionStorage, MessageEntry
 from tau_ai import CancellationToken
 from tau_ai.events import AssistantMessageEvent
 from tau_coding import (
     CodingSession,
     CodingSessionConfig,
+    OpenAICompatibleProviderConfig,
+    ProviderSettings,
+    TauPaths,
+    TauResourcePaths,
 )
+from tau_coding import session as coding_session_module
 from tau_coding.extensions import ExtensionAPI, InputHookResult
 from tau_coding.extensions.loader import LoadedExtension
 from tau_coding.tui.app import PromptInput, TauTuiApp
@@ -495,3 +502,297 @@ async def test_extension_message_from_the_settle_hook_of_an_interrupted_run_foll
         assert _user_texts(session).count("from the hook") == 1
         assert session.queued_message_count == 0
         assert settled == ["done", "done"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "stage",
+    ["input", "agent_start", "turn_end", "agent_end", "agent_settled"],
+)
+async def test_extension_message_sent_at_any_stage_of_a_run_is_delivered_once(
+    tmp_path: Path, stage: str
+) -> None:
+    # `input` is before the run's first event and `agent_settled` after its
+    # last. At `agent_end` the agent still reports running but reads its queues
+    # no more.
+    provider = _ScriptedProvider([_says("First"), _says("Second"), _says("Unwanted")])
+    session = await _load_session(tmp_path, provider)
+    api = _extension_api(session)
+    sent: list[str] = []
+
+    def send(event: object, context: object) -> None:
+        del event, context
+        if not sent:
+            sent.append("from extension")
+            api.send_user_message("from extension")
+
+    api.on(stage, send)
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit(app, "first")
+        await _pause_until(pilot, lambda: len(provider.calls) == 2 and _is_idle(app))
+        await _pause(pilot)
+
+        assert [message.text for message in provider.calls[1]] == [
+            "first",
+            "First",
+            "from extension",
+        ]
+        assert len(provider.calls) == 2
+        assert session.queued_message_count == 0
+        assert _user_texts(session) == ["first", "from extension"]
+        assert await _stored_user_texts(tmp_path) == ["first", "from extension"]
+
+
+@pytest.mark.anyio
+async def test_settle_hook_message_waits_behind_a_prompt_typed_while_the_run_settles(
+    tmp_path: Path,
+) -> None:
+    provider = _ScriptedProvider([_says("First"), _says("Second"), _says("Third")])
+    session = await _load_session(tmp_path, provider)
+    api = _extension_api(session)
+    hooked = _count_input_hooks(api)
+    in_hook = asyncio.Event()
+    leave_hook = asyncio.Event()
+    settles: list[int] = []
+
+    async def settle(event: object, context: object) -> None:
+        del event, context
+        settles.append(len(provider.calls))
+        if len(settles) == 1:
+            in_hook.set()
+            await leave_hook.wait()
+            api.send_user_message("from the hook")
+
+    api.on("agent_settled", settle)
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit(app, "first")
+        await asyncio.wait_for(in_hook.wait(), timeout=5)
+        await _submit(app, "typed")
+        await _pause(pilot)
+
+        assert len(provider.calls) == 1
+        assert app._waiting_prompt_texts() == ("typed",)
+
+        leave_hook.set()
+        await _pause_until(pilot, lambda: len(provider.calls) == 3 and _is_idle(app))
+        await _pause(pilot)
+
+        # One run for both: the typed prompt starts it and the hook's message
+        # follows as that run's follow-up.
+        assert _user_texts(session) == ["first", "typed", "from the hook"]
+        assert await _stored_user_texts(tmp_path) == ["first", "typed", "from the hook"]
+        assert hooked == ["first", "typed"]
+        assert settles == [1, 3]
+        assert session.queued_message_count == 0
+
+
+_OVERFLOW_ERROR = "This model's maximum context length was exceeded."
+
+
+@pytest.mark.anyio
+async def test_prompt_and_extension_message_during_overflow_compaction_join_the_retry(
+    tmp_path: Path,
+) -> None:
+    summary = _says("Summary of the earlier work", gated=True)
+    provider = _ScriptedProvider(
+        [
+            _says("First answer"),
+            _says("Second answer"),
+            _Reply([assistant_error(message=_OVERFLOW_ERROR)]),
+            summary,
+            _says("Recovered answer"),
+            _says("Follow-up answer"),
+        ]
+    )
+    session = await _load_session(tmp_path, provider)
+    # Compaction needs earlier turns to summarize.
+    async for _ in session.prompt("Collect context.\n" + ("old context " * 12_000)):
+        pass
+    async for _ in session.prompt("Keep this recent turn."):
+        pass
+    api = _extension_api(session)
+    hooked = _count_input_hooks(api)
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit(app, "Trigger overflow.")
+        # The summary request is under way: the failed agent run is over and
+        # the retry has not started, so nothing can queue a message.
+        await asyncio.wait_for(summary.started.wait(), timeout=10)
+        assert not session.is_running
+        await _submit(app, "typed during compaction")
+        api.send_user_message("sent during compaction")
+        await _pause(pilot)
+
+        assert len(provider.calls) == 4
+        assert app._waiting_prompt_texts() == ("typed during compaction",)
+        assert session.queued_message_count == 0
+
+        summary.gate.set()  # type: ignore[union-attr]
+        await _pause_until(pilot, lambda: len(provider.calls) == 6 and _is_idle(app))
+        await _pause(pilot)
+
+        late = ["typed during compaction", "sent during compaction"]
+        assert [text for text in _user_texts(session) if text in late] == late
+        assert [text for text in await _stored_user_texts(tmp_path) if text in late] == late
+        # The typed prompt steers the retry from its first request on; the
+        # extension's message follows that answer.
+        assert [message.text for message in provider.calls[4]][-2:] == [
+            "Trigger overflow.",
+            "typed during compaction",
+        ]
+        assert [message.text for message in provider.calls[5]][-2:] == [
+            "Recovered answer",
+            "sent during compaction",
+        ]
+        assert hooked == ["Trigger overflow.", "typed during compaction"]
+        assert app._waiting_prompt_texts() == ()
+        assert session.queued_message_count == 0
+
+
+@pytest.mark.anyio
+async def test_prompt_during_route_failover_joins_the_rerouted_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    model = "moonshotai/Kimi-K3"
+    rate_limited = AssistantMessage(
+        stop_reason="error",
+        error_message="Rate limit exceeded",
+        diagnostics=[
+            AssistantMessageDiagnostic(type="provider_error", details={"status_code": 429})
+        ],
+    )
+    failing = _ScriptedProvider([_Reply([AssistantErrorEvent(reason="error", error=rate_limited)])])
+    rerouted = _ScriptedProvider([_says("Rerouted answer")])
+
+    def create_provider(
+        provider_config: object, *, inference_provider: str | None = None, **options: object
+    ) -> _ScriptedProvider:
+        del provider_config, options
+        return rerouted if inference_provider is None else failing
+
+    monkeypatch.setattr(coding_session_module, "create_model_provider", create_provider)
+    provider_config = OpenAICompatibleProviderConfig(
+        name="huggingface", models=(model,), default_model=model
+    )
+    session = await CodingSession.load(
+        CodingSessionConfig(
+            provider=_ScriptedProvider([]),  # type: ignore[arg-type]
+            model=model,
+            system="You are Tau.",
+            storage=JsonlSessionStorage(tmp_path / "session.jsonl"),
+            cwd=tmp_path,
+            provider_name="huggingface",
+            inference_provider="deepinfra",
+            inference_provider_mode="automatic",
+            provider_settings=ProviderSettings(providers=(provider_config,)),
+            runtime_provider_config=provider_config,
+            resource_paths=TauResourcePaths(
+                root=tmp_path / ".tau",
+                paths=TauPaths(home=tmp_path / ".tau", agents_home=tmp_path / ".agents"),
+            ),
+        )
+    )
+    api = _extension_api(session)
+    hooked = _count_input_hooks(api)
+    # The failed run is over when the retry is announced, and the rerouted one
+    # starts only after the handlers of that announcement return.
+    rerouting = _BlockingHook()
+    api.on("auto_retry_start", rerouting)
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit(app, "first")
+        await asyncio.wait_for(rerouting.entered.wait(), timeout=5)
+        assert not session.is_running
+        await _submit(app, "typed during failover")
+        await _pause(pilot)
+
+        assert rerouted.calls == []
+        assert app._waiting_prompt_texts() == ("typed during failover",)
+
+        rerouting.release.set()
+        await _pause_until(pilot, lambda: len(rerouted.calls) == 1 and _is_idle(app))
+        await _pause(pilot)
+
+        assert [message.text for message in rerouted.calls[0]].count("typed during failover") == 1
+        assert _user_texts(session) == ["first", "typed during failover"]
+        assert await _stored_user_texts(tmp_path) == ["first", "typed during failover"]
+        assert hooked == ["first", "typed during failover"]
+        assert app._waiting_prompt_texts() == ()
+        assert session.queued_message_count == 0
+
+
+def _fetch_tool(text: str) -> AgentTool:
+    async def fetch(
+        tool_call_id: object,
+        arguments: object,
+        signal: object = None,
+        on_update: object = None,
+    ) -> AgentToolResult:
+        del tool_call_id, arguments, signal, on_update
+        return AgentToolResult(content=[TextContent(text=text)])
+
+    return AgentTool(
+        name="fetch",
+        label="Fetch",
+        description="Return a large document.",
+        parameters={"type": "object"},
+        execute_fn=fetch,
+    )
+
+
+@pytest.mark.anyio
+async def test_prompt_during_compaction_between_turns_is_queued_with_the_run(
+    tmp_path: Path,
+) -> None:
+    # Not a gap: the agent compacts between two of its own turns and reads its
+    # queues again afterwards, so the session takes the prompt directly.
+    summary = _says("Mid-run summary", gated=True)
+    fetching = AssistantMessage(
+        content=assistant_content("Fetching.", [ToolCall(id="call-1", name="fetch", arguments={})]),
+        stop_reason="toolUse",
+    )
+    provider = _ScriptedProvider(
+        [
+            _says("First answer"),
+            _Reply([assistant_start(model="fake"), assistant_done(message=fetching)]),
+            summary,
+            _says("Done"),
+        ]
+    )
+    session = await _load_session(
+        tmp_path,
+        provider,
+        tools=[_fetch_tool("fetched " * 6_000)],
+        auto_compact_token_threshold=37_000,
+    )
+    async for _ in session.prompt("Explain.\n" + ("old context " * 12_000)):
+        pass
+    api = _extension_api(session)
+    hooked = _count_input_hooks(api)
+    app = TauTuiApp(session)
+
+    async with app.run_test(size=(120, 30)) as pilot:
+        await _submit(app, "Fetch it.")
+        await asyncio.wait_for(summary.started.wait(), timeout=10)
+        assert session.is_running
+        await _submit(app, "typed during compaction")
+        await _pause(pilot)
+
+        assert app._waiting_prompt_texts() == ()
+        assert session.queued_steering_messages == ("typed during compaction",)
+
+        summary.gate.set()  # type: ignore[union-attr]
+        await _pause_until(pilot, lambda: len(provider.calls) == 4 and _is_idle(app))
+        await _pause(pilot)
+
+        assert [message.text for message in provider.calls[3]].count("typed during compaction") == 1
+        assert _user_texts(session).count("typed during compaction") == 1
+        assert (await _stored_user_texts(tmp_path)).count("typed during compaction") == 1
+        assert hooked == ["Fetch it.", "typed during compaction"]
+        assert session.queued_message_count == 0
