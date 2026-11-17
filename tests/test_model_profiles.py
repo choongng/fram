@@ -33,6 +33,7 @@ from tau_ai.model_profile import (
     AveragedValue,
     ModelProfile,
     ProfileKey,
+    PromptCacheCounts,
     averaged,
     samples_from_response,
 )
@@ -44,6 +45,7 @@ from tau_coding.model_profiles import (
     MIN_TRUSTED_RATIO_WEIGHT,
     ModelProfileStore,
     context_chars_per_token,
+    format_profile,
     read_model_profiles,
 )
 from tau_coding.paths import TauPaths
@@ -160,6 +162,39 @@ def test_cached_prompt_tokens_are_not_counted_as_prefill() -> None:
     assert partly_samples.prefill_tokens_per_second is not None
     assert partly_samples.prefill_tokens_per_second.tokens == 1200
     assert partly_samples.prefill_tokens_per_second.value == pytest.approx(1200.0)
+
+
+def test_a_profile_counts_how_much_of_each_prompt_was_cached() -> None:
+    """A request whose prompt prefix changed reads the whole prompt again, which
+    the speed averages hide. The counts make it visible as a cold request."""
+    profile = ModelProfile(key=KEY)
+    for usage in (
+        Usage(input=4000, output=100),  # a session's first request
+        Usage(input=60, cache_read=4000, output=100),
+        Usage(input=4100, cache_read=12, output=100),  # the prefix changed past BOS
+        Usage(input=50, cache_read=20, output=100),  # too small to call cold
+    ):
+        profile = profile.with_message(_response(text="x" * 400, usage=usage), 1)
+    assert profile.prompt_cache == PromptCacheCounts(
+        requests=4, cached_tokens=4032, uncached_tokens=8210, cold_requests=2
+    )
+    assert ModelProfile.from_json(profile.to_json()) == profile
+    assert "33% of 12242 prompt tokens cached (n=4, 2 cold)" in format_profile(profile)
+
+
+def test_a_server_that_reports_no_cache_reads_is_not_shown_as_missing() -> None:
+    profile = ModelProfile(key=KEY)
+    for _ in range(3):
+        profile = profile.with_message(
+            _response(text="x" * 400, usage=Usage(input=4000, output=100)), 1
+        )
+    assert "prompt cache: no cache reads reported (n=3)" in format_profile(profile)
+
+
+def test_a_stored_profile_from_before_the_cache_counts_loads_with_none() -> None:
+    stored = ModelProfile(key=KEY).to_json()
+    del stored["prompt_cache"]
+    assert ModelProfile.from_json(stored).prompt_cache == PromptCacheCounts()
 
 
 def test_a_response_without_reported_usage_is_skipped(tmp_path: Path) -> None:
@@ -479,6 +514,8 @@ def test_the_probe_warm_starts_a_profile(tmp_path: Path) -> None:
     assert profile.max_output_tokens == 8_192
     assert profile.largest_output_tokens == 300
     assert profile.updated_at_ms > 0
+    # The probe's prompts miss the cache on purpose; a session's counts skip them.
+    assert profile.prompt_cache == PromptCacheCounts()
 
 
 def test_the_probe_records_whether_max_tokens_is_honoured(tmp_path: Path) -> None:
@@ -518,6 +555,7 @@ def test_profile_show_prints_json_another_program_can_read(
         "decode_tokens_per_second",
         "prefill_tokens_per_second",
         "chars_per_token",
+        "prompt_cache",
         "limits",
         "request_parameters",
         "updated_at_ms",
@@ -538,6 +576,12 @@ def test_profile_show_prints_json_another_program_can_read(
         "largest_output_tokens",
     }
     assert profile["request_parameters"] == {"max_tokens_honoured": None}
+    assert profile["prompt_cache"] == {
+        "requests": 1,
+        "cached_tokens": 0,
+        "uncached_tokens": 2000,
+        "cold_requests": 1,
+    }
     assert ModelProfile.from_json(profile) == store.load()[KEY]
 
     text = CliRunner().invoke(app, ["profile", "show"])

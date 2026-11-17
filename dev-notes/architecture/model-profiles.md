@@ -36,6 +36,19 @@ abort, or carries a `usage_estimated` diagnostic (for a stream Tau cuts itself).
 A response with both thinking and visible output, from a server that doesn't
 report reasoning tokens, can't be split, so it gives only the combined ratio.
 
+The profile also counts the prompt cache: the tokens each request read from the
+server's cache (`cache_read`), the tokens it read anew (`input + cache_write`),
+the requests, and the cold requests, which read at least 128 tokens anew and
+fewer than 128 from the cache. The threshold is not zero because a server that
+matches a changed prompt still reuses the few tokens before the change, such as
+llama.cpp's BOS and role header. These are plain sums, not averages, so the
+share cached over any stretch is the difference of two readings. A session's
+first request is cold. Another cold request means the start of the prompt
+changed, or the server evicted it, which a session otherwise shows only as slow
+turns. `tau probe` leaves the counts as they were, because its prompts are built
+to miss the cache. Servers that report no cache reads show as "no cache reads
+reported", not as 0% cached.
+
 ## The moving average
 
 Each value keeps its sample count and `weight`, the tokens of evidence behind

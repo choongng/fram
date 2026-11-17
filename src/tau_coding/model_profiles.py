@@ -14,7 +14,13 @@ from pathlib import Path
 from typing import Any, TypeGuard
 
 from tau_agent.messages import AssistantMessage, current_timestamp_ms
-from tau_ai.model_profile import DECODE_BUCKETS, AveragedValue, ModelProfile, ProfileKey
+from tau_ai.model_profile import (
+    DECODE_BUCKETS,
+    AveragedValue,
+    ModelProfile,
+    ProfileKey,
+    PromptCacheCounts,
+)
 from tau_coding.catalog_loader import _atomic_write_text
 from tau_coding.context_window import CHARS_PER_TOKEN
 from tau_coding.paths import TauPaths
@@ -123,6 +129,19 @@ def _stat(value: AveragedValue | None, unit: str) -> str:
     return f"{value.value:.1f}{unit} (n={value.samples})"
 
 
+def _cache(counts: PromptCacheCounts) -> str:
+    total = counts.cached_tokens + counts.uncached_tokens
+    if total == 0:
+        return "-"
+    if counts.cached_tokens == 0:
+        # Many servers report no cache reads at all; 0% would read as a miss.
+        return f"no cache reads reported (n={counts.requests})"
+    return (
+        f"{counts.cached_tokens * 100 / total:.0f}% of {total} prompt tokens cached "
+        f"(n={counts.requests}, {counts.cold_requests} cold)"
+    )
+
+
 def format_profile(profile: ModelProfile) -> str:
     """A few human-readable lines for one profile."""
     key = profile.key
@@ -136,6 +155,7 @@ def format_profile(profile: ModelProfile) -> str:
             f"{key.provider}/{key.model} @ {key.endpoint or '(no endpoint)'}",
             f"  decode: {decode}",
             f"  prefill (uncached): {_stat(profile.prefill_tokens_per_second, ' tok/s')}",
+            f"  prompt cache: {_cache(profile.prompt_cache)}",
             "  chars/token: "
             f"thinking {_stat(profile.thinking_chars_per_token, '')}, "
             f"output {_stat(profile.output_chars_per_token, '')}, "
