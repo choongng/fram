@@ -93,6 +93,7 @@ from tau_coding.prompt_templates import PromptTemplate
 from tau_coding.provider_config import ProviderModelMetadata, provider_thinking_levels
 from tau_coding.session import (
     SESSION_NAME_SYSTEM_PROMPT,
+    QueuePromptResult,
     _ordered_tree_entries,
     _tree_branch_indents,
     is_context_overflow_error,
@@ -7945,6 +7946,175 @@ async def test_session_auto_compacts_between_turns_of_a_long_run(
     assert types.index("compaction_end") < types.index("agent_end")
     # The harness kept every message of the run, after the compaction too.
     assert session.messages[-1].text == "Done"
+
+
+@pytest.mark.anyio
+async def test_queue_prompt_queues_only_while_the_agent_is_running(tmp_path: Path) -> None:
+    storage = JsonlSessionStorage(tmp_path / "session.jsonl")
+    provider = WaitingProvider()
+    session = await CodingSession.load(_config(tmp_path, provider, storage))
+
+    # Idle: the message is refused, and no turn starts for it.
+    assert await session.queue_prompt("Too early", streaming_behavior="steer") == QueuePromptResult(
+        "refused"
+    )
+    assert provider.calls == []
+    assert session.messages == ()
+
+    task = asyncio.create_task(_collect_session_events(session.prompt("Hello")))
+    await provider.started.wait()
+    assert await session.queue_prompt("Steer", streaming_behavior="steer") == QueuePromptResult(
+        "queued"
+    )
+    assert await session.queue_prompt(
+        "Follow up", streaming_behavior="follow_up"
+    ) == QueuePromptResult("queued")
+    assert session.queue_update_event() == QueueUpdateEvent(
+        steering=("Steer",), follow_up=("Follow up",)
+    )
+    provider.release.set()
+    await task
+
+    assert await session.queue_prompt(
+        "Too late", streaming_behavior="follow_up"
+    ) == QueuePromptResult("refused")
+    texts = [message.text for message in session.messages if isinstance(message, UserMessage)]
+    assert texts == ["Hello", "Steer", "Follow up"]
+
+
+@pytest.mark.anyio
+async def test_queue_prompt_refuses_when_the_agent_stops_during_input_hooks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The agent can stop while hooks are awaited; that must not start a turn."""
+    storage = JsonlSessionStorage(tmp_path / "session.jsonl")
+    provider = WaitingProvider()
+    session = await CodingSession.load(_config(tmp_path, provider, storage))
+    in_hook = asyncio.Event()
+    leave_hook = asyncio.Event()
+    run_input_hooks = session.extension_runtime.run_input_hooks
+
+    async def slow_input_hooks(text: str, **kwargs: object) -> InputHookOutcome:
+        if text == "Late steer":
+            in_hook.set()
+            await leave_hook.wait()
+        return await run_input_hooks(text, **kwargs)
+
+    monkeypatch.setattr(session.extension_runtime, "run_input_hooks", slow_input_hooks)
+
+    task = asyncio.create_task(_collect_session_events(session.prompt("Hello")))
+    await provider.started.wait()
+    queueing = asyncio.create_task(session.queue_prompt("Late steer", streaming_behavior="steer"))
+    await in_hook.wait()
+    provider.release.set()
+    await task
+    calls_after_run = len(provider.calls)
+    leave_hook.set()
+
+    assert await queueing == QueuePromptResult("refused", prepared_text="Late steer")
+    assert len(provider.calls) == calls_after_run
+    assert session.queue_update_event() == QueueUpdateEvent()
+    texts = [message.text for message in session.messages if isinstance(message, UserMessage)]
+    assert texts == ["Hello"]
+
+
+@pytest.mark.anyio
+async def test_queue_prompt_refusal_after_input_hooks_starts_a_turn_without_rerunning_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused message's hooks and expansion ran; its turn must not repeat them.
+
+    A hook can log, count, or rewrite, and expanding an expanded prompt can
+    expand it further, so a second pass would act twice on one message.
+    """
+    storage = JsonlSessionStorage(tmp_path / "session.jsonl")
+    provider = WaitingProvider()
+    session = await CodingSession.load(_config(tmp_path, provider, storage))
+    in_hook = asyncio.Event()
+    leave_hook = asyncio.Event()
+    hooked: list[tuple[str, object]] = []
+    expanded: list[str] = []
+
+    async def rewriting_input_hooks(text: str, **kwargs: object) -> InputHookOutcome:
+        hooked.append((text, kwargs.get("source")))
+        if text == "Late steer":
+            in_hook.set()
+            await leave_hook.wait()
+        return InputHookOutcome(handled=False, text=f"hooked({text})")
+
+    def nesting_expansion(text: str) -> str:
+        expanded.append(text)
+        return f"expanded({text})"
+
+    monkeypatch.setattr(session.extension_runtime, "run_input_hooks", rewriting_input_hooks)
+    monkeypatch.setattr(session, "expand_prompt_text", nesting_expansion)
+
+    task = asyncio.create_task(_collect_session_events(session.prompt("Hello")))
+    await provider.started.wait()
+    queueing = asyncio.create_task(
+        session.queue_prompt("Late steer", streaming_behavior="steer", source="extension")
+    )
+    await in_hook.wait()
+    provider.release.set()
+    await task
+    leave_hook.set()
+    refused = await queueing
+    assert refused == QueuePromptResult("refused", prepared_text="expanded(hooked(Late steer))")
+    assert refused.prepared_text is not None
+
+    # The agent is still stopped, so offering the prepared text again is
+    # refused again, and the text comes back as it went in.
+    assert (
+        await session.queue_prompt(
+            refused.prepared_text, streaming_behavior="steer", source="extension", prepared=True
+        )
+        == refused
+    )
+    events = await _collect_session_events(
+        session.prompt(refused.prepared_text, source="extension", prepared=True)
+    )
+
+    assert hooked == [("Hello", "interactive"), ("Late steer", "extension")]
+    assert expanded == ["hooked(Hello)", "hooked(Late steer)"]
+    assert isinstance(events[-1], AgentSettledEvent)
+    reloaded = await JsonlSessionStorage(tmp_path / "session.jsonl").read_all()
+    user_entries = [
+        entry
+        for entry in reloaded
+        if isinstance(entry, MessageEntry) and isinstance(entry.message, UserMessage)
+    ]
+    assert [(entry.message.text, entry.delivery, entry.source) for entry in user_entries] == [
+        ("expanded(hooked(Hello))", "prompt", "interactive"),
+        ("expanded(hooked(Late steer))", "prompt", "extension"),
+    ]
+
+
+@pytest.mark.anyio
+async def test_queue_prompt_queues_prepared_text_without_running_input_hooks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A message refused once can be queued with a later agent run as it is."""
+    storage = JsonlSessionStorage(tmp_path / "session.jsonl")
+    provider = WaitingProvider()
+    session = await CodingSession.load(_config(tmp_path, provider, storage))
+    hooked: list[str] = []
+    run_input_hooks = session.extension_runtime.run_input_hooks
+
+    async def recording_input_hooks(text: str, **kwargs: object) -> InputHookOutcome:
+        hooked.append(text)
+        return await run_input_hooks(text, **kwargs)
+
+    monkeypatch.setattr(session.extension_runtime, "run_input_hooks", recording_input_hooks)
+
+    task = asyncio.create_task(_collect_session_events(session.prompt("Hello")))
+    await provider.started.wait()
+    result = await session.queue_prompt("Prepared steer", streaming_behavior="steer", prepared=True)
+    assert result == QueuePromptResult("queued")
+    assert session.queue_update_event().steering == ("Prepared steer",)
+    provider.release.set()
+    await task
+
+    assert hooked == ["Hello"]
 
 
 @pytest.mark.anyio

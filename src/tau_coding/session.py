@@ -322,6 +322,23 @@ class ModelSelectionResult:
 
 
 @dataclass(frozen=True, slots=True)
+class QueuePromptResult:
+    """What ``CodingSession.queue_prompt`` did with a message.
+
+    ``queued``: the running agent has it. ``handled``: an `input` hook
+    consumed it, so nothing is left to deliver. ``refused``: the agent is not
+    running and the caller still owns the message.
+
+    ``prepared_text`` is set on a refusal that came after the `input` hooks and
+    prompt expansion ran. Deliver that text with ``prepared=True`` rather than
+    the original, so that neither runs a second time on the same message.
+    """
+
+    status: Literal["queued", "handled", "refused"]
+    prepared_text: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class TerminalCommandResult:
     """Result of an input-bar terminal command."""
 
@@ -3827,6 +3844,7 @@ class CodingSession:
         source: Literal["interactive", "extension"] = "interactive",
         custom_type: str | None = None,
         details: dict[str, JSONValue] | None = None,
+        prepared: bool = False,
     ) -> AsyncIterator[CodingSessionEvent]:
         """Append a user prompt, run the agent, and persist new messages.
 
@@ -3835,44 +3853,25 @@ class CodingSession:
         message that starts an idle session's turn). ``source`` marks who
         initiated the turn for the `input` hook (``"extension"`` when an
         extension started it, ``"interactive"`` otherwise).
+
+        ``prepared=True`` says ``content`` is the ``prepared_text`` of a
+        refused ``queue_prompt``: the `input` hooks and prompt expansion have
+        already run on it, so both are skipped. Everything else is the same.
         """
         context = self._diagnostic_context()
-        input_outcome = await self._extension_runtime.run_input_hooks(
-            content, source=source, streaming_behavior=streaming_behavior
-        )
-        if input_outcome.handled:
-            if input_outcome.message:
-                self._extension_runtime.ui.notify(input_outcome.message)
-            return
-        content = input_outcome.text
-        try:
-            expanded_content = self.expand_prompt_text(content)
-        except ResourceError:
-            raise
-        except Exception as exc:
-            self._last_diagnostic_log_path = self._diagnostic_logger.log_exception(
-                context=context,
-                phase="expand_prompt",
-                exc=exc,
+        expanded_content: str | None = content
+        if not prepared:
+            expanded_content = await self._prepare_prompt_input(
+                content, source=source, streaming_behavior=streaming_behavior, context=context
             )
-            raise
+        if expanded_content is None:
+            return
 
         if self._harness.is_running:
-            if streaming_behavior == "steer":
-                steer_message = UserMessage(content=expanded_content)
-                self._record_message_origin(steer_message, delivery="steer", source=source)
-                self._harness.steer_message(steer_message)
-                session_event_0 = self.queue_update_event()
-                await self._extension_runtime.emit_event(session_event_0)
-                yield session_event_0
-                return
-            if streaming_behavior == "follow_up":
-                follow_up_message = UserMessage(content=expanded_content)
-                self._record_message_origin(follow_up_message, delivery="follow_up", source=source)
-                self._harness.follow_up_message(follow_up_message)
-                session_event_0 = self.queue_update_event()
-                await self._extension_runtime.emit_event(session_event_0)
-                yield session_event_0
+            if streaming_behavior is not None:
+                yield await self._queue_for_running_agent(
+                    expanded_content, streaming_behavior=streaming_behavior, source=source
+                )
                 return
             raise RuntimeError(
                 "CodingSession is already running; pass streaming_behavior to queue a message."
@@ -4038,6 +4037,95 @@ class CodingSession:
                     settled_event = await self._dispatch_agent_settled()
         if settled_event is not None:
             yield settled_event
+
+    async def queue_prompt(
+        self,
+        content: str,
+        *,
+        streaming_behavior: StreamingBehavior,
+        source: Literal["interactive", "extension"] = "interactive",
+        prepared: bool = False,
+    ) -> QueuePromptResult:
+        """Queue a message for the running agent; never start a turn.
+
+        The result is ``queued``, ``handled`` (an `input` hook consumed the
+        message) or ``refused`` (the agent is not running, so the caller still
+        owns the message). The agent can stop while the hooks are awaited. A
+        refusal then carries ``prepared_text``, the text after the hooks and
+        prompt expansion. Pass that with ``prepared=True`` to this method or to
+        ``prompt``; sending the original again would run the hooks twice on one
+        message.
+
+        ``prompt`` with a ``streaming_behavior`` queues too, but when the agent
+        is not running it runs a whole turn instead. A frontend that calls it
+        from an input handler cannot rule that out beforehand, because of the
+        same wait on the hooks.
+        """
+        if not self._harness.is_running:
+            return QueuePromptResult("refused", prepared_text=content if prepared else None)
+        prepared_text = content
+        if not prepared:
+            hooked_text = await self._prepare_prompt_input(
+                content,
+                source=source,
+                streaming_behavior=streaming_behavior,
+                context=self._diagnostic_context(),
+            )
+            if hooked_text is None:
+                return QueuePromptResult("handled")
+            if not self._harness.is_running:
+                return QueuePromptResult("refused", prepared_text=hooked_text)
+            prepared_text = hooked_text
+        await self._queue_for_running_agent(
+            prepared_text, streaming_behavior=streaming_behavior, source=source
+        )
+        return QueuePromptResult("queued")
+
+    async def _prepare_prompt_input(
+        self,
+        content: str,
+        *,
+        source: Literal["interactive", "extension"],
+        streaming_behavior: StreamingBehavior | None,
+        context: AgentCallDiagnosticContext,
+    ) -> str | None:
+        """Run `input` hooks and expand the text; None when a hook handled it."""
+        input_outcome = await self._extension_runtime.run_input_hooks(
+            content, source=source, streaming_behavior=streaming_behavior
+        )
+        if input_outcome.handled:
+            if input_outcome.message:
+                self._extension_runtime.ui.notify(input_outcome.message)
+            return None
+        try:
+            return self.expand_prompt_text(input_outcome.text)
+        except ResourceError:
+            raise
+        except Exception as exc:
+            self._last_diagnostic_log_path = self._diagnostic_logger.log_exception(
+                context=context,
+                phase="expand_prompt",
+                exc=exc,
+            )
+            raise
+
+    async def _queue_for_running_agent(
+        self,
+        expanded_content: str,
+        *,
+        streaming_behavior: StreamingBehavior,
+        source: Literal["interactive", "extension"],
+    ) -> QueueUpdateEvent:
+        """Queue an expanded message with the running agent and announce the queue."""
+        message = UserMessage(content=expanded_content)
+        self._record_message_origin(message, delivery=streaming_behavior, source=source)
+        if streaming_behavior == "steer":
+            self._harness.steer_message(message)
+        else:
+            self._harness.follow_up_message(message)
+        event = self.queue_update_event()
+        await self._extension_runtime.emit_event(event)
+        return event
 
     async def continue_(self) -> AsyncIterator[CodingSessionEvent]:
         """Continue the agent from restored state and persist new messages."""
