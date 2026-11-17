@@ -81,6 +81,149 @@ leaves at least `COMPLETION_MIN_TRANSCRIPT_LINES` rows of it in view.
   regions matters: placing the list updates its content, which triggers another
   layout pass.
 
+## Prompts sent while a run is finishing
+
+This one is about the app staying responsive rather than the layout staying
+still. The TUI shows a run as working from the moment a prompt is submitted
+until the session emits `agent_settled`. The session accepts a queued steering
+or follow-up message for a shorter span: only while its agent is running. That
+leaves gaps in which a run is live but cannot queue:
+
+- before its first event, while input hooks and pre-prompt compaction run;
+- between two agent runs of one turn, while the session compacts after a context
+  overflow or fails over to another route before it retries;
+- after the agent stops, while the session names itself and runs settle hooks.
+
+`session.prompt` called in a gap does not queue. It runs a whole new turn. The
+TUI used to call it from the Enter key handler whenever it showed a run as
+working, so a prompt sent in a gap ran its turn inside the key handler: the app
+handled no input and streamed nothing until the turn ended, and the two runs
+overlapped in the session.
+
+The rule now is that the key handler never runs a turn, and a live run is never
+replaced. Three fields on the app carry it:
+
+- `_active_prompt_run_id` is the run that owns the session, set in
+  `_submit_prompt` before its first await and cleared by `_release_prompt_run`
+  when the run's worker finishes, or by an interrupt.
+- `_held_prompts` is a queue of messages waiting for the session to take them.
+- `_queueing_prompt` is the held message being offered to the session right now.
+  It is out of the queue, so nothing else can take it, and still counts as held,
+  so later submissions line up behind it.
+
+The session side is `CodingSession.queue_prompt`. It runs the `input` hooks and
+expands the text as `prompt` does, then queues the message only if the agent is
+still running, and refuses it otherwise. It never starts a turn. `prompt` with a
+`streaming_behavior` cannot give that promise: it awaits the hooks before it
+looks at the agent, so the agent can stop in between, and then it runs a turn.
+No check the TUI makes beforehand closes that window, which is why the entry
+point lives in the session.
+
+`queue_prompt` returns a `QueuePromptResult` whose `status` is `queued`,
+`handled` (an `input` hook consumed the message, so nothing is left to deliver)
+or `refused`. A refusal that comes after the hooks ran also carries
+`prepared_text`, the text after the hooks and expansion. The message still has
+to be delivered, and delivering the text the user typed would send it through
+the hooks again: a hook that logs or counts would act twice on one message, and
+a template would expand twice, which is not harmless when its body starts with
+another `/` command. So `prompt` and `queue_prompt` both take `prepared=True`,
+which says the text is a `prepared_text` and skips the hooks and the expansion.
+Everything after that point is the ordinary code, including the `source` written
+on the message's origin record.
+
+A flag on `prompt` was chosen over a second method because the turn that follows
+is the same in every respect; a second entry point would have to share all of
+`prompt` but its first step. The text travels as a plain string, with the flag
+next to it, so the held entry in the TUI can keep both the typed and the
+prepared text.
+
+On Enter, `_submit_prompt_from_editor` does one of two things:
+
+1. Nothing owns the session, nothing is held, and the agent is not running:
+   start a run and return.
+2. Otherwise: append to `_held_prompts` and call `_queue_held_prompts`.
+
+`_queue_held_prompts` offers held prompts to the session, oldest first, for as
+long as the agent is running. If it is not, the call returns at once and the
+prompt stays held. If it is, the handler awaits `queue_prompt`, which means it
+awaits the session's `input` hooks, as queueing always has. What it can no
+longer do is run a turn: a prompt the session refuses goes back to the front of
+the queue. If the refusal carries a `prepared_text`, the entry that goes back
+holds it next to the typed text, and every later delivery of that entry, queued
+or as a run, sends the prepared text with `prepared=True`.
+
+Held prompts are delivered at the first point the session can take them:
+
+- The live run's own event loop, in `_run_prompt`, calls `_queue_held_prompts`
+  after each event. When the agent is running again, which is from the run's
+  first event and again when a retry starts, each held prompt is queued with the
+  session as the steering or follow-up message the user asked for. So a prompt
+  sent during compaction steers the retry instead of abandoning it. The agent's
+  last event is skipped: the agent still reports running until that event is
+  consumed, but it reads its queues no more, so a message queued then would be
+  stranded.
+- When the run's worker finishes with prompts still held, as it does after a
+  settle, `_release_prompt_run` schedules `_start_next_held_prompt` with
+  `call_later`. It starts the oldest held prompt as the next run, whether it was
+  sent as steering or as a follow-up. Any others stay held and are queued with
+  that run when its agent starts, as if they had been sent during it. A run that
+  emits no events, because an input hook handled its prompt, still releases the
+  session, and the next held prompt starts.
+- When the run ends while an offer is in flight, the offer comes back refused
+  after the worker is done. `_queue_held_prompts` then schedules
+  `_start_next_held_prompt` itself.
+
+Because the earlier run is never replaced, its remaining events are applied as
+usual: its settle clears `state.running`, an error it raises while settling gets
+its error row, and that row comes before the held prompt's turn.
+
+Extension messages take the same line. `_deliver_extension_message` starts a run
+only under the conditions of path 1. Otherwise it holds the message as a
+follow-up, so a message that arrives just as a run ends cannot start a run ahead
+of the prompts already waiting.
+
+Held prompts the user typed show in the queued-message list above the prompt as
+"waiting" rows, and Up on an empty prompt pulls the latest one back for editing.
+The prompt being offered stays listed but cannot be pulled back until the
+session answers; taking it then would deliver it twice. Held extension messages
+are neither listed nor editable.
+
+A held prompt with a prepared text is still listed, and edited, as it was typed.
+Up is allowed on it. Sending the edited text is a new submission and goes
+through the hooks, as it does for a message pulled back from the session's own
+queue, whose hooks have also run. The transcript row of a run started from a
+prepared text shows the typed text until the session confirms the message, and
+the prepared text from then on, the same as for any prompt a hook rewrites.
+
+What drops held prompts, and what does not:
+
+- Escape keeps its meaning: it interrupts the live run, whatever that run is
+  doing. During a settle that cancels the rest of the settle, as it did before.
+  The held prompts are dropped with the run they waited on, so none of them
+  reaches the session afterwards; they are still in prompt history.
+- `/new` interrupts the same way and drops them too. A run cancelled when the
+  app exits also takes them with it.
+- `/resume` and the session picker are refused while a run owns the session or
+  prompts are held, with the message the session already gives while its agent
+  runs. Refusing was chosen over dropping: the session refuses a resume in the
+  middle of a run without disturbing it, and the gaps of a run should behave
+  like the rest of it. A held prompt therefore never runs in a session it was
+  not written for.
+- A run cancelled any other way, for example by another exclusive worker, cannot
+  deliver its held prompts. They are dropped, and a warning names them.
+- A prompt the session fails to queue, for example because its template does not
+  expand, is dropped alone, and the error names it. The others carry on.
+
+Two things were tried or considered and left out:
+
+- A second worker that waits on the first worker. Cancelling the waiter did not
+  stop its prompt, because Textual's `Worker.wait()` reports the waiter's own
+  cancellation as a worker error, and replacing the first run meant its settle
+  and errors were never applied.
+- A prompt submitted right after Escape. The interrupt releases the session at
+  once, but the cancelled run's worker takes a moment to unwind, so the new run
+  can overlap its teardown. This is older than held prompts and is unchanged.
+
 ## Next steps
 
 - Audit the other rows that change height while a turn runs: `#queued-messages`,
@@ -96,6 +239,8 @@ the TUI chooses where to show them.
 ```bash
 uv run pytest tests/test_tui_thinking_toggle.py
 uv run pytest tests/test_tui_app.py -k "thinking or completion"
+uv run pytest tests/test_tui_app.py -k "held or settl or between_agent_runs"
+uv run pytest tests/test_coding_session.py -k queue_prompt
 ```
 
 `test_hidden_thinking_moves_nothing_on_screen` records every transcript row's

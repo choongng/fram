@@ -60,6 +60,13 @@ While the agent is working you don't have to wait:
 - Press **Up** on an empty prompt while running to pull the most recently queued
   follow-up back into the prompt for editing.
 
+You can also submit while a run is finishing up, compacting, or retrying. Tau
+holds the prompt in a **waiting** row above the input and delivers it as soon as
+it can: into the retry, or as the next turn once the run has finished. **Esc**
+or `/new` before then drops it; **Up** on an empty prompt recalls it. Tau
+refuses `/resume` while a run is working or a prompt is waiting, so a prompt
+never runs in a session it was not written for.
+
 ## The command palette and slash commands
 
 In-session commands start with `/`. Open the **command palette** with **Ctrl+K**
