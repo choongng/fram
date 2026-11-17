@@ -236,19 +236,24 @@ class AgentHarness:
                 await self._notify(event)
                 yield event
         finally:
-            if signal.is_cancelled():
-                repaired_from = len(self._messages)
-                self._append_interrupted_tool_results()
-                # The consumer is usually gone here; push the repairs to
-                # subscribers. Listener errors are suppressed; cancellation
-                # itself is not.
-                for message in self._messages[repaired_from:]:
-                    with suppress(Exception):
-                        await self._notify(MessageStartEvent(message=message))
-                        await self._notify(MessageEndEvent(message=message))
-            if self._current_signal is signal:
-                self._current_signal = None
-            self._running = False
+            try:
+                if signal.is_cancelled():
+                    repaired_from = len(self._messages)
+                    self._append_interrupted_tool_results()
+                    # The consumer is usually gone here; push the repairs to
+                    # subscribers. Listener errors are suppressed; cancellation
+                    # itself is not.
+                    for message in self._messages[repaired_from:]:
+                        with suppress(Exception):
+                            await self._notify(MessageStartEvent(message=message))
+                            await self._notify(MessageEndEvent(message=message))
+            finally:
+                # Whatever ends the repair, a cancellation of the awaited
+                # listeners included, the run is over. Left marked as running,
+                # the harness would refuse every later run.
+                if self._current_signal is signal:
+                    self._current_signal = None
+                self._running = False
 
     async def _notify(self, event: AgentEvent) -> None:
         for listener in list(self._listeners):

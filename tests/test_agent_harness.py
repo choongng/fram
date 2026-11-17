@@ -328,6 +328,39 @@ async def test_cancelled_run_notifies_listeners_of_interrupted_tool_repair() -> 
 
 
 @pytest.mark.anyio
+async def test_run_cancelled_again_during_its_repair_leaves_the_harness_usable() -> None:
+    # A listener that saves the repair can be awaited when a second
+    # cancellation arrives. The harness must not stay marked as running.
+    tool_started = asyncio.Event()
+    release = asyncio.Event()
+    harness = _blocking_run_harness(tool_started, release)
+    saving = asyncio.Event()
+
+    async def save_slowly(event: object) -> None:
+        if isinstance(event, MessageEndEvent) and isinstance(event.message, ToolResultMessage):
+            saving.set()
+            await asyncio.Event().wait()
+
+    harness.subscribe(save_slowly)
+
+    async def consume() -> None:
+        async for _event in harness.prompt("go"):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(tool_started.wait(), timeout=5)
+    harness.cancel()
+    task.cancel()
+    await asyncio.wait_for(saving.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert not harness.is_running
+    assert not harness.cancel_requested
+
+
+@pytest.mark.anyio
 async def test_listener_error_during_teardown_does_not_mask_cancellation() -> None:
     tool_started = asyncio.Event()
     release = asyncio.Event()
