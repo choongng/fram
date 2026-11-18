@@ -412,6 +412,19 @@ class OpenAICompatibleProvider:
 
         return iterator()
 
+    def takes_assistant_prefill(self, model: str) -> bool:
+        """Whether a chat-completions request for `model` may end with an
+        assistant message that the server continues as the start of its reply
+        (llama.cpp does). Off unless the `supportsAssistantPrefill` compat value
+        turns it on, since a server that does not continue it answers after it
+        or refuses it, and never for a request routed to `/v1/responses`."""
+        if self._config.compat.get("supportsAssistantPrefill") is not True:
+            return False
+        return not (
+            self._config.api == "openai-responses"
+            or (self._config.infer_api_from_model and _use_responses_api(model))
+        )
+
     def _prompt_cache_key(self, affinity_id: str | None) -> str | None:
         supports = self._config.compat.get("supportsPromptCacheKey")
         if supports is not True and not (

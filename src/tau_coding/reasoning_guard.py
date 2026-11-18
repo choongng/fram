@@ -5,9 +5,11 @@ with no reply and no tool call. `RequestGuard` sits in front of a run's
 provider and ends such a response early, as a length stop, so the session's
 output-limit follow-up asks the model to act.
 
-The guard steers with that follow-up only. It never edits the prompt or the
-thinking level, so the request prefix stays cacheable. All the thresholds here
-are heuristics.
+The guard steers with that follow-up only. It never edits the prompt prefix or
+the thinking level, so the request prefix stays cacheable. Where the provider
+continues a final assistant message, the follow-up's reply is sent already begun
+past its thinking (`CLOSED_THINKING_PREFILL`). All the thresholds here are
+heuristics.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from tau_agent.messages import (
     AgentMessage,
     AssistantMessage,
     AssistantMessageDiagnostic,
+    TextContent,
     ThinkingContent,
     Usage,
     UserMessage,
@@ -349,14 +352,31 @@ def request_reasoning_chars(
     ratio = limits.thinking_chars_per_token
     wanted = chars if chars is not None else turn_reasoning_chars(default, chars_per_token=ratio)
     budget = _capped_reasoning_chars(wanted, limits.max_output_tokens, ratio)
-    last = messages[-1] if messages else None
-    if (
-        budget is not None
-        and isinstance(last, UserMessage)
-        and last.text in (BUDGET_CUT_NUDGE, BUDGET_CUT_WRITE_NUDGE)
-    ):
+    if budget is not None and is_budget_cut_follow_up(messages):
         return max(1, int(budget * BUDGET_CUT_REPLY_SHARE))
     return budget
+
+
+def is_budget_cut_follow_up(messages: list[AgentMessage]) -> bool:
+    """Whether `messages` end with the nudge sent after a turn cut at its
+    thinking budget, so the request is that nudge's reply."""
+    last = messages[-1] if messages else None
+    return isinstance(last, UserMessage) and last.text in (
+        BUDGET_CUT_NUDGE,
+        BUDGET_CUT_WRITE_NUDGE,
+    )
+
+
+#: The reply a budget cut's follow-up is sent with already begun. A chat
+#: template renders an assistant turn that has text and no reasoning with its
+#: thinking block opened and closed empty (qwen's `<think>\n\n</think>`,
+#: gemma's `<|channel>thought\n<channel|>`), so the model's reply begins after
+#: a closed thinking block. A model asked in words to stop thinking may think
+#: each follow-up to its budget again. Turning thinking off for the request
+#: would also stop it, but those templates mark thinking in the system turn too,
+#: so the server would read the whole prompt again. A newline is the least text
+#: that keeps the turn.
+CLOSED_THINKING_PREFILL = "\n"
 
 
 class RequestGuard:
@@ -370,7 +390,12 @@ class RequestGuard:
     marks each request for a provider that cuts looping tool-call arguments
     itself (`tau_ai.loop_cuts`), so `off` leaves the whole response alone.
     `level_chars` is the budget from the session's thinking level, for a
-    format that cannot send one. `limits` gives the served model's ratios and output cap.
+    format that cannot send one. `limits` gives the served model's ratios and
+    output cap.
+
+    While the guard is on, a budget cut's follow-up is sent with its reply
+    begun, past the thinking, when `inner` takes an assistant prefill for the
+    model (see `CLOSED_THINKING_PREFILL`).
     """
 
     def __init__(
@@ -400,11 +425,23 @@ class RequestGuard:
         session_id: str | None = None,
     ) -> AsyncIterator[AssistantMessageEvent]:
         setting = self.setting()
+        sent = messages
+        takes_prefill = getattr(self.inner, "takes_assistant_prefill", None)
+        if (
+            setting.enabled
+            and is_budget_cut_follow_up(messages)
+            and callable(takes_prefill)
+            and takes_prefill(model)
+        ):
+            sent = [
+                *messages,
+                AssistantMessage(content=[TextContent(text=CLOSED_THINKING_PREFILL)]),
+            ]
         with cutting_looping_tool_arguments(setting.enabled):
             stream = self.inner.stream_response(
                 model=model,
                 system=system,
-                messages=messages,
+                messages=sent,
                 tools=tools,
                 signal=signal,
                 session_id=session_id,

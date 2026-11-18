@@ -24,6 +24,11 @@ budget. `guards.py` then queues a follow-up asking the model to act.
   in `tau_ai`, which ends a chat-completions reply whose tool-call arguments
   repeat one block of text. Only the chat-completions parser has that cut; the
   other providers have nothing for the switch to turn off.
+- **A follow-up begun past its thinking.** Where the provider continues a final
+  assistant message (`supportsAssistantPrefill`), the follow-up after a budget
+  cut is sent with its reply begun, as an assistant message of one newline
+  (`CLOSED_THINKING_PREFILL`), so its reply begins after a closed thinking
+  block. Only while the guard is on, and only for chat-completions requests.
 
 ## Why it exists
 
@@ -91,6 +96,35 @@ looks healthy, so stall detection doesn't help, and the user pays for the time.
   is kept and the follow-up asks the model to act on it. Users who need longer
   thinking can raise the level (`xhigh` and `max` have no budget), set a larger
   budget, or switch the guard off.
+- A model told in words to stop thinking does not always stop. One model, cut at
+  its budget and nudged, thought each of four follow-ups to its budget again, on
+  the same hand trace, and wrote nothing. Sending the follow-up with thinking
+  off would stop it, but the Qwen and Gemma chat templates mark thinking in the
+  system turn: with `enable_thinking=false`, Gemma's drops `<|think|>`, and
+  Qwen's tool instructions change. The whole rendered prompt changes, and the
+  server reads all of it again.
+- The prefill keeps the prefix instead. llama.cpp continues a final assistant
+  message as the reply, and these templates render a turn with text and no
+  reasoning with its thinking block already closed: Qwen's
+  `<think>\n\n</think>`, Gemma's `<|channel>thought\n<channel|>`. The newline is
+  added to that one request, after `provider_context` has built it, and is never
+  stored. Measured on llama.cpp from a warm cache:
+
+  | Model | Follow-up, prefill | Follow-up, thinking off |
+  |---|---|---|
+  | Gemma 4 26B | 4,033 cached + 38 new, a `write` call | 0 cached + 4,068 new |
+  | Qwen 3.6 35B | 4,525 cached + 62 new | 0 cached + 4,527 new |
+
+  A second Qwen model matched the Qwen row. Each prefilled follow-up wrote a
+  tool call with no reasoning, and the request after it hit the cache too.
+- `supportsAssistantPrefill` is off by default. vLLM continues a final assistant
+  message only when asked, most hosted APIs answer after it or refuse it, and
+  Anthropic refuses one while thinking is on. A template that does not close the
+  thinking block for such a turn gains nothing from it, so it is set per model.
+  The measurements are one run per model, on one llama.cpp build; a build that
+  refuses a final assistant message while thinking is on would fail the
+  follow-up. Models added by the built-in llama.cpp extension carry no compat
+  values, so they cannot turn it on.
 - Thresholds are heuristics. A loop cut rarely loses anything, since a reply the
   detector catches would usually have run to the output limit anyway, but a
   budget can cut useful long reasoning, which is why the switch exists.
@@ -103,4 +137,4 @@ it sends.
 
 ## How to test
 
-`uv run pytest tests/test_reasoning_guard_switch.py tests/test_reasoning_tokens.py tests/test_reasoning_char_budgets.py tests/test_session_output_limit.py tests/test_session_output_limit_nudge.py`
+`uv run pytest tests/test_reasoning_guard_switch.py tests/test_reasoning_tokens.py tests/test_reasoning_char_budgets.py tests/test_session_output_limit.py tests/test_session_output_limit_nudge.py tests/test_budget_cut_prefill.py`
