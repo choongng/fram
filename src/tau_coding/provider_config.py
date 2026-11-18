@@ -1778,6 +1778,10 @@ def _detected_compat(provider: ProviderConfig, model: str) -> dict[str, Any]:
         # is a detected default, overridable per provider or per model.
         "supportsCacheControl": is_anthropic_api,
         "supportsCacheControlOnTools": True,
+        # A final assistant message is continued as the reply by llama.cpp, but
+        # answered after (or refused) by most hosted APIs, so no route is
+        # assumed to take one.
+        "supportsAssistantPrefill": False,
     }
 
 

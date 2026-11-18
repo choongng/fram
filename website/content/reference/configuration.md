@@ -239,6 +239,32 @@ Unknown gateways retain their existing request shape by default. Enable only fie
 documented by the target service. Codex uses its dedicated `session-id` header
 mapping and does not read these OpenAI-compatible settings.
 
+### Assistant prefill
+
+`supportsAssistantPrefill` (default `false`) says that the server continues a
+chat-completions request's final assistant message as the start of its reply.
+llama.cpp's `llama-server` does; most hosted APIs do not. When it is set, and
+the reasoning guard is on, a follow-up after a turn cut at its thinking budget
+is sent with its reply begun past the thinking, so the reply starts after a
+closed thinking block instead of thinking again. Leaving thinking on for that
+request keeps the prompt prefix the server has cached. Requests sent to
+`/v1/responses` never get the prefill. Set it per model on a provider you
+declare in configuration, for a llama.cpp route whose chat template renders an
+empty thinking block for such a turn:
+
+```toml
+[providers.model_metadata."qwen3-30b-a3b"]
+compat = { thinkingFormat = "qwen-chat-template", supportsAssistantPrefill = true }
+```
+
+The Qwen and Gemma 4 templates render such a turn that way. For another
+template, check before turning it on: if the template leaves the thinking block
+open, the model thinks after the newline as before. If the server answers the
+follow-up with an error, for example because its build refuses a final assistant
+message while thinking is on, turn the value off. Models that the built-in
+llama.cpp extension adds take no compat values, so the prefill is not available
+for them.
+
 ### Anthropic prompt-cache compat keys
 
 Providers using the `anthropic-messages` API accept three `compat` booleans
