@@ -124,7 +124,9 @@ looks healthy, so stall detection doesn't help, and the user pays for the time.
   The measurements are one run per model, on one llama.cpp build; a build that
   refuses a final assistant message while thinking is on would fail the
   follow-up. Models added by the built-in llama.cpp extension carry no compat
-  values, so they cannot turn it on.
+  values, so they cannot turn it on. `scripts/template_prefix.py` renders a
+  short session through a server's `/apply-template` and reports whether each
+  request keeps the one before as its prefix, the prefilled follow-up included.
 - Thresholds are heuristics. A loop cut rarely loses anything, since a reply the
   detector catches would usually have run to the output limit anyway, but a
   budget can cut useful long reasoning, which is why the switch exists.
@@ -138,3 +140,8 @@ it sends.
 ## How to test
 
 `uv run pytest tests/test_reasoning_guard_switch.py tests/test_reasoning_tokens.py tests/test_reasoning_char_budgets.py tests/test_session_output_limit.py tests/test_session_output_limit_nudge.py tests/test_budget_cut_prefill.py`
+
+Against a llama.cpp server,
+`uv run python scripts/template_prefix.py --model MODEL` (add `--url` for a
+llama-server not behind llama-swap) checks that a chat template keeps the cached
+prefix across the prefilled follow-up.
